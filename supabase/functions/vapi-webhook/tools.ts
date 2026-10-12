@@ -570,7 +570,15 @@ async function reportEmergency(args: Args, ctx: Run): Promise<ToolResult> {
         ctx,
         alert,
         "emergency_alert",
-        () => emergencyEmail({ callKey, note: details, channel: ctx.channel, dashboardUrl: env.DASHBOARD_URL }),
+        () =>
+          emergencyEmail({
+            callKey,
+            note: details,
+            channel: ctx.channel,
+            dashboardUrl: env.DASHBOARD_URL,
+            verified,
+            callbackPhone: row.callbackPhone,
+          }),
       );
       writeBack(
         ctx,

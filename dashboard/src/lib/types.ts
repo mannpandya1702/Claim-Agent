@@ -82,7 +82,8 @@ export interface CallInteraction {
   duration_seconds: number | null;
   ended_reason: string | null;
   transcript: string | null;
-  recording_url: string | null;
+  /** Generated: recording_url is not null. The stored reference itself never reaches the browser. */
+  has_recording: boolean;
   cost: number | null;
   success_evaluation: string | null;
   analysis_raw: unknown;
@@ -96,16 +97,21 @@ export interface CallInteraction {
   updated_at: string;
 }
 
-/** One row of the search_calls RPC (never includes transcript or messages). */
+/** One row of the search_calls RPC (never includes transcript, messages or a full phone number). */
 export interface CallListRow {
+  /** call_interactions.id, the replica identity a Realtime DELETE carries. */
+  id: string;
   vapi_call_id: string;
   channel: string | null;
   caller_name: string | null;
-  caller_phone: string | null;
+  /** "+1 602 ... 0101", masked in SQL. */
+  caller_phone_masked: string | null;
   outcome: Outcome | null;
   sentiment: Sentiment | null;
   escalated: boolean;
   emergency: boolean;
+  /** At least one email for this call was sent. */
+  emailed: boolean;
   flags: string[];
   started_at: string | null;
   ended_at: string | null;
@@ -158,6 +164,8 @@ export interface Escalation {
   reason: EscalationReason;
   details: string | null;
   callback_phone: string | null;
+  /** Generated "+1 602 ... 0102"; the queue reads this instead of callback_phone. */
+  callback_phone_masked: string | null;
   channel: string;
   verified: boolean;
   callback_source: CallbackSource | null;
@@ -173,6 +181,9 @@ export interface Escalation {
   created_at: string;
   updated_at: string;
 }
+
+/** An escalation as the queue reads it: the full callback number stays on the call page. */
+export type EscalationListRow = Omit<Escalation, "callback_phone"> & { callback_phone?: string | null };
 
 export interface EmailRow {
   id: string;
@@ -194,6 +205,23 @@ export interface TranscriptLineRow {
   created_at: string;
 }
 
+/** outbox_events (0005_outbox.sql): one post-call delivery to an external system, keyed by call id. */
+export interface OutboxEvent {
+  id: string;
+  kind: string;
+  /** call_interactions.vapi_call_id */
+  ref_id: string;
+  destination: string;
+  delivered_at: string | null;
+  attempts: number;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Delivery attempts per outbox row before the job gives up (claim_outbox in 0005_outbox.sql). */
+export const OUTBOX_MAX_ATTEMPTS = 5;
+
 export interface JobRun {
   job: string;
   period_key: string;
@@ -213,6 +241,11 @@ export interface OpsHealth {
   emails_sent_24h: number;
   stuck_calls: number;
   analysis_missing_24h: number;
+  /** Outbox columns arrive with 0005_outbox.sql; absent before it is applied. */
+  last_outbox_run?: string | null;
+  outbox_pending?: number;
+  outbox_dead?: number;
+  outbox_delivered_24h?: number;
 }
 
 /** dashboard_metrics(p_from, p_to). Rates are 0..1 and null when nothing completed in range. */
@@ -254,11 +287,15 @@ export interface DeliveryGapRow {
   failed: number;
 }
 
-/** Tables published to supabase_realtime (0003_dashboard.sql). */
+/** Alert channels from escalation_delivery_gap, plus the Airtable call log from the outbox. */
+export type DeliveryChannel = "telegram" | "email" | "airtable";
+
+/** Tables published to supabase_realtime (0003_dashboard.sql, 0005_outbox.sql). */
 export type RealtimeTable =
   | "call_interactions"
   | "call_sessions"
   | "escalations"
   | "emails"
   | "transcript_lines"
-  | "attempts";
+  | "attempts"
+  | "outbox_events";

@@ -4,76 +4,29 @@
 // the newest prior call reaches the sentence; summaries, phone numbers and dates of birth never do.
 
 import { TIMEZONE } from "./enums.ts";
+import { sentenceFor, speakDate, verifiedThanks } from "./speak.ts";
 import type { PriorInteraction } from "./types.ts";
 
 const MAX_ROWS = 3;
 
-const ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
-const TEENS = [
-  "ten",
-  "eleven",
-  "twelve",
-  "thirteen",
-  "fourteen",
-  "fifteen",
-  "sixteen",
-  "seventeen",
-  "eighteen",
-  "nineteen",
-];
-const TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
-const ORDINAL_ONES = ["", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth"];
-const ORDINAL_TEENS = [
-  "tenth",
-  "eleventh",
-  "twelfth",
-  "thirteenth",
-  "fourteenth",
-  "fifteenth",
-  "sixteenth",
-  "seventeenth",
-  "eighteenth",
-  "nineteenth",
-];
+const nyDate = new Intl.DateTimeFormat("en-US", {
+  timeZone: TIMEZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
 
-const nyDate = new Intl.DateTimeFormat("en-US", { timeZone: TIMEZONE, year: "numeric", month: "long", day: "numeric" });
-
-function twoDigitWords(n: number): string {
-  if (n < 10) return ONES[n];
-  if (n < 20) return TEENS[n - 10];
-  return TENS[Math.floor(n / 10)] + (n % 10 ? ` ${ONES[n % 10]}` : "");
-}
-
-/** 10 -> "tenth", 21 -> "twenty first", 30 -> "thirtieth". */
-function ordinalDay(day: number): string {
-  if (day < 10) return ORDINAL_ONES[day];
-  if (day < 20) return ORDINAL_TEENS[day - 10];
-  const tens = Math.floor(day / 10);
-  if (day % 10 === 0) return `${TENS[tens].slice(0, -1)}ieth`;
-  return `${TENS[tens]} ${ORDINAL_ONES[day % 10]}`;
-}
-
-/** 2025 -> "twenty twenty five", 2005 -> "two thousand five", 1999 -> "nineteen ninety nine". */
-function yearWords(year: number): string {
-  if (year >= 2000 && year <= 2009) return year === 2000 ? "two thousand" : `two thousand ${ONES[year - 2000]}`;
-  const head = twoDigitWords(Math.floor(year / 100));
-  const tail = year % 100;
-  if (tail === 0) return `${head} hundred`;
-  return tail < 10 ? `${head} oh ${ONES[tail]}` : `${head} ${twoDigitWords(tail)}`;
-}
-
-function nyParts(d: Date): { year: number; month: string; day: number } {
+/** The calendar day in New York as YYYY-MM-DD, the input speak.ts reads dates from. */
+function nyIsoDate(d: Date): string {
   const parts = nyDate.formatToParts(d);
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
-  return { year: Number(get("year")), month: get("month"), day: Number(get("day")) };
+  return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
 /** "October tenth" in New York, plus ", twenty twenty five" when the year is not this year. */
 function spokenCallDate(at: Date, now: Date): string {
-  const call = nyParts(at);
-  const today = nyParts(now);
-  const base = `${call.month} ${ordinalDay(call.day)}`;
-  return call.year === today.year ? base : `${base}, ${yearWords(call.year)}`;
+  const today = Number(nyIsoDate(now).slice(0, 4));
+  return speakDate(nyIsoDate(at), today);
 }
 
 // Only full timestamps with an explicit zone: a zone-less string would be read in the runtime's
@@ -87,21 +40,11 @@ function startedAt(row: PriorInteraction): Date | null {
   return Number.isFinite(d.getTime()) ? d : null;
 }
 
-/** First names are spoken by TTS: ASCII only (accents folded), single spaces. */
-function spokenName(firstName: string): string {
-  return String(firstName ?? "")
-    .normalize("NFKD")
-    .replace(/[^\x20-\x7e]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 /** Verified sentence with optional welcome-back clause. rows = last completed interactions (newest first,
  *  already excluding this call). enabled=false, empty rows -> plain sentence. Date in words in America/New_York. */
 export function verifiedSentence(firstName: string, rows: PriorInteraction[], enabled: boolean, now: Date): string {
-  const name = spokenName(firstName);
-  const thanks = name ? `Thank you, ${name}, you're verified.` : "Thank you, you're verified.";
-  const plain = `${thanks} What can I help you with today?`;
+  // The plain sentence is speak.ts's own, so the two verified answers can never drift apart.
+  const plain = sentenceFor("verified", { first_name: firstName });
   if (!enabled || !Array.isArray(rows) || rows.length === 0) return plain;
 
   let newest: Date | null = null;
@@ -110,6 +53,6 @@ export function verifiedSentence(firstName: string, rows: PriorInteraction[], en
     if (at && (!newest || at.getTime() > newest.getTime())) newest = at;
   }
   if (!newest) return plain;
-  return `${thanks} Welcome back. I see you called on ${spokenCallDate(newest, now)}. ` +
+  return `${verifiedThanks(firstName)} Welcome back. I see you called on ${spokenCallDate(newest, now)}. ` +
     "Is this about the same claim as last time, or something else?";
 }

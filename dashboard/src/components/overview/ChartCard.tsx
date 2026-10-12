@@ -135,5 +135,5 @@ export function DataTable({
 
 /** Legend row item: a swatch shaped like the mark (rect for bars and slices) and a label in ink. */
 export function LegendSwatch({ color, className }: { color: string; className?: string }) {
-  return <span aria-hidden="true" className={cn("inline-block size-2.5 shrink-0 rounded-[3px]", className)} style={{ backgroundColor: color }} />;
+  return <span aria-hidden="true" className={cn("viz-mark inline-block size-2.5 shrink-0 rounded-[3px]", className)} style={{ backgroundColor: color }} />;
 }

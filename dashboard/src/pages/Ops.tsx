@@ -1,5 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
-import { CalendarClock, Eraser, FileQuestion, Hourglass, LifeBuoy, ListChecks, Mail, RotateCw, Send, Timer, type LucideIcon } from "lucide-react";
+import {
+  CalendarClock,
+  Eraser,
+  FileQuestion,
+  Hourglass,
+  Inbox,
+  LifeBuoy,
+  ListChecks,
+  Mail,
+  OctagonX,
+  RotateCw,
+  Send,
+  Table2,
+  Timer,
+  type LucideIcon,
+} from "lucide-react";
 import { useMemo, useState } from "react";
 import { useNow } from "@/components/calls/hooks";
 import { EmptyState } from "@/components/EmptyState";
@@ -10,6 +25,7 @@ import { ChannelDownBanner, ChannelRow, DeliveryGapSkeleton } from "@/components
 import {
   countHealth,
   deliveryChannels,
+  hasOutbox,
   JOB_SPECS,
   jobHealth,
   normaliseHealth,
@@ -28,13 +44,13 @@ import { useRealtimeRows } from "@/lib/realtime";
 /*
  * Automation health. ops_health and escalation_delivery_gap are computed in SQL (security
  * invoker, so RLS applies); this page only reads and labels them. job_runs is not in the
- * Realtime publication, so the page polls; escalations, emails and call_interactions changes
- * refresh the counts sooner.
+ * Realtime publication, so the page polls; escalations, emails, call_interactions and
+ * outbox_events changes refresh the counts sooner.
  */
 
 const OPS_POLL_MS = 30_000;
 const GAP_HOURS = 24;
-const JOB_ICONS: Record<JobName, LucideIcon> = { sla: Timer, reaper: Eraser, digest: CalendarClock };
+const JOB_ICONS: Record<JobName, LucideIcon> = { sla: Timer, reaper: Eraser, digest: CalendarClock, outbox: Table2 };
 
 type JobFilter = "all" | JobName;
 
@@ -46,13 +62,14 @@ export default function Ops({ now: fixedNow }: { now?: Date } = {}) {
   useRealtimeRows("escalations", null, [qk.opsHealth(), qk.deliveryGap(GAP_HOURS)]);
   useRealtimeRows("emails", null, [qk.opsHealth(), qk.deliveryGap(GAP_HOURS)]);
   useRealtimeRows("call_interactions", null, [qk.opsHealth()]);
+  useRealtimeRows("outbox_events", null, [qk.opsHealth()]);
 
   const ticking = useNow(30_000, !fixedNow);
   const now = fixedNow ?? ticking;
   const [jobFilter, setJobFilter] = useState<JobFilter>("all");
 
   const health = useMemo(() => (healthQ.data ? normaliseHealth(healthQ.data) : null), [healthQ.data]);
-  const channels = useMemo(() => deliveryChannels(gapQ.data ?? []), [gapQ.data]);
+  const channels = useMemo(() => deliveryChannels(gapQ.data ?? [], health), [gapQ.data, health]);
   const runs = useMemo(() => jobsQ.data ?? [], [jobsQ.data]);
   const visibleRuns = jobFilter === "all" ? runs : runs.filter((r) => r.job === jobFilter);
 
@@ -100,7 +117,7 @@ export default function Ops({ now: fixedNow }: { now?: Date } = {}) {
               <ErrorState compact title="Could not load automation health" error={healthQ.error} onRetry={() => void healthQ.refetch()} />
             </Card>
           ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
+            <div className="grid grid-cols-1 gap-3 min-[480px]:grid-cols-2 sm:gap-4 xl:grid-cols-4">
               {JOB_SPECS.map((spec) => {
                 const last = health?.[spec.healthKey] ?? null;
                 return (
@@ -187,14 +204,32 @@ export default function Ops({ now: fixedNow }: { now?: Date } = {}) {
                 hint="Calls in 24 hours with no summary after backfill"
                 status={health ? countHealth(health.analysis_missing_24h, "warning", "Summary never arrived") : undefined}
               />
+              {hasOutbox(health) && (
+                <>
+                  <KpiTile
+                    label="Outbox backlog"
+                    icon={Inbox}
+                    value={formatCount(health.outbox_pending)}
+                    hint="Completed calls waiting for the Airtable call log"
+                    status={countHealth(health.outbox_pending, "warning", "Delivering, retried every minute", "Nothing waiting")}
+                  />
+                  <KpiTile
+                    label="Outbox failures"
+                    icon={OctagonX}
+                    value={formatCount(health.outbox_dead)}
+                    hint="Gave up after 5 attempts; each call shows the last error"
+                    status={countHealth(health.outbox_dead, "critical", "Not in Airtable")}
+                  />
+                </>
+              )}
             </div>
           )}
         </Section>
 
         <Section
           id="ops-delivery"
-          title="Alert delivery"
-          description="Last 24 hours. Alert rows are written before the send, so owed minus delivered is what never arrived."
+          title="Delivery by channel"
+          description="Last 24 hours. Alert rows are written before the send, so owed minus delivered is what never arrived; the Airtable call log also counts calls still queued."
         >
           <Card>
             <CardContent className="pt-4 sm:pt-5">
@@ -232,7 +267,7 @@ export default function Ops({ now: fixedNow }: { now?: Date } = {}) {
                 title={runs.length === 0 ? "No job runs yet" : "No runs for this job"}
                 description={
                   runs.length === 0
-                    ? "Runs appear once pg_cron starts calling the jobs: SLA every 10 minutes, the reaper hourly, the digest daily."
+                    ? "Runs appear once pg_cron starts calling the jobs: SLA every 10 minutes, the reaper hourly, the digest daily, the outbox every minute."
                     : "It has not run within the 50 most recent runs."
                 }
               />

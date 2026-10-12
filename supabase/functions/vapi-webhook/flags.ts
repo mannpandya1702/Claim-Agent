@@ -18,6 +18,10 @@ const CALLBACK_PROMISE_RE = /representative (will|is going to) (call|reach)|call
 // "I can have a representative call you back, or ..." with no escalation behind them yet; only a
 // statement made without an offer word before the phrase counts.
 const OFFER_BEFORE_RE = /\b(can|could|may|might|would you|do you want|if you)\b/i;
+// A chat escalation sends no alert by design and is stored 'skipped'; the row itself is the
+// staff queue entry, and the server answered it with the same callback sentence as a delivered
+// alert, so it backs the promise. 'pending' and 'failed' do not.
+const BACKED_ALERT_STATUSES: ReadonlySet<string> = new Set(["sent", "skipped"]);
 
 const STATUS_WORDS_RE = /claim ending in|was approved|payment of|under review|was denied|was received on/i;
 
@@ -78,7 +82,7 @@ export function computeFlags(input: FlagInput): Flag[] {
   const emails = input.emails ?? [];
   const flags = new Set<Flag>();
 
-  if (lines.some(promisesCallback) && !escalations.some((e) => e.alert_status === "sent")) {
+  if (lines.some(promisesCallback) && !escalations.some((e) => BACKED_ALERT_STATUSES.has(e.alert_status))) {
     flags.add("promised_callback_without_escalation");
   }
   // Ordering a spoken line against the ledger would compare two clocks (VAPI seconds vs Postgres

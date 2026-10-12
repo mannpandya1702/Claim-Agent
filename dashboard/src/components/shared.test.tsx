@@ -32,9 +32,13 @@ describe("badges", () => {
     expect(screen.getByText("Unknown")).toBeInTheDocument();
   });
 
-  it("SentimentBadge says n/a when missing", () => {
-    render(<SentimentBadge sentiment={null} />);
-    expect(screen.getByLabelText("Sentiment: n/a")).toBeInTheDocument();
+  it("SentimentBadge says n/a when missing, with its context in text rather than a prohibited aria-label", () => {
+    const { container, rerender } = render(<SentimentBadge sentiment={null} />);
+    expect(container).toHaveTextContent("Sentiment: n/a");
+    expect(screen.getByText("Sentiment:")).toHaveClass("sr-only");
+    expect(container.querySelector("[aria-label]")).toBeNull();
+    rerender(<SentimentBadge sentiment="positive" />);
+    expect(container).toHaveTextContent("Sentiment: Positive");
   });
 
   it("FlagChip is focusable and explains itself", async () => {

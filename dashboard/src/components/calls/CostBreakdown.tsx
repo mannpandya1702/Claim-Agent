@@ -77,7 +77,7 @@ export function CostBreakdown({ cost, breakdown, className }: CostBreakdownProps
               key={p.key}
               onMouseEnter={() => setActive(p.key)}
               className={cn(
-                "h-full min-w-[3px] transition-opacity",
+                "viz-mark h-full min-w-[3px] transition-opacity",
                 i === 0 && "rounded-l",
                 i === drawn.length - 1 && "rounded-r",
                 active && active !== p.key && "opacity-30",
@@ -107,7 +107,7 @@ export function CostBreakdown({ cost, breakdown, className }: CostBreakdownProps
             >
               <th scope="row" className="py-1 pr-2 text-left font-normal text-ink-2">
                 <span className="flex items-center gap-2">
-                  <span aria-hidden="true" className="size-2.5 shrink-0 rounded-sm" style={{ backgroundColor: p.color }} />
+                  <span aria-hidden="true" className="viz-mark size-2.5 shrink-0 rounded-sm" style={{ backgroundColor: p.color }} />
                   {p.label}
                 </span>
               </th>

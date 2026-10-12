@@ -1,9 +1,12 @@
 // recording-url: staff-only, short-lived recording link for the dashboard audio player.
 //
 // The stored recording fields are private stable identifiers, not playable links. This function
-// checks is_staff() with the caller's own JWT, then asks VAPI for the mono recording with
-// redirect: 'manual' and hands back the presigned Location (minutes-long) as JSON. Nothing is
-// stored. Pure and dependency-injected so the whole request path is unit-tested without network.
+// checks is_staff() with the caller's own JWT, then checks that the call is one this caller can
+// read (a call_interactions row under RLS), and only then asks VAPI for the mono recording with
+// redirect: 'manual' and hands back the presigned Location (minutes-long) as JSON. The private
+// key reaches every call in the VAPI org, so the row check keeps this function inside the same
+// data the dashboard can see: no org call this system never stored, nothing reset or reaped.
+// Nothing is stored. Pure and dependency-injected so the request path is tested without network.
 
 export const DEFAULT_ALLOWED_ORIGINS = [
   "https://mannpandya1702.github.io",
@@ -18,6 +21,8 @@ export interface RecordingDeps {
   vapiPrivateKey: string | null;
   /** Resolves the caller's staff status from their Authorization header (true, false, or throws). */
   isStaff: (authorization: string) => Promise<boolean>;
+  /** True when the caller can read this call's call_interactions row (RLS, caller's JWT); throws on failure. */
+  callVisible: (authorization: string, callId: string) => Promise<boolean>;
   fetch: typeof fetch;
   allowedOrigins?: readonly string[];
   vapiBaseUrl?: string;
@@ -125,6 +130,16 @@ export function createHandler(deps: RecordingDeps): (req: Request) => Promise<Re
     }
 
     if (!deps.vapiPrivateKey) return json(500, { error: "Recording service is not configured" }, cors);
+
+    // Same answer as VAPI's own 404: from the player's side, a call we hold no record of has no
+    // recording to offer.
+    let visible = false;
+    try {
+      visible = await deps.callVisible(authorization, body.call_id);
+    } catch {
+      return json(502, { error: "Could not check the call" }, cors);
+    }
+    if (!visible) return json(404, { error: RECORDING_GONE }, cors);
 
     const result = await resolveRecording(body.call_id, deps.vapiPrivateKey, deps.fetch, {
       baseUrl: deps.vapiBaseUrl,

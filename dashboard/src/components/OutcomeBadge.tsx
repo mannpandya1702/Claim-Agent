@@ -15,10 +15,11 @@ export function OutcomeBadge({ outcome, live = false, className }: OutcomeBadgeP
   const meta = live ? OUTCOME_META.in_progress : outcomeMeta(outcome);
   return (
     <Badge variant="neutral" className={cn("font-medium", className)} title={meta.description}>
+      {/* Live is a state, so it pulses in the live color rather than an outcome's. */}
       {live ? (
-        <LiveDot color={meta.color} />
+        <LiveDot />
       ) : (
-        <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: meta.color }} />
+        <span aria-hidden="true" className="viz-mark size-2 shrink-0 rounded-full" style={{ backgroundColor: meta.color }} />
       )}
       <span>{meta.label}</span>
     </Badge>

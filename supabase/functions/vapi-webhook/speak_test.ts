@@ -273,6 +273,29 @@ Deno.test("the documents sentence carries the list, the due date and the submiss
   assertStringIncludes(bare, "before review can continue. You can upload");
 });
 
+Deno.test("several claims awaiting documents hear the instructions once, after the last of them", () => {
+  const docs = byNumber("CLM-240198")[0];
+  const second: Claim = {
+    ...docs,
+    id: "c-extra",
+    claim_number: "CLM-240305",
+    claim_type: "auto",
+    documents_required: ["a police report"],
+    documents_due: "2026-10-30",
+  };
+  const busy = [docs, byNumber("CLM-240211")[0], second];
+  const s = claimsSentence(busy, TODAY);
+  assertEquals(s.split("You can upload them at").length - 1, 1);
+  assert(s.indexOf("You can upload them at") > s.indexOf("ending in three zero five"), "after the last one");
+  assertStringIncludes(s, "Please send them by October twenty-fourth. Your auto claim ending in two one one");
+  // VAPI's ToolMessageComplete.content allows at most 1000 characters.
+  assert(s.length <= 1000, `${s.length} characters`);
+  for (const customer of new Set(SEED_CLAIMS.map((c) => c.customer_id))) {
+    const own = SEED_CLAIMS.filter((c) => c.customer_id === customer);
+    assert(claimsSentence(own, TODAY).length <= 1000, customer);
+  }
+});
+
 Deno.test("claim free text is made speakable or left out", () => {
   const base = byNumber("CLM-240211")[0];
   const read = (detail: string | null, adjuster: string | null = "Bertrand Wexley") =>

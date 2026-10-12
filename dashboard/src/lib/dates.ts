@@ -1,6 +1,6 @@
 import { TZDate } from "@date-fns/tz";
 import { addDays, startOfDay } from "date-fns";
-import { TIME_ZONE } from "./format";
+import { formatDayKey, TIME_ZONE } from "./format";
 
 /*
  * Date ranges for dashboard_metrics, calls_by_day and search_calls. Ranges are half-open
@@ -50,6 +50,58 @@ export function customRange(fromDay: string, toDay: string): DateRange {
   const b = etDayStart(toDay);
   const [start, end] = a <= b ? [a, b] : [b, a];
   return { from: iso(start), to: iso(addDays(new TZDate(end.getTime(), TIME_ZONE), 1)) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Custom ranges: two Eastern days in the URL (?range=custom&from=2026-10-01&to=2026-10-05)
+// ---------------------------------------------------------------------------------------------
+
+/** First and last Eastern day of a custom range, both inclusive, "YYYY-MM-DD". */
+export interface CustomDays {
+  from: string;
+  to: string;
+}
+
+/** The daily chart draws one column per day; past a year it stops being readable. */
+export const MAX_CUSTOM_DAYS = 366;
+
+/** A real calendar day in "YYYY-MM-DD" form (2026-02-30 is not). */
+export function isDayKey(value: string | null | undefined): value is string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value ?? "");
+  if (!m) return false;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return d.getUTCFullYear() === Number(m[1]) && d.getUTCMonth() === Number(m[2]) - 1 && d.getUTCDate() === Number(m[3]);
+}
+
+/** Inclusive day count of a custom range (1 for a single day). */
+export function customDayCount(days: CustomDays): number {
+  const a = Date.UTC(...ymd(days.from));
+  const b = Date.UTC(...ymd(days.to));
+  return Math.round(Math.abs(b - a) / 86_400_000) + 1;
+}
+
+function ymd(day: string): [number, number, number] {
+  const [y, m, d] = day.split("-").map(Number);
+  return [y!, m! - 1, d!];
+}
+
+/**
+ * Both days valid, in order, and within MAX_CUSTOM_DAYS; anything else is null so the page falls
+ * back to its default range instead of erroring on a hand-edited link.
+ */
+export function parseCustomDays(from: string | null | undefined, to: string | null | undefined): CustomDays | null {
+  if (!isDayKey(from) || !isDayKey(to)) return null;
+  const days = from <= to ? { from, to } : { from: to, to: from };
+  return customDayCount(days) <= MAX_CUSTOM_DAYS ? days : null;
+}
+
+/** "Oct 1 – Oct 5", or one day alone; the year appears when the two days are in different years. */
+export function customCaption(days: CustomDays): string {
+  if (days.from === days.to) return formatDayKey(days.from);
+  if (days.from.slice(0, 4) !== days.to.slice(0, 4)) {
+    return `${formatDayKey(days.from)}, ${days.from.slice(0, 4)} – ${formatDayKey(days.to)}, ${days.to.slice(0, 4)}`;
+  }
+  return `${formatDayKey(days.from)} – ${formatDayKey(days.to)}`;
 }
 
 /** Every Eastern day key in a range, so a chart can show zero-call days instead of skipping them. */

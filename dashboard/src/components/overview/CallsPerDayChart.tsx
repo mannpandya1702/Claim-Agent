@@ -1,14 +1,15 @@
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis, type TooltipProps } from "recharts";
 import { formatCount, formatDayKey, OUTCOME_META } from "@/lib/format";
 import { DataTable, LegendSwatch } from "./ChartCard";
-import type { DailySeries, DayRow, OutcomeKey } from "./metrics";
+import { STACK_META, type DailySeries, type DayRow, type StackKey } from "./metrics";
 
 /*
  * Calls per Eastern day, stacked by outcome. Mark specs from the dataviz method: columns at most
  * 24px, a 4px rounded data-end on the top segment only (square at the baseline), a 2px surface
- * gap between stacked segments, hairline solid grid, one axis. Segments stack in OUTCOME_ORDER
- * so each outcome keeps its slot color whatever the range contains; when an outcome is missing,
- * non-adjacent slots touch, so the gap, legend, tooltip and table carry identity, not hue alone.
+ * gap between stacked segments, hairline solid grid, one axis. Segments stack in STACK_ORDER so
+ * each mark keeps its color whatever the range contains. A missing outcome lets any two marks
+ * touch, so the marks are three all-pairs-validated hues plus the gray Other fold; the tooltip
+ * and the table name every folded outcome.
  */
 
 const SEGMENT_GAP = 2;
@@ -24,7 +25,7 @@ interface SegmentProps {
   payload?: DayRow;
 }
 
-function segmentShape(outcome: OutcomeKey, peakDay: string | null) {
+function segmentShape(outcome: StackKey, peakDay: string | null) {
   return function Segment({ x = 0, y = 0, width = 0, height = 0, fill, payload }: SegmentProps) {
     if (!payload || height <= 0 || width <= 0) return <g />;
     const isTop = payload.top === outcome;
@@ -51,7 +52,7 @@ function segmentShape(outcome: OutcomeKey, peakDay: string | null) {
   };
 }
 
-function DayTooltip({ active, payload, label, outcomes }: TooltipProps<number, string> & { outcomes: OutcomeKey[] }) {
+function DayTooltip({ active, payload, label, series }: TooltipProps<number, string> & { series: DailySeries }) {
   if (!active || !payload?.length) return null;
   const row = payload[0]?.payload as DayRow | undefined;
   if (!row) return null;
@@ -60,11 +61,21 @@ function DayTooltip({ active, payload, label, outcomes }: TooltipProps<number, s
       <p className="mb-1.5 font-medium text-ink-2">{formatDayKey(String(label ?? row.day))}</p>
       <ul className="space-y-1">
         {/* Top of the stack first, so the readout reads in the same order as the column. */}
-        {[...outcomes].reverse().map((k) => (
-          <li key={k} className="flex items-center gap-2">
-            <span aria-hidden="true" className="h-0.5 w-3 shrink-0 rounded-full" style={{ backgroundColor: OUTCOME_META[k].color }} />
-            <span className={row[k] > 0 ? "tabular font-semibold text-ink-1" : "tabular text-ink-3"}>{formatCount(row[k])}</span>
-            <span className="text-ink-2">{OUTCOME_META[k].label}</span>
+        {[...series.stack].reverse().map((k) => (
+          <li key={k}>
+            <span className="flex items-center gap-2">
+              <span aria-hidden="true" className="viz-mark h-0.5 w-3 shrink-0 rounded-full" style={{ backgroundColor: STACK_META[k].color }} />
+              <span className={row[k] > 0 ? "tabular font-semibold text-ink-1" : "tabular text-ink-3"}>{formatCount(row[k])}</span>
+              <span className="text-ink-2">{STACK_META[k].label}</span>
+            </span>
+            {k === "other" && row.other > 0 && (
+              <span className="block pl-5 text-ink-3">
+                {series.folded
+                  .filter((o) => row[o] > 0)
+                  .map((o) => `${OUTCOME_META[o].label}\u00a0${formatCount(row[o])}`)
+                  .join(" · ")}
+              </span>
+            )}
           </li>
         ))}
       </ul>
@@ -79,11 +90,14 @@ function DayTooltip({ active, payload, label, outcomes }: TooltipProps<number, s
 export function CallsPerDayLegend({ series }: { series: DailySeries }) {
   return (
     <ul className="flex flex-wrap gap-x-4 gap-y-1.5 text-xs" aria-label="Outcomes">
-      {series.outcomes.map((k) => (
+      {series.stack.map((k) => (
         <li key={k} className="flex items-center gap-1.5">
-          <LegendSwatch color={OUTCOME_META[k].color} />
-          <span className="text-ink-2">{OUTCOME_META[k].label}</span>
-          <span className="tabular font-medium text-ink-1">{formatCount(series.totals[k])}</span>
+          <LegendSwatch color={STACK_META[k].color} />
+          <span className="text-ink-2">{STACK_META[k].label}</span>
+          <span className="tabular font-medium text-ink-1">{formatCount(series.stackTotals[k])}</span>
+          {k === "other" && (
+            <span className="text-ink-3">({series.folded.map((o) => OUTCOME_META[o].label.toLowerCase()).join(", ")})</span>
+          )}
         </li>
       ))}
     </ul>
@@ -104,7 +118,7 @@ export function CallsPerDayChart({ series }: { series: DailySeries }) {
     <figure className="space-y-3">
       <figcaption className="sr-only">{summary}</figcaption>
       <CallsPerDayLegend series={series} />
-      <div style={{ height: CHART_HEIGHT }} className="min-w-0">
+      <div style={{ height: CHART_HEIGHT }} className="viz-chart min-w-0">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={series.rows} margin={{ top: 18, right: 4, bottom: 0, left: 0 }} barCategoryGap="20%" accessibilityLayer>
             <CartesianGrid vertical={false} stroke="var(--chart-grid)" strokeWidth={1} />
@@ -128,17 +142,17 @@ export function CallsPerDayChart({ series }: { series: DailySeries }) {
             />
             <Tooltip
               cursor={{ fill: "var(--hover)", opacity: 0.7 }}
-              content={<DayTooltip outcomes={series.outcomes} />}
+              content={<DayTooltip series={series} />}
               isAnimationActive={false}
               wrapperStyle={{ outline: "none", zIndex: 10 }}
             />
-            {series.outcomes.map((k) => (
+            {series.stack.map((k) => (
               <Bar
                 key={k}
                 dataKey={k}
-                name={OUTCOME_META[k].label}
+                name={STACK_META[k].label}
                 stackId="calls"
-                fill={OUTCOME_META[k].color}
+                fill={STACK_META[k].color}
                 maxBarSize={24}
                 isAnimationActive={false}
                 shape={segmentShape(k, peakDay)}

@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ROUTER_FUTURE } from "@/lib/router";
 import type { CallListRow, SearchCallsParams } from "@/lib/types";
 
@@ -23,14 +24,16 @@ const ID = "7c1e2d3f-0000-4a4a-9b9b-0123456789ab";
 
 function listRow(over: Partial<CallListRow> = {}): CallListRow {
   return {
+    id: "row-1",
     vapi_call_id: ID,
     channel: "webCall",
     caller_name: "Ronan Quintero",
-    caller_phone: "+16025550102",
+    caller_phone_masked: "+1 602 ... 0102",
     outcome: "escalated",
     sentiment: "neutral",
     escalated: true,
     emergency: false,
+    emailed: false,
     flags: [],
     started_at: "2026-10-12T14:00:00Z",
     ended_at: "2026-10-12T14:02:00Z",
@@ -97,6 +100,30 @@ describe("Calls page", () => {
     expect(await screen.findByRole("link", { name: "Ronan Quintero" })).toBeInTheDocument();
   });
 
+  it("keeps the pager buttons enabled while the next page loads, so keyboard focus stays put", async () => {
+    searchCalls.mockImplementation((p: SearchCallsParams) =>
+      (p.p_offset ?? 0) === 0 ? Promise.resolve({ rows: [listRow({ total: 60 })], total: 60 }) : new Promise(() => {}),
+    );
+    renderAt("/calls");
+    const next = await screen.findByRole("button", { name: "Next page" });
+    next.focus();
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(searchCalls).toHaveBeenCalledWith(expect.objectContaining({ p_offset: 25 })));
+    // page 2 is still loading (placeholder rows on screen); the pressed button keeps focus
+    expect(screen.getByRole("button", { name: "Next page" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Next page" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Previous page" })).toBeEnabled();
+  });
+
+  it("sends a custom range of Eastern days from the URL", async () => {
+    searchCalls.mockResolvedValue({ rows: [listRow()], total: 1 });
+    renderAt("/calls?range=custom&from=2026-10-01&to=2026-10-05");
+    await waitFor(() => expect(searchCalls).toHaveBeenCalled());
+    expect(searchCalls.mock.calls[0]![0]).toMatchObject({ p_from: "2026-10-01T04:00:00.000Z", p_to: "2026-10-06T04:00:00.000Z" });
+    expect(screen.getByRole("combobox", { name: "Date range" })).toHaveTextContent("Oct 1 – Oct 5");
+    expect(await screen.findByText(/Oct 1 – Oct 5/, { selector: "span" })).toBeInTheDocument();
+  });
+
   it("explains an empty search and offers a way out", async () => {
     searchCalls.mockResolvedValue({ rows: [], total: null });
     renderAt("/calls?q=nothing-like-this&range=7d");
@@ -104,5 +131,28 @@ describe("Calls page", () => {
     // One in the filter row, one beside the empty state where the eye already is.
     expect(screen.getAllByRole("button", { name: "Clear filters" })).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Show all time" })).toBeInTheDocument();
+  });
+});
+
+describe("Calls page across Eastern midnight", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("moves Today's bounds when the Eastern day changes, as the Overview tiles do", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-10-13T03:58:00Z")); // 11:58 PM Oct 12, Eastern
+    searchCalls.mockReset();
+    searchCalls.mockResolvedValue({ rows: [listRow()], total: 1 });
+    renderAt("/calls?range=today");
+    await waitFor(() => expect(searchCalls).toHaveBeenCalledWith(expect.objectContaining({ p_from: "2026-10-12T04:00:00.000Z" })));
+
+    vi.setSystemTime(new Date("2026-10-13T04:01:00Z")); // 12:01 AM Oct 13
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    await waitFor(() =>
+      expect(searchCalls).toHaveBeenCalledWith(
+        expect.objectContaining({ p_from: "2026-10-13T04:00:00.000Z", p_to: "2026-10-14T04:00:00.000Z" }),
+      ),
+    );
   });
 });

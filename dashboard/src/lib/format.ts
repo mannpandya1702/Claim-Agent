@@ -217,32 +217,39 @@ export interface OutcomeMeta {
 }
 
 /**
- * Outcome identity colors. The order is the validated categorical slot order, so stack and
- * legend in OUTCOME_ORDER to keep adjacent pairs colorblind-separable. Light-mode aqua, yellow
- * and magenta sit under 3:1 on the card, so every outcome chart needs labels or a table view.
+ * Outcome identity colors. Stacks and the donut skip outcomes a range does not have, so any two
+ * outcomes can end up side by side; the colors are therefore validated all-pairs
+ * (validate_palette.js --pairs all, both modes), which holds for three hues only. The three
+ * outcomes a supervisor reads first take them; every other outcome folds into the gray "Other"
+ * (in_progress is a state, not an outcome, and folds too). Tooltips and the table views still
+ * name each outcome. Light-mode aqua sits under 3:1 on the card, so outcome charts keep their
+ * labels and table view.
  */
+export const HUED_OUTCOMES = ["resolved", "escalated", "auth_failed"] as const;
+
+/** Stack, legend and table order: the hued outcomes first, then the ones that fold into Other. */
 export const OUTCOME_ORDER = [
-  "resolved",
-  "escalated",
-  "auth_failed",
+  ...HUED_OUTCOMES,
   "not_found",
   "unsupported",
   "abandoned",
-  "in_progress",
   "emergency",
+  "in_progress",
   "unknown",
 ] as const;
+
+const FOLD = "var(--series-other)";
 
 export const OUTCOME_META: Record<Outcome | "unknown", OutcomeMeta> = {
   resolved: { label: "Resolved", description: "Handled without a person", color: "var(--series-1)" },
   escalated: { label: "Escalated", description: "Handed to a representative", color: "var(--series-2)" },
   auth_failed: { label: "Auth failed", description: "Date of birth did not match", color: "var(--series-3)" },
-  not_found: { label: "Not found", description: "No customer for that phone number", color: "var(--series-4)" },
-  unsupported: { label: "Unsupported", description: "Question outside what Tessa handles", color: "var(--series-5)" },
-  abandoned: { label: "Abandoned", description: "Caller left before an outcome", color: "var(--series-6)" },
-  in_progress: { label: "In progress", description: "Call has not ended", color: "var(--series-7)" },
-  emergency: { label: "Emergency", description: "Caller reported present danger", color: "var(--series-8)" },
-  unknown: { label: "Unknown", description: "No outcome recorded", color: "var(--series-other)" },
+  not_found: { label: "Not found", description: "No customer for that phone number", color: FOLD },
+  unsupported: { label: "Unsupported", description: "Question outside what Tessa handles", color: FOLD },
+  abandoned: { label: "Abandoned", description: "Caller left before an outcome", color: FOLD },
+  in_progress: { label: "In progress", description: "Call has not ended", color: FOLD },
+  emergency: { label: "Emergency", description: "Caller reported present danger", color: FOLD },
+  unknown: { label: "Unknown", description: "No outcome recorded", color: FOLD },
 };
 
 export function outcomeMeta(outcome: string | null | undefined): OutcomeMeta {

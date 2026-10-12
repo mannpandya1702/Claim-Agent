@@ -103,6 +103,33 @@ describe("Ops", () => {
     expect(screen.getByText("11 sent in the last 24 hours")).toBeInTheDocument();
   });
 
+  it("shows the outbox job, its backlog and failures, and the Airtable call log as a channel", async () => {
+    m.fetchOpsHealth.mockResolvedValue({
+      ...HEALTH,
+      last_outbox_run: ago(1),
+      outbox_pending: "1",
+      outbox_dead: 2,
+      outbox_delivered_24h: "7",
+    });
+    renderOps();
+    await waitFor(() => expect(tile("Outbox").value).toBe("1 minute ago"));
+    expect(tile("Outbox").tone).toBe("good");
+    expect(tile("Outbox backlog").value).toBe("1");
+    expect(tile("Outbox backlog").tone).toBe("warning");
+    expect(tile("Outbox failures").value).toBe("2");
+    expect(tile("Outbox failures").tone).toBe("critical");
+    const airtable = await screen.findByRole("region", { name: "Airtable call log" });
+    expect(within(airtable).getByRole("img")).toHaveAccessibleName("Airtable call log: 7 delivered, 2 failed, 1 pending, of 10");
+    expect(within(airtable).getByText("2 failed")).toBeInTheDocument();
+  });
+
+  it("leaves the outbox out until ops_health carries it", async () => {
+    renderOps();
+    await waitFor(() => expect(tile("Open escalations").value).toBe("2"));
+    expect(screen.queryByText("Outbox backlog", { selector: "dt" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Airtable call log" })).not.toBeInTheDocument();
+  });
+
   it("asks escalation_delivery_gap for 24 hours and prints every count beside the meter", async () => {
     renderOps();
     const telegram = await screen.findByRole("region", { name: "Telegram" });

@@ -7,7 +7,7 @@
 // Applied versions are recorded in supabase_migrations.schema_migrations (the same table the
 // Supabase CLI uses), so `supabase migration list` agrees with this runner.
 
-import { sqlClient, lit } from "./lib/sql.ts";
+import { lit, sqlClient } from "./lib/sql.ts";
 
 const sql = sqlClient();
 const dir = new URL("../supabase/migrations/", import.meta.url);
@@ -56,7 +56,9 @@ switch (cmd) {
   case "status": {
     await ensureLedger();
     const done = await applied();
-    for (const m of localMigrations()) console.log(`${done.has(m.version) ? "applied" : "PENDING"}  ${m.version}_${m.name}`);
+    for (const m of localMigrations()) {
+      console.log(`${done.has(m.version) ? "applied" : "PENDING"}  ${m.version}_${m.name}`);
+    }
     break;
   }
   case "query":

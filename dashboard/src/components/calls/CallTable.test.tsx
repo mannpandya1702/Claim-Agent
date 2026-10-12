@@ -8,14 +8,16 @@ import { CallTable, elapsedSeconds } from "./CallTable";
 
 function row(over: Partial<CallListRow>): CallListRow {
   return {
+    id: "row-id",
     vapi_call_id: "call-1",
     channel: "webCall",
     caller_name: "Tobias Halvorsen",
-    caller_phone: "+16025550101",
+    caller_phone_masked: "+1 602 ... 0101",
     outcome: "resolved",
     sentiment: "positive",
     escalated: false,
     emergency: false,
+    emailed: false,
     flags: [],
     started_at: "2026-10-12T14:00:00Z",
     ended_at: "2026-10-12T14:03:05Z",
@@ -31,8 +33,8 @@ function row(over: Partial<CallListRow>): CallListRow {
 }
 
 const ROWS: CallListRow[] = [
-  row({ vapi_call_id: "live-1", caller_name: null, caller_phone: null, ended_at: null, outcome: "in_progress", duration_seconds: null, cost: null, sentiment: null, started_at: "2026-10-12T15:00:00Z", created_at: "2026-10-12T15:00:00Z" }),
-  row({ vapi_call_id: "flagged-1", flags: ["promised_callback_without_escalation", "tool_markup_spoken"], escalated: true, emergency: true, outcome: "escalated", sentiment: "negative" }),
+  row({ vapi_call_id: "live-1", caller_name: null, caller_phone_masked: null, ended_at: null, outcome: "in_progress", duration_seconds: null, cost: null, sentiment: null, started_at: "2026-10-12T15:00:00Z", created_at: "2026-10-12T15:00:00Z" }),
+  row({ vapi_call_id: "flagged-1", flags: ["promised_callback_without_escalation", "tool_markup_spoken"], escalated: true, emergency: true, emailed: true, outcome: "escalated", sentiment: "negative" }),
   row({ vapi_call_id: "clean-1", cost: null }),
 ];
 
@@ -84,12 +86,14 @@ describe("CallTable", () => {
     expect(within(rowFor("clean-1")).queryAllByRole("note")).toHaveLength(0);
   });
 
-  it("shows escalation and emergency icons with accessible names", () => {
+  it("shows escalation, emergency and email icons with accessible names", () => {
     renderTable();
     const flagged = within(rowFor("flagged-1"));
     expect(flagged.getByRole("img", { name: "Escalated" })).toBeInTheDocument();
     expect(flagged.getByRole("img", { name: "Emergency" })).toBeInTheDocument();
+    expect(flagged.getByRole("img", { name: "Email sent" })).toBeInTheDocument();
     expect(within(rowFor("clean-1")).queryByRole("img", { name: "Escalated" })).not.toBeInTheDocument();
+    expect(within(rowFor("clean-1")).queryByRole("img", { name: "Email sent" })).not.toBeInTheDocument();
   });
 
   it("names unknown callers, masks phones and prints n/a for a missing cost", () => {

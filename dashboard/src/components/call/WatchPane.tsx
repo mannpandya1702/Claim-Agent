@@ -47,6 +47,7 @@ export function WatchPane({ callId, status, returnTo, className }: WatchPaneProp
 
 function BeforeCall({ status, returnTo }: { status: CallStatus; returnTo: string }) {
   const auth = useAuth();
+  const inCall = status === "active" || status === "ending";
   if (status === "starting") {
     return (
       <div className="space-y-3" role="status" aria-live="polite">
@@ -67,10 +68,13 @@ function BeforeCall({ status, returnTo }: { status: CallStatus; returnTo: string
       {auth.status === "staff" ? (
         <p className="text-ink-1">You are signed in as staff, so the live view will open in this pane.</p>
       ) : auth.status === "signed-out" ? (
+        // A call can be active before its id is known (start() still resolving); sign-in then
+        // opens in a new tab so the call and its controls stay on screen.
         <Button variant="outline" size="sm" asChild>
-          <Link to={`/login?next=${encodeURIComponent(returnTo)}`}>
+          <Link to={`/login?next=${encodeURIComponent(returnTo)}`} {...(inCall ? { target: "_blank", rel: "noopener" } : {})}>
             <LogIn aria-hidden="true" />
             Staff sign in
+            {inCall && <span className="sr-only"> (opens in a new tab)</span>}
           </Link>
         </Button>
       ) : null}

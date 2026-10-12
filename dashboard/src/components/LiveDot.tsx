@@ -4,8 +4,8 @@ import { cn } from "@/lib/utils";
 export function LiveDot({ className, color = "var(--status-good)" }: { className?: string; color?: string }) {
   return (
     <span aria-hidden="true" className={cn("relative inline-flex size-2 shrink-0", className)}>
-      <span className="absolute inline-flex size-full animate-live-pulse rounded-full" style={{ backgroundColor: color }} />
-      <span className="relative inline-flex size-2 rounded-full" style={{ backgroundColor: color }} />
+      <span className="viz-mark absolute inline-flex size-full animate-live-pulse rounded-full" style={{ backgroundColor: color }} />
+      <span className="viz-mark relative inline-flex size-2 rounded-full" style={{ backgroundColor: color }} />
     </span>
   );
 }

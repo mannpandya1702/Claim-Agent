@@ -14,7 +14,7 @@ import {
   fetchCall,
   fetchCallAttempts,
   fetchCallEscalations,
-  fetchCallSession,
+  fetchCallLevel,
   fetchTranscriptLines,
   qk,
 } from "@/lib/queries";
@@ -40,7 +40,7 @@ export function CompactLiveView({ callId }: { callId: string }) {
 
   const linesQ = useQuery({ queryKey: qk.callTranscript(callId), queryFn: () => fetchTranscriptLines(callId), refetchInterval: poll });
   const attemptsQ = useQuery({ queryKey: qk.callAttempts(callId), queryFn: () => fetchCallAttempts(callId), refetchInterval: poll });
-  const sessionQ = useQuery({ queryKey: qk.callSession(callId), queryFn: () => fetchCallSession(callId), refetchInterval: poll });
+  const sessionQ = useQuery({ queryKey: qk.callLevel(callId), queryFn: () => fetchCallLevel(callId), refetchInterval: poll });
   const escalationsQ = useQuery({
     queryKey: qk.callEscalations(callId),
     queryFn: () => fetchCallEscalations(callId),
@@ -51,7 +51,7 @@ export function CompactLiveView({ callId }: { callId: string }) {
   useRealtimeRows("call_interactions", `vapi_call_id=eq.${callId}`, [qk.callRow(callId)]);
   useRealtimeRows("transcript_lines", byKey, [qk.callTranscript(callId)]);
   useRealtimeRows("attempts", byKey, [qk.callAttempts(callId)]);
-  useRealtimeRows("call_sessions", byKey, [qk.callSession(callId)]);
+  useRealtimeRows("call_sessions", byKey, [qk.callLevel(callId)]);
   useRealtimeRows("escalations", byKey, [qk.callEscalations(callId)]);
 
   const attempts = useMemo(() => attemptsQ.data ?? [], [attemptsQ.data]);

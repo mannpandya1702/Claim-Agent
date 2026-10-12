@@ -10,16 +10,19 @@ import { callKeyOf, parseCalls } from "./parse_tool_request.ts";
 import { onEndOfCallReport, onStatusUpdate, onTranscript } from "./post_call.ts";
 import { redactPII } from "./redact.ts";
 import { sentenceFor } from "./speak.ts";
-import { runTool } from "./tools.ts";
+import { runTool, TOOL_BUDGET_MS } from "./tools.ts";
 import type { Deps, ParsedToolCall, ToolCtx, ToolResult, VapiMessage } from "./types.ts";
 
-/** Per-tool budget, enforced inside runTool with each tool's own fallback sentence. The tool
- *  JSON's server timeoutSeconds is 10, so VAPI still receives that sentence in time. */
-export const TOOL_BUDGET_MS = 5000;
+/** Per-tool budget, enforced inside runTool with each tool's own fallback sentence (one source:
+ *  tools.ts). The tool JSON's server timeoutSeconds is 10, so VAPI still receives it in time. */
+export { TOOL_BUDGET_MS };
 /** The handler's own timer is only a backstop for a runTool that breaks its contract. It must
  *  fire after the tool's budget, or it would pre-empt the tool's better fallback (an emergency
  *  answered with the generic trouble line), and well before VAPI's 10 s timeout. */
 export const TOOL_BACKSTOP_MS = TOOL_BUDGET_MS + 1000;
+/** VAPI waits 10 s for the whole delivery, not per call. Calls run one after another, so later
+ *  calls in a batch get only what is left of this; one call alone keeps its full backstop. */
+export const BATCH_BUDGET_MS = 8500;
 
 /** The modules the router dispatches to; createHandler swaps them for fakes in tests. */
 export interface Routes {
@@ -31,6 +34,7 @@ export interface Routes {
 
 export interface HandlerOptions {
   backstopMs?: number;
+  batchMs?: number;
 }
 
 /** One entry of the tool-calls response (VAPI ToolCallResult). */
@@ -235,8 +239,10 @@ export function createHandler(
 ): (req: Request, deps: Deps) => Promise<Response> {
   const routes: Routes = { runTool, onStatusUpdate, onTranscript, onEndOfCallReport, ...overrides };
   const backstopMs = options.backstopMs ?? TOOL_BACKSTOP_MS;
+  const batchMs = options.batchMs ?? BATCH_BUDGET_MS;
 
   async function toolCalls(message: VapiMessage, callKey: string | null, deps: Deps, line: LogLine) {
+    const batchDeadline = performance.now() + batchMs;
     const calls = parseCalls(message);
     if (calls.length === 0) return json(200, { results: [] });
     if (!callKey) {
@@ -258,7 +264,10 @@ export function createHandler(
     // Sequential on purpose: a batch such as lookup_customer then verify_identity must walk the
     // identity ladder in the order the model asked, which parallel execution cannot promise.
     for (const call of calls) {
-      const { result, error } = await runWithBackstop(routes, call, ctx, backstopMs);
+      // A call that starts after a slow one still runs (an emergency must still be logged and
+      // paged), but its answer is the fallback once the batch is out of time.
+      const left = Math.max(0, Math.floor(batchDeadline - performance.now()));
+      const { result, error } = await runWithBackstop(routes, call, ctx, Math.min(backstopMs, left));
       results.push(toResponse(call, result, native));
       tools.push(call.name);
       codes.push(result.code);

@@ -1,6 +1,6 @@
 import { assert, assertEquals, assertFalse, assertMatch, assertNotMatch, assertStringIncludes } from "@std/assert";
 import { createFakeStore } from "./fake_store.ts";
-import { createHandler, handle, type Routes, timingSafeEqual, TOOL_BACKSTOP_MS } from "./handler.ts";
+import { BATCH_BUDGET_MS, createHandler, handle, type Routes, timingSafeEqual, TOOL_BACKSTOP_MS } from "./handler.ts";
 import { sentenceFor } from "./speak.ts";
 import { TOOL_BUDGET_MS as TOOLS_OWN_BUDGET_MS } from "./tools.ts";
 import type { Deps, Env, ParsedToolCall, Store, ToolCtx, ToolResult, VapiMessage } from "./types.ts";
@@ -567,6 +567,42 @@ Deno.test("the backstop answers a hung tool with system_error and keeps the work
   assertEquals(finished, ["slow"]);
 });
 
+Deno.test("a batch shares one deadline: calls after a slow one still run but answer in time", async () => {
+  const release = deferred();
+  const finished: string[] = [];
+  const { routes, seen } = fakeRoutes(async (call) => {
+    await release.promise;
+    finished.push(call.id);
+    return { code: "needs_dob", sentence: sentenceFor("needs_dob") };
+  });
+  const { deps, background } = makeDeps({}, untouchableStore);
+  const started = performance.now();
+  const res = await createHandler(routes, { backstopMs: 1000, batchMs: 40 })(
+    post({
+      message: callEnvelope({
+        toolCallList: [fnCall("slow", "lookup_customer", {}), fnCall("sos", "report_emergency", {})],
+      }),
+    }),
+    deps,
+  );
+  const elapsed = performance.now() - started;
+  const out = await results(res);
+  assertEquals(out.map((r) => [r.toolCallId, r.json.code]), [["slow", "system_error"], ["sos", "emergency_logged"]]);
+  assertEquals(out[1].json.data, { db_failed: true });
+  assert(elapsed < 500, `the whole delivery answered within the batch budget (${Math.round(elapsed)} ms)`);
+  // the emergency was still started and runs to the end in the background
+  assertEquals(seen.map((s) => s.call.id), ["slow", "sos"]);
+  assertEquals(background.length, 2);
+  release.resolve();
+  await Promise.all(background);
+  assertEquals(finished.sort(), ["slow", "sos"]);
+});
+
+Deno.test("the batch budget leaves one call its full backstop and stays under VAPI's 10 s", () => {
+  assert(BATCH_BUDGET_MS >= TOOL_BACKSTOP_MS);
+  assert(BATCH_BUDGET_MS <= 9000);
+});
+
 Deno.test("calls in one delivery run sequentially, in order", async () => {
   const events: string[] = [];
   const { routes } = fakeRoutes(async (call) => {
@@ -934,4 +970,29 @@ Deno.test("e2e: claim status before verification is refused; unknown tools are u
     ["tc2", "delete_everything", "unknown_tool"],
   ]);
   assertEquals(out[1].json.message, sentenceFor("unknown_tool"));
+});
+
+Deno.test("e2e: status-update in-progress writes the session and the live stub row; a report without call.id is 400", async () => {
+  const store = createFakeStore();
+  const { deps } = makeDeps({}, store);
+  const status = await handle(
+    post({
+      message: {
+        type: "status-update",
+        status: "in-progress",
+        call: { id: CALL_ID, orgId: ORG, type: "inboundPhoneCall", customer: { number: "+16025550188" } },
+      },
+    }),
+    deps,
+  );
+  assertEquals(status.status, 200);
+  assertEquals(await status.json(), {});
+  const [row] = store.tables.call_interactions.filter((r) => r.vapi_call_id === CALL_ID);
+  assertEquals([row.outcome, row.channel, row.caller_phone], ["in_progress", "inboundPhoneCall", "+16025550188"]);
+  assertEquals(store.tables.call_sessions.map((s) => [s.call_key, s.channel]), [[CALL_ID, "inboundPhoneCall"]]);
+
+  const report = await handle(post({ message: { type: "end-of-call-report", chat: { orgId: ORG } } }), deps);
+  assertEquals(report.status, 400);
+  assertEquals(await report.json(), { error: "missing_call_id" });
+  assertEquals(store.tables.call_interactions.length, 1, "nothing written for a report without a key");
 });

@@ -19,7 +19,7 @@ function Segment({ seg }: { seg: Mix["segments"][number] }) {
           role="img"
           tabIndex={0}
           aria-label={text}
-          className="h-full min-w-[3px] outline-none transition-[filter] first:rounded-l-[4px] last:rounded-r-[4px] hover:brightness-110 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+          className="viz-mark h-full min-w-[3px] outline-none transition-[filter] first:rounded-l-[4px] last:rounded-r-[4px] hover:brightness-110 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
           style={{ flexGrow: seg.value, flexBasis: 0, backgroundColor: seg.color }}
           data-sentiment={seg.key}
         />

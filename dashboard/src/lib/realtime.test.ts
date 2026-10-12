@@ -141,6 +141,81 @@ describe("startRealtimeSync", () => {
     expect(invalidate).not.toHaveBeenCalled();
   });
 
+  it("DELETE invalidates cached lists whose rows carry no primary key instead of keeping deleted rows", () => {
+    const { channel, queryClient, invalidate } = setup({ keys: [["calls-by-day"], ["ops"]] });
+    channel.setStatus("SUBSCRIBED");
+    invalidate.mockClear();
+    const byDay = [{ day: "2026-10-12", outcome: "resolved", n: 3 }];
+    const gap = [{ channel: "telegram", owed: 2, delivered: 2, failed: 0 }];
+    queryClient.setQueryData(["calls-by-day", "a", "b"], byDay);
+    queryClient.setQueryData(["ops", "gap", 24], gap);
+
+    channel.emitChange({ eventType: "DELETE", old: { id: "call-row-1" } });
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["calls-by-day", "a", "b"], exact: true });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["ops", "gap", 24], exact: true });
+    expect(queryClient.getQueryData(["calls-by-day", "a", "b"])).toBe(byDay);
+  });
+
+  it("DELETE drops a call from a search_calls page by id and lowers the total", () => {
+    const { channel, queryClient, invalidate } = setup({ keys: [["calls"]] });
+    channel.setStatus("SUBSCRIBED");
+    invalidate.mockClear();
+    queryClient.setQueryData(["calls", "list", { p_limit: 25 }], {
+      rows: [
+        { id: "a", vapi_call_id: "call-a", total: 2 },
+        { id: "b", vapi_call_id: "call-b", total: 2 },
+      ],
+      total: 2,
+    });
+    // a page cached before the RPC returned ids cannot be edited by key, so it is re-read
+    queryClient.setQueryData(["calls", "list", { p_limit: 10 }], { rows: [{ vapi_call_id: "call-a" }], total: 1 });
+
+    channel.emitChange({ eventType: "DELETE", old: { id: "a" } });
+
+    expect(queryClient.getQueryData(["calls", "list", { p_limit: 25 }])).toEqual({
+      rows: [{ id: "b", vapi_call_id: "call-b", total: 2 }],
+      total: 1,
+    });
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["calls", "list", { p_limit: 10 }], exact: true });
+  });
+
+  it("a filtered channel also binds an unfiltered DELETE, which Realtime cannot filter", () => {
+    const { channel, queryClient, invalidate } = setup({
+      table: "escalations",
+      filter: "call_key=eq.k1",
+      keys: [["call", "k1", "escalations"], ["call", "k1", "row"]],
+    });
+    const pg = channel.bindings.filter((b) => b.type === "postgres_changes").map((b) => b.filter);
+    expect(pg).toEqual([
+      { event: "*", schema: "public", table: "escalations", filter: "call_key=eq.k1" },
+      { event: "DELETE", schema: "public", table: "escalations" },
+    ]);
+
+    channel.setStatus("SUBSCRIBED");
+    invalidate.mockClear();
+    queryClient.setQueryData(["call", "k1", "escalations"], [{ id: "e1", call_key: "k1" }, { id: "e2", call_key: "k1" }]);
+    queryClient.setQueryData(["call", "k1", "row"], { id: "row-1", vapi_call_id: "k1" });
+
+    // the DELETE carries only the primary key; it arrives on the unfiltered binding
+    const deleteBinding = channel.bindings.filter((b) => b.type === "postgres_changes")[1]!;
+    deleteBinding.cb({ eventType: "DELETE", old: { id: "e2" } });
+    expect(queryClient.getQueryData(["call", "k1", "escalations"])).toEqual([{ id: "e1", call_key: "k1" }]);
+
+    // another call's delete leaves this page's keyed rows alone and re-reads nothing
+    deleteBinding.cb({ eventType: "DELETE", old: { id: "someone-else" } });
+    expect(queryClient.getQueryData(["call", "k1", "escalations"])).toEqual([{ id: "e1", call_key: "k1" }]);
+    expect(queryClient.getQueryData(["call", "k1", "row"])).toEqual({ id: "row-1", vapi_call_id: "k1" });
+    vi.advanceTimersByTime(1000);
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("an unfiltered channel has a single binding", () => {
+    const { channel } = setup({ filter: null });
+    expect(channel.bindings.filter((b) => b.type === "postgres_changes")).toHaveLength(1);
+  });
+
   it("DELETE matches composite keys (attempts)", () => {
     const { channel, queryClient } = setup({ table: "attempts", keys: [["attempts", "k1"]] });
     queryClient.setQueryData(
@@ -222,8 +297,16 @@ describe("startRealtimeSync", () => {
 describe("removeRowFromData", () => {
   it("turns a matching single row into null and leaves others alone", () => {
     expect(removeRowFromData({ id: "a", x: 1 }, ["id"], { id: "a" })).toEqual({ handled: true, data: null });
-    expect(removeRowFromData({ id: "b" }, ["id"], { id: "a" })).toEqual({ handled: false, data: { id: "b" } });
+    expect(removeRowFromData({ id: "b" }, ["id"], { id: "a" })).toEqual({ handled: true, data: { id: "b" } });
     expect(removeRowFromData(undefined, ["id"], { id: "a" })).toEqual({ handled: true, data: undefined });
+  });
+
+  it("calls an aggregate or a keyless list an unknown shape", () => {
+    expect(removeRowFromData({ calls: 3 }, ["id"], { id: "a" }).handled).toBe(false);
+    expect(removeRowFromData([{ day: "2026-10-12", n: 1 }], ["id"], { id: "a" }).handled).toBe(false);
+    expect(removeRowFromData({ rows: [{ vapi_call_id: "x" }], total: 1 }, ["id"], { id: "a" }).handled).toBe(false);
+    // an empty list has nothing to remove either way
+    expect(removeRowFromData([], ["id"], { id: "a" })).toEqual({ handled: true, data: [] });
   });
 });
 

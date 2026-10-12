@@ -10,20 +10,35 @@ import { createHandler, parseAllowedOrigins } from "./logic.ts";
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
 const anonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 
-async function isStaff(authorization: string): Promise<boolean> {
-  const client = createClient(supabaseUrl, anonKey, {
+// Every read runs as the caller (their JWT, the anon key), so grants and RLS decide.
+function callerClient(authorization: string) {
+  return createClient(supabaseUrl, anonKey, {
     global: { headers: { Authorization: authorization } },
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  const { data, error } = await client.rpc("is_staff");
+}
+
+async function isStaff(authorization: string): Promise<boolean> {
+  const { data, error } = await callerClient(authorization).rpc("is_staff");
   if (error) throw new Error(error.message);
   return data === true;
+}
+
+async function callVisible(authorization: string, callId: string): Promise<boolean> {
+  const { data, error } = await callerClient(authorization)
+    .from("call_interactions")
+    .select("vapi_call_id")
+    .eq("vapi_call_id", callId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return data !== null;
 }
 
 Deno.serve(
   createHandler({
     vapiPrivateKey: Deno.env.get("VAPI_PRIVATE_KEY") ?? null,
     isStaff,
+    callVisible,
     fetch: (input, init) => fetch(input, init),
     allowedOrigins: parseAllowedOrigins(Deno.env.get("ALLOWED_ORIGINS")),
   }),

@@ -30,6 +30,38 @@ grant update (staff_notes) on call_interactions to authenticated;
 create policy staff_notes_update on call_interactions for update to authenticated
   using ((select is_staff())) with check ((select is_staff()));
 
+-- List views (calls, live cards, escalation queue) read these instead of the raw columns, so a
+-- list response never carries a full phone number or the stored recording reference; only the
+-- call detail page selects caller_phone and callback_phone. The mask matches the dashboard's
+-- maskPhone ("+1 602 ... 0101"). Inline rather than a helper function: a generated column may
+-- only call immutable functions, and a new function would need its own grants.
+alter table call_interactions
+  add column caller_phone_masked text generated always as (case
+    when nullif(caller_phone, '') is null then null
+    when regexp_replace(caller_phone, '\D', '', 'g') ~ '^1[0-9]{10}$'
+      then '+1 ' || substr(regexp_replace(caller_phone, '\D', '', 'g'), 2, 3) || ' ... '
+           || right(regexp_replace(caller_phone, '\D', '', 'g'), 4)
+    when regexp_replace(caller_phone, '\D', '', 'g') ~ '^[0-9]{10}$'
+      then '+1 ' || left(regexp_replace(caller_phone, '\D', '', 'g'), 3) || ' ... '
+           || right(regexp_replace(caller_phone, '\D', '', 'g'), 4)
+    when length(regexp_replace(caller_phone, '\D', '', 'g')) >= 4
+      then '... ' || right(regexp_replace(caller_phone, '\D', '', 'g'), 4)
+    else '...' end) stored,
+  add column has_recording boolean generated always as (recording_url is not null) stored;
+
+alter table escalations
+  add column callback_phone_masked text generated always as (case
+    when nullif(callback_phone, '') is null then null
+    when regexp_replace(callback_phone, '\D', '', 'g') ~ '^1[0-9]{10}$'
+      then '+1 ' || substr(regexp_replace(callback_phone, '\D', '', 'g'), 2, 3) || ' ... '
+           || right(regexp_replace(callback_phone, '\D', '', 'g'), 4)
+    when regexp_replace(callback_phone, '\D', '', 'g') ~ '^[0-9]{10}$'
+      then '+1 ' || left(regexp_replace(callback_phone, '\D', '', 'g'), 3) || ' ... '
+           || right(regexp_replace(callback_phone, '\D', '', 'g'), 4)
+    when length(regexp_replace(callback_phone, '\D', '', 'g')) >= 4
+      then '... ' || right(regexp_replace(callback_phone, '\D', '', 'g'), 4)
+    else '...' end) stored;
+
 -- ---------------------------------------------------------------------------------------------
 -- Escalation transitions: the only write path for escalations from outside the Edge Function.
 -- security definer because authenticated has no UPDATE on escalations; the staff check inside is
@@ -142,21 +174,25 @@ language sql stable security invoker set search_path = public as $$
   order by 1, 2
 $$;
 
--- List query for the Calls table. Never selects transcript or messages (detail page only).
+-- List query for the Calls table. Never selects transcript, messages or a full phone number
+-- (detail page only). id is returned so a Realtime DELETE can drop the row from the cached page;
+-- emailed marks calls with at least one sent email (emails is unique on (call_key, kind)).
 create function search_calls(
   p_q text default null, p_from timestamptz default null, p_to timestamptz default null,
   p_outcome text default null, p_sentiment text default null, p_channel text default null,
   p_flagged boolean default null, p_escalated boolean default null,
   p_limit int default 25, p_offset int default 0
 ) returns table (
-  vapi_call_id text, channel text, caller_name text, caller_phone text, outcome text, sentiment text,
-  escalated boolean, emergency boolean, flags text[], started_at timestamptz, ended_at timestamptz,
-  duration_seconds int, cost numeric, latency_avg_ms int, summary text, assistant_name text,
-  created_at timestamptz, total bigint
+  id uuid, vapi_call_id text, channel text, caller_name text, caller_phone_masked text, outcome text,
+  sentiment text, escalated boolean, emergency boolean, emailed boolean, flags text[],
+  started_at timestamptz, ended_at timestamptz, duration_seconds int, cost numeric, latency_avg_ms int,
+  summary text, assistant_name text, created_at timestamptz, total bigint
 )
 language sql stable security invoker set search_path = public as $$
-  select ci.vapi_call_id, ci.channel, ci.caller_name, ci.caller_phone, ci.outcome, ci.sentiment,
-         ci.escalated, ci.emergency, ci.flags, ci.started_at, ci.ended_at, ci.duration_seconds, ci.cost,
+  select ci.id, ci.vapi_call_id, ci.channel, ci.caller_name, ci.caller_phone_masked, ci.outcome, ci.sentiment,
+         ci.escalated, ci.emergency,
+         exists (select 1 from emails m where m.call_key = ci.vapi_call_id and m.status = 'sent') as emailed,
+         ci.flags, ci.started_at, ci.ended_at, ci.duration_seconds, ci.cost,
          ci.latency_avg_ms, left(ci.summary, 280), ci.assistant_name, ci.created_at,
          count(*) over () as total
   from call_interactions ci

@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthTestProvider, type AuthStatus } from "@/lib/auth";
 import { ROUTER_FUTURE } from "@/lib/router";
+import { FullPageLoading, GateLayout } from "@/components/layout/RequireStaff";
 import { getCallState, resetCall, stop } from "@/lib/vapi";
 import TalkToTessa from "./TalkToTessa";
 
@@ -217,6 +218,40 @@ describe("Talk to Tessa", () => {
     expect(within(panel).getByRole("button", { name: "Start a new call" })).toBeEnabled();
     // The link to the finished call stays so the presenter can open its report.
     expect(within(pane).getByRole("link", { name: /open call detail/i })).toBeInTheDocument();
+  });
+
+  it("keeps End reachable off this page and opens sign-in in a new tab while a call runs", async () => {
+    const { unmount } = renderPage();
+    // the page header comes first; cards below have their own header landmarks
+    const header = screen.getAllByRole("banner")[0]!;
+    expect(within(header).getByRole("link", { name: /staff sign in/i })).not.toHaveAttribute("target");
+
+    await userEvent.click(screen.getByRole("button", { name: "Start call" }));
+    await within(screen.getByRole("region", { name: "Watch this call" })).findByRole("link", { name: /open call detail/i });
+    const signIn = within(header).getByRole("link", { name: /staff sign in/i });
+    expect(signIn).toHaveAttribute("target", "_blank");
+    expect(signIn).toHaveAccessibleName(/opens in a new tab/);
+    unmount();
+
+    // The sign-in page and the staff gates have no header; they still carry the End control.
+    const gate = render(
+      <AuthTestProvider value={{ status: "signed-out" }}>
+        <MemoryRouter future={ROUTER_FUTURE}>
+          <GateLayout>
+            <p>sign-in form</p>
+          </GateLayout>
+        </MemoryRouter>
+      </AuthTestProvider>,
+    );
+    expect(screen.getByRole("button", { name: /end call/i })).toBeInTheDocument();
+    gate.unmount();
+    render(
+      <MemoryRouter future={ROUTER_FUTURE}>
+        <FullPageLoading />
+      </MemoryRouter>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /end call/i }));
+    await waitFor(() => expect(getCallState().status).toBe("ended"));
   });
 
   it("renders a wallet refusal from the SDK inline", async () => {

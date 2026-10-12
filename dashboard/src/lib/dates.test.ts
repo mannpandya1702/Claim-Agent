@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { customRange, dayKeysInRange, etDayStart, presetRange } from "./dates";
+import { customCaption, customDayCount, customRange, dayKeysInRange, etDayStart, isDayKey, parseCustomDays, presetRange } from "./dates";
 
 describe("Eastern date ranges", () => {
   // 01:30Z on Oct 13 is still Oct 12 in New York (EDT, UTC-4).
@@ -34,5 +34,29 @@ describe("Eastern date ranges", () => {
   it("accepts reversed custom days and rejects malformed ones", () => {
     expect(customRange("2026-10-12", "2026-10-10").from).toBe("2026-10-10T04:00:00.000Z");
     expect(() => etDayStart("10/12/2026")).toThrow();
+  });
+});
+
+describe("custom ranges", () => {
+  it("accepts only real calendar days", () => {
+    expect(isDayKey("2026-10-12")).toBe(true);
+    expect(isDayKey("2026-02-29")).toBe(false);
+    expect(isDayKey("2028-02-29")).toBe(true);
+    expect(isDayKey("2026-10-12T00:00")).toBe(false);
+    expect(isDayKey(null)).toBe(false);
+  });
+
+  it("orders the two days, counts them inclusively and caps the span at a year", () => {
+    expect(parseCustomDays("2026-10-05", "2026-10-01")).toEqual({ from: "2026-10-01", to: "2026-10-05" });
+    expect(customDayCount({ from: "2026-10-01", to: "2026-10-05" })).toBe(5);
+    expect(customDayCount({ from: "2026-10-12", to: "2026-10-12" })).toBe(1);
+    expect(parseCustomDays("2025-10-12", "2026-10-12")).toEqual({ from: "2025-10-12", to: "2026-10-12" });
+    expect(parseCustomDays("2025-10-11", "2026-10-12")).toBeNull();
+  });
+
+  it("captions a range, adding years only when they differ", () => {
+    expect(customCaption({ from: "2026-10-01", to: "2026-10-05" })).toBe("Oct 1 – Oct 5");
+    expect(customCaption({ from: "2026-10-12", to: "2026-10-12" })).toBe("Oct 12");
+    expect(customCaption({ from: "2025-12-29", to: "2026-01-04" })).toBe("Dec 29, 2025 – Jan 4, 2026");
   });
 });

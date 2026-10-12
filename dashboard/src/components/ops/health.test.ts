@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  airtableChannel,
   channelHealth,
   countHealth,
   deliveryChannels,
@@ -125,5 +126,43 @@ describe("job runs", () => {
     expect(summariseResult({ counts: { resolved: 3 }, sent: true })).toEqual({ parts: ["sent true"], more: true });
     expect(summariseResult({ ids: ["x", "y"] })).toEqual({ parts: ["ids 2 items"], more: false });
     expect(summariseResult(null)).toEqual({ parts: [], more: false });
+  });
+});
+
+describe("the Airtable call log channel", () => {
+  const base: OpsHealth = {
+    last_sla_run: null,
+    last_digest_run: null,
+    last_reaper_run: null,
+    open_escalations: 0,
+    sla_breaches: 0,
+    alerts_failed_24h: 0,
+    emails_failed_24h: 0,
+    emails_sent_24h: 0,
+    stuck_calls: 0,
+    analysis_missing_24h: 0,
+  };
+
+  it("is absent until the outbox columns exist", () => {
+    expect(airtableChannel(base)).toBeNull();
+    expect(deliveryChannels([], base).map((c) => c.channel)).toEqual(["telegram", "email"]);
+    expect(normaliseHealth(base)).not.toHaveProperty("outbox_pending");
+  });
+
+  it("counts delivered (24 h), queued and given-up rows, and is down when nothing arrives", () => {
+    const h = normaliseHealth({ ...base, outbox_pending: "0", outbox_dead: "3", outbox_delivered_24h: "0" } as unknown as OpsHealth);
+    const c = airtableChannel(h)!;
+    expect(c).toMatchObject({ channel: "airtable", label: "Airtable call log", owed: 3, delivered: 0, failed: 3, dead: true });
+    expect(deliveryChannels([], h).map((x) => x.channel)).toEqual(["telegram", "email", "airtable"]);
+    expect(airtableChannel({ ...base, outbox_pending: 2, outbox_dead: 0, outbox_delivered_24h: 5 })).toMatchObject({
+      tone: "warning",
+      status: "2 not delivered yet",
+    });
+  });
+
+  it("rates the every-minute outbox job on its own window", () => {
+    expect(jobHealth(ago(3), spec("outbox"), NOW).tone).toBe("good");
+    expect(jobHealth(ago(10), spec("outbox"), NOW).tone).toBe("warning");
+    expect(jobHealth(ago(30), spec("outbox"), NOW).tone).toBe("critical");
   });
 });

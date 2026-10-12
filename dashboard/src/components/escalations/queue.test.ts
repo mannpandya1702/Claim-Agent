@@ -1,18 +1,18 @@
 import { describe, expect, it } from "vitest";
-import type { Escalation } from "@/lib/types";
+import type { EscalationListRow } from "@/lib/types";
 import { callKeysOf, formatWait, parseKind, parseTab, summariseOpen, visibleRows } from "./queue";
 
 const NOW = new Date("2026-10-12T15:00:00Z");
 const ago = (min: number) => new Date(NOW.getTime() - min * 60_000).toISOString();
 
-function esc(over: Partial<Escalation>): Escalation {
+function esc(over: Partial<EscalationListRow>): EscalationListRow {
   return {
     id: "e",
     call_key: "call",
     kind: "representative",
     reason: "representative_requested",
     details: null,
-    callback_phone: null,
+    callback_phone_masked: null,
     channel: "webCall",
     verified: false,
     callback_source: "none",

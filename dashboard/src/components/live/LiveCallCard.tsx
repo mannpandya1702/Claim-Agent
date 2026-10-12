@@ -1,20 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowUpRight, CircleCheck, LifeBuoy, MessageSquareDashed, Siren, UserCheck, Wrench } from "lucide-react";
+import { ArrowUpRight, CircleCheck, LifeBuoy, MessageSquareDashed, Siren, TriangleAlert, UserCheck, Wrench } from "lucide-react";
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { callHref, ChannelLabel, elapsedSeconds } from "@/components/calls/CallTable";
 import { IdentityBadge } from "@/components/calls/IdentityPath";
 import { TranscriptView } from "@/components/calls/TranscriptView";
 import { useNow } from "@/components/calls/hooks";
+import { ErrorState } from "@/components/ErrorState";
 import { LiveDot } from "@/components/LiveDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { callerLabel, formatDateTimeLong, formatDuration, formatTime, maskPhone } from "@/lib/format";
+import { callerLabel, formatDateTimeLong, formatDuration, formatTime } from "@/lib/format";
 import {
   fetchCallAttempts,
   fetchCallEscalations,
-  fetchCallSession,
+  fetchCallLevel,
   fetchTranscriptLines,
   qk,
   type CallSummary,
@@ -41,13 +42,14 @@ export function LiveCallCard({ call, now: fixedNow }: LiveCallCardProps) {
 
   const linesQ = useQuery({ queryKey: qk.callTranscript(id), queryFn: () => fetchTranscriptLines(id), refetchInterval: poll });
   const attemptsQ = useQuery({ queryKey: qk.callAttempts(id), queryFn: () => fetchCallAttempts(id), refetchInterval: poll });
-  const sessionQ = useQuery({ queryKey: qk.callSession(id), queryFn: () => fetchCallSession(id), refetchInterval: poll });
+  // Level only: a list card has no use for the session's caller number.
+  const sessionQ = useQuery({ queryKey: qk.callLevel(id), queryFn: () => fetchCallLevel(id), refetchInterval: poll });
   const escalationsQ = useQuery({ queryKey: qk.callEscalations(id), queryFn: () => fetchCallEscalations(id), refetchInterval: poll });
 
   const filter = `call_key=eq.${id}`;
   useRealtimeRows("transcript_lines", filter, [qk.callTranscript(id)]);
   useRealtimeRows("attempts", filter, [qk.callAttempts(id)]);
-  useRealtimeRows("call_sessions", filter, [qk.callSession(id)]);
+  useRealtimeRows("call_sessions", filter, [qk.callLevel(id)]);
   useRealtimeRows("escalations", filter, [qk.callEscalations(id)]);
 
   const attempts = useMemo(() => attemptsQ.data ?? [], [attemptsQ.data]);
@@ -55,7 +57,7 @@ export function LiveCallCard({ call, now: fixedNow }: LiveCallCardProps) {
   const last = lastAttempt(attempts);
   const escalation = escalationBadge(escalationsQ.data ?? []);
   const titleId = `live-${id}`;
-  const phone = call.caller_phone ? maskPhone(call.caller_phone) : null;
+  const phone = call.caller_phone_masked;
 
   return (
     <article
@@ -92,10 +94,18 @@ export function LiveCallCard({ call, now: fixedNow }: LiveCallCardProps) {
         {sessionQ.isPending ? <Skeleton className="h-6 w-28" /> : <IdentityBadge level={sessionQ.data?.level ?? "none"} />}
         <LastTool tool={last?.tool_name ?? null} code={last?.code ?? null} loading={attemptsQ.isPending} />
         {escalation && <EscalationStateBadge info={escalation} />}
+        {escalationsQ.isError && !escalationsQ.data && (
+          <Badge variant="muted" title="Could not load this call's escalations">
+            <TriangleAlert aria-hidden="true" />
+            Escalations unavailable
+          </Badge>
+        )}
       </div>
 
       <div className="min-h-0 flex-1 px-2 pb-2 pt-1 sm:px-3">
-        {linesQ.isPending ? (
+        {linesQ.isError && !linesQ.data ? (
+          <ErrorState compact title="Could not load the transcript" error={linesQ.error} onRetry={() => void linesQ.refetch()} />
+        ) : linesQ.isPending ? (
           <div className="space-y-3 px-2 py-3" aria-hidden="true">
             <Skeleton className="h-10 w-3/4" />
             <Skeleton className="ml-auto h-10 w-2/3" />

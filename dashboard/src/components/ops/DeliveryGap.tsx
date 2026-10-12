@@ -1,4 +1,4 @@
-import { CircleCheck, CircleDashed, Mail, OctagonAlert, Send, TriangleAlert, type LucideIcon } from "lucide-react";
+import { CircleCheck, CircleDashed, Mail, OctagonAlert, Send, Table2, TriangleAlert, type LucideIcon } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatCount } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -17,7 +17,7 @@ const FAILED = "var(--status-critical)";
 const PENDING = "color-mix(in oklab, var(--series-1) 30%, var(--card))";
 const EMPTY = "var(--muted)";
 
-const CHANNEL_ICONS: Record<string, LucideIcon> = { telegram: Send, email: Mail };
+const CHANNEL_ICONS: Record<string, LucideIcon> = { telegram: Send, email: Mail, airtable: Table2 };
 
 const TONE_STYLE: Record<ChannelTone, { icon: LucideIcon; ink: string }> = {
   good: { icon: CircleCheck, ink: "text-good-ink" },
@@ -55,13 +55,13 @@ export function DeliveryMeter({ channel }: { channel: ChannelHealth }) {
   return (
     <div role="img" aria-label={label} className="flex h-2.5 w-full gap-[2px] overflow-hidden rounded-full" data-testid={`meter-${channel.channel}`}>
       {segments.length === 0 ? (
-        <span className="h-full w-full" style={{ backgroundColor: EMPTY }} />
+        <span className="viz-mark h-full w-full" style={{ backgroundColor: EMPTY }} />
       ) : (
         segments.map((seg) => (
           <span
             key={seg.key}
             title={seg.title}
-            className="h-full transition-[width] duration-300"
+            className="viz-mark h-full transition-[width] duration-300"
             style={{ width: `${seg.share}%`, backgroundColor: seg.color }}
             data-segment={seg.key}
           />
@@ -74,7 +74,7 @@ export function DeliveryMeter({ channel }: { channel: ChannelHealth }) {
 function LegendItem({ color, label, value }: { color: string; label: string; value: number }) {
   return (
     <li className="flex items-center gap-1.5">
-      <span aria-hidden="true" className="size-2.5 shrink-0 rounded-[3px]" style={{ backgroundColor: color }} />
+      <span aria-hidden="true" className="viz-mark size-2.5 shrink-0 rounded-[3px]" style={{ backgroundColor: color }} />
       <span className="text-ink-2">{label}</span>
       <span className="font-medium tabular text-ink-1">{formatCount(value)}</span>
     </li>
@@ -93,7 +93,7 @@ export function ChannelRow({ channel }: { channel: ChannelHealth }) {
         </h3>
         <p className="text-sm text-ink-2">
           {channel.owed === 0 ? (
-            "No alerts owed"
+            channel.channel === "airtable" ? "Nothing queued" : "No alerts owed"
           ) : (
             <>
               <span className="font-semibold tabular text-ink-1">{formatCount(channel.delivered)}</span> of{" "}

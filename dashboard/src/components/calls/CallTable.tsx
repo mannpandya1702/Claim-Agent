@@ -1,4 +1,4 @@
-import { Globe, LifeBuoy, MessageSquare, Phone, PhoneOutgoing, Siren, type LucideIcon } from "lucide-react";
+import { Globe, LifeBuoy, Mail, MessageSquare, Phone, PhoneOutgoing, Siren, type LucideIcon } from "lucide-react";
 import type { MouseEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { FlagChip } from "@/components/FlagChip";
@@ -15,7 +15,6 @@ import {
   formatDuration,
   formatMoney,
   isInProgress,
-  maskPhone,
 } from "@/lib/format";
 import type { CallListRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -52,7 +51,8 @@ export function elapsedSeconds(row: Pick<CallListRow, "started_at" | "created_at
 
 /**
  * The calls list. In-progress rows (ended_at is null, never the generated status column) show a
- * pulsing dot and a running clock. Phones are masked here; only the detail page shows them whole.
+ * pulsing dot and a running clock. Phones arrive already masked from search_calls; only the
+ * detail page reads them whole.
  */
 export function CallTable({ rows, loading = false, fetching = false, now: fixedNow, className }: CallTableProps) {
   const compact = useMediaQuery("(max-width: 767px)");
@@ -117,7 +117,7 @@ function CallRow({ row, now }: { row: CallListRow; now: Date }) {
         >
           {callerLabel(row.caller_name)}
         </Link>
-        {row.caller_phone && <span className="block truncate text-xs tabular text-ink-3">{maskPhone(row.caller_phone)}</span>}
+        {row.caller_phone_masked && <span className="block truncate text-xs tabular text-ink-3">{row.caller_phone_masked}</span>}
       </TableCell>
       <TableCell className="whitespace-nowrap">
         <ChannelLabel channel={row.channel} />
@@ -142,7 +142,7 @@ function CallRow({ row, now }: { row: CallListRow; now: Date }) {
         <FlagList flags={row.flags} />
       </TableCell>
       <TableCell className="pr-4 sm:pr-5">
-        <AlertIcons escalated={row.escalated} emergency={row.emergency} />
+        <AlertIcons escalated={row.escalated} emergency={row.emergency} emailed={row.emailed} />
       </TableCell>
     </TableRow>
   );
@@ -189,9 +189,9 @@ function FlagList({ flags }: { flags: string[] | null | undefined }) {
   );
 }
 
-/** Escalation and emergency markers: icon shape plus an accessible name, never color alone. */
-export function AlertIcons({ escalated, emergency }: { escalated: boolean; emergency: boolean }) {
-  if (!escalated && !emergency) return <span className="sr-only">None</span>;
+/** Emergency, escalation and email markers: icon shape plus an accessible name, never color alone. */
+export function AlertIcons({ escalated, emergency, emailed = false }: { escalated: boolean; emergency: boolean; emailed?: boolean }) {
+  if (!escalated && !emergency && !emailed) return <span className="sr-only">None</span>;
   return (
     <span className="flex items-center gap-2">
       {emergency && (
@@ -202,6 +202,11 @@ export function AlertIcons({ escalated, emergency }: { escalated: boolean; emerg
       {escalated && (
         <span role="img" aria-label="Escalated" title="Escalated to a representative" className="inline-flex text-ink-2">
           <LifeBuoy className="size-4" aria-hidden="true" />
+        </span>
+      )}
+      {emailed && (
+        <span role="img" aria-label="Email sent" title="At least one email was sent for this call" className="inline-flex text-ink-2">
+          <Mail className="size-4" aria-hidden="true" />
         </span>
       )}
     </span>
@@ -252,11 +257,11 @@ function CallList({ rows, loading, fetching, now, className }: Required<Omit<Cal
               </span>
             </div>
             {row.summary && !live && <p className="mt-1.5 line-clamp-2 text-xs text-ink-2">{row.summary}</p>}
-            {(row.flags.length > 0 || row.escalated || row.emergency || (!live && row.sentiment)) && (
+            {(row.flags.length > 0 || row.escalated || row.emergency || row.emailed || (!live && row.sentiment)) && (
               <div className="relative z-10 mt-2 flex w-fit flex-wrap items-center gap-1.5">
                 {!live && row.sentiment && <SentimentBadge sentiment={row.sentiment} />}
                 <FlagList flags={row.flags} />
-                <AlertIcons escalated={row.escalated} emergency={row.emergency} />
+                <AlertIcons escalated={row.escalated} emergency={row.emergency} emailed={row.emailed} />
               </div>
             )}
           </li>

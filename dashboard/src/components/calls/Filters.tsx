@@ -1,12 +1,13 @@
-import { CalendarRange, LifeBuoy, Search, TriangleAlert, X, type LucideIcon } from "lucide-react";
+import { LifeBuoy, Search, TriangleAlert, X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { DateRangeSelect } from "@/components/DateRangeSelect";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { channelLabel, OUTCOME_META, SENTIMENT_META } from "@/lib/format";
 import { OUTCOMES, SENTIMENTS, type Outcome, type Sentiment } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { CHANNEL_FILTERS, hasActiveFilters, RANGE_OPTIONS, type CallFilters, type RangeValue } from "./callFilters";
+import { CHANNEL_FILTERS, hasActiveFilters, RANGE_OPTIONS, type CallFilters } from "./callFilters";
 import { useDebouncedCallback } from "./hooks";
 
 export const SEARCH_DEBOUNCE_MS = 300;
@@ -30,13 +31,15 @@ export function Filters({ value, onChange, onReset, className }: FiltersProps) {
   return (
     <div role="search" aria-label="Filter calls" className={cn("grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center", className)}>
       <SearchBox value={value.q} onSearch={(q) => onChange({ q })} />
-      <FilterSelect<RangeValue>
-        label="Date range"
-        icon={CalendarRange}
+      <DateRangeSelect
         value={value.range}
-        onChange={(range) => onChange({ range: range ?? "all" })}
+        custom={value.custom}
         options={RANGE_OPTIONS}
-        className="sm:w-[10.5rem]"
+        onPreset={(range) => onChange({ range, custom: null })}
+        onCustom={(custom) => onChange({ range: "custom", custom })}
+        className="w-auto flex-1 sm:w-[11.5rem] sm:flex-none"
+        // A full row on phones, so a custom range's two days are readable.
+        containerClassName="col-span-2 sm:col-span-1"
       />
       <FilterSelect<Outcome>
         label="Outcome"
@@ -159,19 +162,16 @@ interface FilterSelectProps<T extends string> {
   options: Option<T>[];
   /** Adds an "any" row; omit when one of the options is always selected. */
   anyLabel?: string;
-  icon?: LucideIcon;
   className?: string;
 }
 
-function FilterSelect<T extends string>({ label, value, onChange, options, anyLabel, icon: Icon, className }: FilterSelectProps<T>) {
+function FilterSelect<T extends string>({ label, value, onChange, options, anyLabel, className }: FilterSelectProps<T>) {
   return (
     <Select value={value ?? ANY} onValueChange={(v) => onChange(v === ANY ? null : (v as T))}>
-      {/* Icon and value sit directly in the trigger: its [&>span]:line-clamp-1 would stack a wrapper span. */}
       <SelectTrigger
         aria-label={label}
         className={cn("w-full justify-start [&>span]:flex-1 [&>span]:text-left", value !== null && anyLabel && "border-border-strong bg-accent-wash", className)}
       >
-        {Icon && <Icon className="size-4 shrink-0 text-ink-3" aria-hidden="true" />}
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
@@ -179,7 +179,7 @@ function FilterSelect<T extends string>({ label, value, onChange, options, anyLa
         {options.map((o) => (
           <SelectItem key={o.value} value={o.value}>
             <span className="flex items-center gap-2">
-              {o.swatch && <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: o.swatch }} />}
+              {o.swatch && <span aria-hidden="true" className="viz-mark size-2 shrink-0 rounded-full" style={{ backgroundColor: o.swatch }} />}
               {o.label}
             </span>
           </SelectItem>

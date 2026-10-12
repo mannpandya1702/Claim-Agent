@@ -10,9 +10,11 @@ import type {
   DeliveryGapRow,
   EmailRow,
   Escalation,
+  EscalationListRow,
   EscalationStatus,
   JobRun,
   OpsHealth,
+  OutboxEvent,
   SearchCallsParams,
   TranscriptLineRow,
 } from "./types";
@@ -32,10 +34,13 @@ export const qk = {
   call: (id: string) => ["call", id] as const,
   callRow: (id: string) => ["call", id, "row"] as const,
   callSession: (id: string) => ["call", id, "session"] as const,
+  /** The identity level alone, for live cards (no caller number). */
+  callLevel: (id: string) => ["call", id, "level"] as const,
   callAttempts: (id: string) => ["call", id, "attempts"] as const,
   callTranscript: (id: string) => ["call", id, "transcript"] as const,
   callEscalations: (id: string) => ["call", id, "escalations"] as const,
   callEmails: (id: string) => ["call", id, "emails"] as const,
+  callOutbox: (id: string) => ["call", id, "outbox"] as const,
 
   metrics: (range: DateRange) => ["metrics", range.from, range.to] as const,
   callsByDay: (range: DateRange) => ["calls-by-day", range.from, range.to] as const,
@@ -53,8 +58,9 @@ function fail(error: { message: string } | null): void {
   if (error) throw new Error(error.message);
 }
 
-// The detail page reads the full row except the search vector; lists use search_calls, which
-// never returns transcript or messages.
+// The detail page reads the full row except the search vector and the stored recording
+// reference (has_recording says whether there is one; playback goes through recording-url).
+// Lists use search_calls, which never returns transcript, messages or a full phone number.
 export const CALL_DETAIL_COLUMNS = [
   "id",
   "vapi_call_id",
@@ -74,7 +80,7 @@ export const CALL_DETAIL_COLUMNS = [
   "duration_seconds",
   "ended_reason",
   "transcript",
-  "recording_url",
+  "has_recording",
   "cost",
   "success_evaluation",
   "analysis_raw",
@@ -88,9 +94,12 @@ export const CALL_DETAIL_COLUMNS = [
   "updated_at",
 ].join(",");
 
-/** Columns for live cards and other non-detail views (no transcript, messages or raw analysis). */
+/**
+ * Columns for live cards and other non-detail views: no transcript, messages, raw analysis or
+ * full phone number (the masked one is a generated column).
+ */
 export const CALL_SUMMARY_COLUMNS =
-  "id,vapi_call_id,channel,caller_name,caller_phone,outcome,sentiment,escalated,emergency,flags,started_at,ended_at,duration_seconds,assistant_name,created_at,updated_at";
+  "id,vapi_call_id,channel,caller_name,caller_phone_masked,outcome,sentiment,escalated,emergency,flags,started_at,ended_at,duration_seconds,assistant_name,created_at,updated_at";
 
 export type CallSummary = Pick<
   CallInteraction,
@@ -98,7 +107,6 @@ export type CallSummary = Pick<
   | "vapi_call_id"
   | "channel"
   | "caller_name"
-  | "caller_phone"
   | "outcome"
   | "sentiment"
   | "escalated"
@@ -110,7 +118,7 @@ export type CallSummary = Pick<
   | "assistant_name"
   | "created_at"
   | "updated_at"
->;
+> & { caller_phone_masked: string | null };
 
 // ---------------------------------------------------------------------------------------------
 // Lists and aggregates (RPCs; all aggregation happens in SQL)
@@ -169,6 +177,13 @@ export async function fetchCallSession(id: string): Promise<CallSession | null> 
   return (data ?? null) as CallSession | null;
 }
 
+/** Identity level only, for live cards: the session's caller_number stays on the detail page. */
+export async function fetchCallLevel(id: string): Promise<Pick<CallSession, "call_key" | "level"> | null> {
+  const { data, error } = await supabase.from("call_sessions").select("call_key,level").eq("call_key", id).maybeSingle();
+  fail(error);
+  return (data ?? null) as Pick<CallSession, "call_key" | "level"> | null;
+}
+
 export async function fetchCallAttempts(id: string): Promise<Attempt[]> {
   const { data, error } = await supabase
     .from("attempts")
@@ -202,6 +217,17 @@ export async function fetchCallEmails(id: string): Promise<EmailRow[]> {
   return (data ?? []) as EmailRow[];
 }
 
+/** Post-call deliveries for this call (the Airtable call log), keyed by the call id. */
+export async function fetchCallOutbox(id: string): Promise<OutboxEvent[]> {
+  const { data, error } = await supabase
+    .from("outbox_events")
+    .select("id,kind,ref_id,destination,delivered_at,attempts,last_error,created_at,updated_at")
+    .eq("ref_id", id)
+    .order("created_at");
+  fail(error);
+  return (data ?? []) as OutboxEvent[];
+}
+
 /**
  * Saves staff notes, the one browser-writable column. A policy denial updates zero rows and
  * PostgREST still answers 2xx, so the row is selected back and a missing row is an error.
@@ -222,12 +248,16 @@ export async function saveStaffNotes(id: string, notes: string): Promise<string 
 // Escalations
 // ---------------------------------------------------------------------------------------------
 
-export async function fetchEscalations(status: EscalationStatus | "all" = "all"): Promise<Escalation[]> {
-  let q = supabase.from("escalations").select("*");
+/** The queue's columns: the masked callback number only; the call page reads the full one. */
+export const ESCALATION_LIST_COLUMNS =
+  "id,call_key,kind,reason,details,callback_phone_masked,channel,verified,callback_source,alert_status,delivery_error,status,claimed_by,claimed_at,closed_by,closed_at,close_note,realerted_at,created_at,updated_at";
+
+export async function fetchEscalations(status: EscalationStatus | "all" = "all"): Promise<EscalationListRow[]> {
+  let q = supabase.from("escalations").select(ESCALATION_LIST_COLUMNS);
   if (status !== "all") q = q.eq("status", status);
   const { data, error } = await q.order("created_at", { ascending: status === "open" }).limit(200);
   fail(error);
-  return (data ?? []) as Escalation[];
+  return (data ?? []) as unknown as EscalationListRow[];
 }
 
 /** Claims an open escalation. A second claim returns the row with the first claimer, not an error. */
@@ -253,14 +283,19 @@ export async function fetchOpsHealth(): Promise<OpsHealth | null> {
   return (data ?? null) as OpsHealth | null;
 }
 
+/** The outbox job runs every minute; it gets its own small slice so it cannot crowd the others out. */
+export const OUTBOX_RUNS_SHOWN = 10;
+
 export async function fetchJobRuns(limit = 50): Promise<JobRun[]> {
-  const { data, error } = await supabase
-    .from("job_runs")
-    .select("*")
-    .order("started_at", { ascending: false })
-    .limit(limit);
-  fail(error);
-  return (data ?? []) as JobRun[];
+  const [others, outbox] = await Promise.all([
+    supabase.from("job_runs").select("*").neq("job", "outbox").order("started_at", { ascending: false }).limit(limit),
+    supabase.from("job_runs").select("*").eq("job", "outbox").order("started_at", { ascending: false }).limit(OUTBOX_RUNS_SHOWN),
+  ]);
+  fail(others.error);
+  fail(outbox.error);
+  return [...((others.data ?? []) as JobRun[]), ...((outbox.data ?? []) as JobRun[])].sort((a, b) =>
+    a.started_at < b.started_at ? 1 : a.started_at > b.started_at ? -1 : 0,
+  );
 }
 
 export async function fetchDeliveryGap(hours = 24): Promise<DeliveryGapRow[]> {

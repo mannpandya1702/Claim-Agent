@@ -28,7 +28,7 @@ vi.mock("@/lib/queries", async (importOriginal) => {
     fetchCall: vi.fn(async () => data.row),
     fetchTranscriptLines: vi.fn(async () => data.lines),
     fetchCallAttempts: vi.fn(async () => data.attempts),
-    fetchCallSession: vi.fn(async () => data.session),
+    fetchCallLevel: vi.fn(async () => data.session),
     fetchCallEscalations: vi.fn(async () => []),
   };
 });

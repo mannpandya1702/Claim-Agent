@@ -13,6 +13,7 @@ import {
   Send,
   Siren,
   Timer,
+  TriangleAlert,
   UserCheck,
 } from "lucide-react";
 import { useState } from "react";
@@ -22,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "@/components/ui/sonner";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/lib/auth";
@@ -38,7 +40,7 @@ import {
   minutesBetween,
 } from "@/lib/format";
 import { claimEscalation, closeEscalation, qk } from "@/lib/queries";
-import type { AlertStatus, EmailKind, EmailRow, Escalation } from "@/lib/types";
+import type { AlertStatus, EmailKind, EmailRow, Escalation, EscalationListRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { callHref } from "./CallTable";
 import { EmailStatusBadge, emailKindLabel } from "./EmailList";
@@ -58,13 +60,20 @@ export function isSlaBreached(e: Pick<Escalation, "status" | "created_at">, now:
 }
 
 interface EscalationCardProps {
-  escalation: Escalation;
+  /** A full row on the call page; a queue row (masked callback number only) in lists. */
+  escalation: Escalation | EscalationListRow;
   /** Emails for the same call; the card shows the ones this escalation sent. */
   emails?: readonly EmailRow[];
   /** Adds a link to the call (for lists outside the call page). */
   showCallLink?: boolean;
-  /** Masks the callback number (lists); the call page shows it whole so staff can dial it. */
+  /**
+   * Lists: the callback number shows masked, as plain text with no tel: link (a link would put
+   * the whole number in the DOM, the status bar and copied links). Staff dial from the call page,
+   * one click away through "Open call".
+   */
   maskCallback?: boolean;
+  /** The emails query has not answered yet, or failed: say so instead of "None sent". */
+  emailsState?: "loading" | "error";
   /** Injectable clock for the age and SLA badge (tests). */
   now?: Date;
   className?: string;
@@ -76,7 +85,15 @@ interface EscalationCardProps {
  * close_escalation, the only write path, which return the row (a second claim returns the
  * first claimer instead of failing).
  */
-export function EscalationCard({ escalation: e, emails = [], showCallLink = false, maskCallback = false, now: fixedNow, className }: EscalationCardProps) {
+export function EscalationCard({
+  escalation: e,
+  emails = [],
+  showCallLink = false,
+  maskCallback = false,
+  emailsState,
+  now: fixedNow,
+  className,
+}: EscalationCardProps) {
   const ticking = useNow(30_000, !fixedNow && e.status === "open");
   const now = fixedNow ?? ticking;
   const { email: me } = useAuth();
@@ -85,9 +102,12 @@ export function EscalationCard({ escalation: e, emails = [], showCallLink = fals
   const [note, setNote] = useState("");
 
   const applyRow = (row: Escalation) => {
-    const swap = (old: unknown) => (Array.isArray(old) ? old.map((r: Escalation) => (r.id === row.id ? row : r)) : old);
-    queryClient.setQueryData(qk.callEscalations(row.call_key), swap);
-    queryClient.setQueriesData({ queryKey: qk.escalations() }, swap);
+    const swapIn = (next: Escalation | EscalationListRow) => (old: unknown) =>
+      Array.isArray(old) ? old.map((r: Escalation | EscalationListRow) => (r.id === next.id ? next : r)) : old;
+    // The transition functions return the whole row; the queue's cache keeps its masked shape.
+    const listRow: EscalationListRow = { ...row, callback_phone: undefined };
+    queryClient.setQueryData(qk.callEscalations(row.call_key), swapIn(row));
+    queryClient.setQueriesData({ queryKey: qk.escalations() }, swapIn(listRow));
     void queryClient.invalidateQueries({ queryKey: qk.escalations() });
     void queryClient.invalidateQueries({ queryKey: qk.callEscalations(row.call_key) });
   };
@@ -122,6 +142,12 @@ export function EscalationCard({ escalation: e, emails = [], showCallLink = fals
   const related = emails.filter((m) => m.call_key === e.call_key && EMAIL_KINDS[e.kind].includes(m.kind));
   const breached = isSlaBreached(e, now);
   const busy = claim.isPending || close.isPending;
+  const fullCallback = e.callback_phone ?? null;
+  const callbackShown = maskCallback
+    ? (e.callback_phone_masked ?? (fullCallback ? maskPhone(fullCallback) : null))
+    : fullCallback
+      ? formatPhone(fullCallback)
+      : (e.callback_phone_masked ?? null);
 
   return (
     <article
@@ -168,15 +194,22 @@ export function EscalationCard({ escalation: e, emails = [], showCallLink = fals
         <div className="min-w-0">
           <dt className="text-xs text-ink-3">Callback number</dt>
           <dd className="mt-0.5">
-            {e.callback_phone ? (
+            {callbackShown ? (
               <>
-                <a
-                  href={`tel:${e.callback_phone}`}
-                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-sm font-medium tabular text-link outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <Phone className="size-3.5 shrink-0" aria-hidden="true" />
-                  {maskCallback ? maskPhone(e.callback_phone) : formatPhone(e.callback_phone)}
-                </a>
+                {maskCallback || !e.callback_phone ? (
+                  <span className="inline-flex items-center gap-1.5 whitespace-nowrap font-medium tabular text-ink-1">
+                    <Phone className="size-3.5 shrink-0 text-ink-3" aria-hidden="true" />
+                    {callbackShown}
+                  </span>
+                ) : (
+                  <a
+                    href={`tel:${e.callback_phone}`}
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-sm font-medium tabular text-link outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <Phone className="size-3.5 shrink-0" aria-hidden="true" />
+                    {callbackShown}
+                  </a>
+                )}
                 <span className="block text-xs text-ink-3">{CALLBACK_SOURCE_LABELS[e.callback_source ?? "none"]}</span>
               </>
             ) : (
@@ -198,7 +231,17 @@ export function EscalationCard({ escalation: e, emails = [], showCallLink = fals
         <div>
           <dt className="text-xs text-ink-3">Email</dt>
           <dd className="mt-1">
-            {related.length === 0 ? (
+            {emailsState === "error" && related.length === 0 ? (
+              <span className="inline-flex items-center gap-1.5 text-ink-2">
+                <TriangleAlert className="size-3.5 shrink-0 text-warning-ink" aria-hidden="true" />
+                Could not load
+              </span>
+            ) : emailsState === "loading" && related.length === 0 ? (
+              <>
+                <span className="sr-only">Loading emails</span>
+                <Skeleton className="h-5 w-24" />
+              </>
+            ) : related.length === 0 ? (
               <span className="text-ink-2">None sent</span>
             ) : (
               <ul className="space-y-1">

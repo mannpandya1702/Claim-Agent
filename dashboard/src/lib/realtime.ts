@@ -25,6 +25,7 @@ export const PRIMARY_KEYS: Record<RealtimeTable, readonly string[]> = {
   emails: ["id"],
   transcript_lines: ["id"],
   attempts: ["call_key", "tool_call_id"],
+  outbox_events: ["id"],
 };
 
 export interface ChangePayload {
@@ -48,17 +49,29 @@ export interface RealtimeClientLike {
 // Cache surgery for DELETE
 // ---------------------------------------------------------------------------------------------
 
-function matchesKey(row: unknown, pk: readonly string[], old: Record<string, unknown>): boolean {
+function hasKey(row: unknown, pk: readonly string[]): boolean {
   if (!row || typeof row !== "object") return false;
   const r = row as Record<string, unknown>;
-  return pk.every((f) => r[f] !== undefined && r[f] !== null && String(r[f]) === String(old[f]));
+  return pk.every((f) => r[f] !== undefined && r[f] !== null);
+}
+
+function matchesKey(row: unknown, pk: readonly string[], old: Record<string, unknown>): boolean {
+  return hasKey(row, pk) && pk.every((f) => String((row as Record<string, unknown>)[f]) === String(old[f]));
+}
+
+/**
+ * Rows of this table can be found by key only when every row carries the key. Aggregates that
+ * happen to be arrays (calls_by_day, the delivery gap) carry none, so they are an unknown shape.
+ */
+function isKeyedList(rows: readonly unknown[], pk: readonly string[]): boolean {
+  return rows.every((row) => hasKey(row, pk));
 }
 
 /**
  * Removes the row identified by `old` from a cached value. Understands the shapes the pages
  * cache: a plain array of rows, an object with a `rows` array (optionally a numeric `total`),
- * and a single row (which becomes null). `handled: false` means the shape is unknown and the
- * caller should invalidate instead.
+ * and a single row (which becomes null). `handled: false` means the shape is unknown (including
+ * a list whose rows lack the primary key) and the caller should invalidate instead.
  */
 export function removeRowFromData(
   data: unknown,
@@ -67,18 +80,22 @@ export function removeRowFromData(
 ): { handled: boolean; data: unknown } {
   if (data === undefined || data === null) return { handled: true, data };
   if (Array.isArray(data)) {
+    if (!isKeyedList(data, pk)) return { handled: false, data };
     return { handled: true, data: data.filter((row) => !matchesKey(row, pk, old)) };
   }
   if (typeof data === "object") {
     const obj = data as Record<string, unknown>;
     if (Array.isArray(obj.rows)) {
+      if (!isKeyedList(obj.rows, pk)) return { handled: false, data };
       const rows = obj.rows.filter((row) => !matchesKey(row, pk, old));
       const removed = obj.rows.length - rows.length;
       const next: Record<string, unknown> = { ...obj, rows };
       if (typeof obj.total === "number" && removed > 0) next.total = Math.max(0, obj.total - removed);
       return { handled: true, data: next };
     }
-    if (matchesKey(obj, pk, old)) return { handled: true, data: null };
+    // A single keyed row: gone if it matches, untouched otherwise. An object without the key
+    // (metrics, ops_health) is an aggregate, so it falls through to "unknown".
+    if (hasKey(obj, pk)) return matchesKey(obj, pk, old) ? { handled: true, data: null } : { handled: true, data };
   }
   return { handled: false, data };
 }
@@ -156,20 +173,31 @@ export function startRealtimeSync(opts: RealtimeSyncOptions): () => void {
   const binding: Record<string, unknown> = { event: "*", schema: "public", table };
   if (filter) binding.filter = filter;
 
-  const channel = client
-    .channel(channelName)
-    .on("postgres_changes", binding, ((payload: ChangePayload) => {
-      if (disposed) return;
-      if (payload.eventType === "DELETE") handleDelete(payload.old);
-      else scheduleInvalidate();
-    }) as (payload: never) => void)
-    .on("system", {}, (() => {
-      // SUBSCRIBED means the socket joined; the first system message means the replication
-      // listener is actually attached. Rows written between the two would otherwise be missed.
-      if (disposed || systemSeen) return;
-      systemSeen = true;
-      invalidateAll();
+  const onChange = ((payload: ChangePayload) => {
+    if (disposed) return;
+    if (payload.eventType === "DELETE") handleDelete(payload.old);
+    else scheduleInvalidate();
+  }) as (payload: never) => void;
+
+  let channel = client.channel(channelName).on("postgres_changes", binding, onChange);
+  // Realtime cannot filter DELETE events (the old record carries only the primary key, so a
+  // call_key filter never matches), so a filtered page also listens to every DELETE on the
+  // table. handleDelete matches by primary key against this page's own queries, so another
+  // call's delete is a no-op. A row deleted twice over both bindings is removed once.
+  if (filter) {
+    channel = channel.on("postgres_changes", { event: "DELETE", schema: "public", table }, ((payload: ChangePayload) => {
+      if (disposed || payload.eventType !== "DELETE") return;
+      handleDelete(payload.old);
     }) as (payload: never) => void);
+  }
+
+  channel = channel.on("system", {}, (() => {
+    // SUBSCRIBED means the socket joined; the first system message means the replication
+    // listener is actually attached. Rows written between the two would otherwise be missed.
+    if (disposed || systemSeen) return;
+    systemSeen = true;
+    invalidateAll();
+  }) as (payload: never) => void);
 
   onStatus?.("connecting");
   startPolling();

@@ -26,6 +26,7 @@ function deps(overrides: Partial<RecordingDeps> = {}): RecordingDeps {
   return {
     vapiPrivateKey: "vapi-private",
     isStaff: () => Promise.resolve(true),
+    callVisible: () => Promise.resolve(true),
     fetch:
       fakeFetch(() =>
         new Response(null, { status: 302, headers: { location: "https://storage.example/rec.wav?sig=1" } })
@@ -113,6 +114,33 @@ Deno.test("handler: refuses without a bearer, for non-staff, and when the check 
   await failing.body?.cancel();
 
   // VAPI is never asked on behalf of a refused caller
+  assertEquals(f.calls.length, 0);
+});
+
+Deno.test("handler: a call the caller cannot read gets 404 and VAPI is never asked", async () => {
+  const f = fakeFetch(() => new Response(null, { status: 302, headers: { location: "https://x" } }));
+  const seen: { authorization: string; callId: string }[] = [];
+  const res = await createHandler(deps({
+    fetch: f.fn,
+    callVisible: (authorization, callId) => {
+      seen.push({ authorization, callId });
+      return Promise.resolve(false);
+    },
+  }))(post({ call_id: CALL_ID }));
+  assertEquals(res.status, 404);
+  assertEquals(await res.json(), { error: RECORDING_GONE });
+  // checked as the caller, with the caller's own token
+  assertEquals(seen, [{ authorization: "Bearer staff-jwt", callId: CALL_ID }]);
+  assertEquals(f.calls.length, 0);
+});
+
+Deno.test("handler: a failing call check is a 502, not a recording", async () => {
+  const f = fakeFetch(() => new Response(null, { status: 302, headers: { location: "https://x" } }));
+  const res = await createHandler(deps({ fetch: f.fn, callVisible: () => Promise.reject(new Error("db down")) }))(
+    post({ call_id: CALL_ID }),
+  );
+  assertEquals(res.status, 502);
+  assertEquals(await res.json(), { error: "Could not check the call" });
   assertEquals(f.calls.length, 0);
 });
 

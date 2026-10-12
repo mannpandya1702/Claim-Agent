@@ -47,7 +47,9 @@
   --series-6: #008300;
   --series-7: #6250d6;
   --series-8: #e34948;
-  --series-other: #898781;
+  /* The "Other" fold. One step darker than the muted gray, which sat under the normal-vision
+     floor beside aqua (14.5); this step clears all pairs with slots 1-3 (17.8 light). */
+  --series-other: #6b6a65;
 
   /* Diverging (sentiment): warm/cool poles around a neutral gray. */
   --diverging-pos: #2a78d6;
@@ -99,6 +101,7 @@
     --series-6: #008300;
     --series-7: #9085e9;
     --series-8: #e66767;
+    --series-other: #6a6964; /* all pairs with dark slots 1-3: normal-vision 16.1, CVD 9.4 */
 
     --diverging-pos: #3987e5;
     --diverging-neg: #e66767;
@@ -147,6 +150,7 @@
   --series-6: #008300;
   --series-7: #9085e9;
   --series-8: #e66767;
+  --series-other: #6a6964; /* all pairs with dark slots 1-3: normal-vision 16.1, CVD 9.4 */
 
   --diverging-pos: #3987e5;
   --diverging-neg: #e66767;
@@ -280,5 +284,15 @@
   /* Columns of numbers align; standalone figures (KPI values) keep proportional digits. */
   .tabular {
     font-variant-numeric: tabular-nums;
+  }
+
+  /*
+   * Data marks and their swatches (chart segments, legend keys, badge dots, meters). Forced-colors
+   * modes repaint backgrounds and SVG fills with system colors, which would erase every mark, so
+   * marks keep their own colors there. Only marks opt out: text keeps the system colors.
+   */
+  .viz-mark,
+  .viz-chart .recharts-layer path {
+    forced-color-adjust: none;
   }
 }

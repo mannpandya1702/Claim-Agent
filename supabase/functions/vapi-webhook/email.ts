@@ -337,11 +337,22 @@ export function callbackRequestEmail(p: {
   };
 }
 
-export function emergencyEmail(p: { callKey: string; note: string | null; channel: string; dashboardUrl?: string }): {
+export function emergencyEmail(p: {
+  callKey: string;
+  note: string | null;
+  channel: string;
+  dashboardUrl?: string;
+  // Staff following up on an emergency need to know who it was and how to reach them; both are
+  // optional so a caller without them still gets the core alert.
+  verified?: boolean;
+  callbackPhone?: string | null;
+}): {
   subject: string;
   html: string;
 } {
   const note = typeof p.note === "string" && p.note.trim() ? redactPII(p.note) : null;
+  const verified = p.verified === true;
+  const phone = typeof p.callbackPhone === "string" && p.callbackPhone.trim() ? p.callbackPhone : null;
   const content = [
     `<p style="${STYLE_WARN}">POSSIBLE EMERGENCY REPORTED. The caller may be in danger right now.</p>`,
     para(escapeHtml(
@@ -350,6 +361,8 @@ export function emergencyEmail(p: { callKey: string; note: string | null; channe
     table([
       ["Call id", escapeHtml(p.callKey)],
       ["Reason", escapeHtml(reasonText("emergency"))],
+      ["Identity verified", verified ? "Yes" : "No"],
+      ["Callback number", phone ? escapeHtml(writtenPhone(phone)) : "None known (check the dashboard)"],
       ["Channel", escapeHtml(p.channel || "unknown")],
       ["Note (redacted)", note ? textBlock(note) : "No note given"],
     ]),

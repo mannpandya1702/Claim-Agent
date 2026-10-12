@@ -55,4 +55,9 @@ describe("RequireStaff", () => {
     renderGate("loading");
     expect(screen.getByRole("status")).toHaveTextContent("Checking access");
   });
+
+  it("shows no End control when no call is running", () => {
+    renderGate("not-staff", { email: "visitor@example.com" });
+    expect(screen.queryByRole("button", { name: /end call/i })).not.toBeInTheDocument();
+  });
 });

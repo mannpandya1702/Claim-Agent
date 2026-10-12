@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  HUED_OUTCOMES,
   callerLabel,
   channelLabel,
   etDayKey,
@@ -119,11 +120,11 @@ describe("dates are Eastern", () => {
 });
 
 describe("badge maps", () => {
-  it("covers every outcome, in a fixed slot order, with one distinct color each", () => {
+  it("covers every outcome: three hued in slot order (the all-pairs cap), the rest in the gray fold", () => {
     for (const o of OUTCOMES) expect(OUTCOME_ORDER).toContain(o);
-    const colors = OUTCOME_ORDER.map((o) => OUTCOME_META[o].color);
-    expect(new Set(colors).size).toBe(colors.length);
-    expect(OUTCOME_META.resolved.color).toBe("var(--series-1)");
+    expect(HUED_OUTCOMES.map((o) => OUTCOME_META[o].color)).toEqual(["var(--series-1)", "var(--series-2)", "var(--series-3)"]);
+    expect(OUTCOME_ORDER.slice(0, 3)).toEqual([...HUED_OUTCOMES]);
+    for (const o of OUTCOME_ORDER.slice(3)) expect(OUTCOME_META[o].color).toBe("var(--series-other)");
   });
   it("falls back to Unknown for null or unexpected outcomes", () => {
     expect(outcomeMeta(null).label).toBe("Unknown");

@@ -6,7 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthTestProvider } from "@/lib/auth";
 import { ROUTER_FUTURE } from "@/lib/router";
-import type { EmailRow, Escalation, EscalationStatus } from "@/lib/types";
+import type { EmailRow, EscalationListRow, EscalationStatus } from "@/lib/types";
 
 const { fetchEscalations, claimEscalation, closeEscalation, fetchEscalationCounts, fetchEscalationEmails } = vi.hoisted(() => ({
   fetchEscalations: vi.fn(),
@@ -41,14 +41,15 @@ const { default: Escalations } = await import("./Escalations");
 const NOW = new Date("2026-10-12T15:00:00Z");
 const ago = (min: number, from = NOW) => new Date(from.getTime() - min * 60_000).toISOString();
 
-function esc(over: Partial<Escalation>): Escalation {
+// Queue rows as fetchEscalations returns them: the masked callback number, never the full one.
+function esc(over: Partial<EscalationListRow>): EscalationListRow {
   return {
     id: "esc",
     call_key: "call",
     kind: "representative",
     reason: "representative_requested",
     details: null,
-    callback_phone: "+16025550102",
+    callback_phone_masked: "+1 602 ... 0102",
     channel: "webCall",
     verified: true,
     callback_source: "account",
@@ -85,8 +86,8 @@ const EMAILS: EmailRow[] = [
   { id: "m1", call_key: "call-old", kind: "callback_request", to_masked: "c***@example.com", resend_id: "re_1", status: "sent", error: null, created_at: ago(41) },
 ];
 
-function mockData(open: Escalation[] = OPEN) {
-  const lists: Record<EscalationStatus, Escalation[]> = { open, claimed: CLAIMED, done: [] };
+function mockData(open: EscalationListRow[] = OPEN) {
+  const lists: Record<EscalationStatus, EscalationListRow[]> = { open, claimed: CLAIMED, done: [] };
   fetchEscalations.mockImplementation(async (status: EscalationStatus) => lists[status]);
   fetchEscalationCounts.mockResolvedValue({ open: open.length, claimed: CLAIMED.length, done: 0 });
   fetchEscalationEmails.mockResolvedValue(EMAILS);
@@ -150,7 +151,10 @@ describe("Escalations", () => {
     const old = card("esc-old");
     await waitFor(() => expect(within(old).getByText("Callback request")).toBeInTheDocument());
     expect(within(old).getByText("Number on account")).toBeInTheDocument();
-    expect(within(old).getByRole("link", { name: "+1 602 ... 0102" })).toHaveAttribute("href", "tel:+16025550102");
+    expect(within(old).getByText("+1 602 ... 0102")).toBeInTheDocument();
+    // masked in the queue: no tel: link, so the whole number is nowhere in the DOM
+    expect(within(old).queryAllByRole("link").filter((a) => (a.getAttribute("href") ?? "").startsWith("tel:"))).toEqual([]);
+    expect(old.innerHTML).not.toContain("6025550102");
     expect(fetchEscalationEmails).toHaveBeenCalledWith(["call-new", "call-old"]);
 
     const fresh = card("esc-new");

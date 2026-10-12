@@ -6,6 +6,7 @@ import {
   pageWindow,
   parseFilters,
   rangeBounds,
+  rangeLabel,
   serializeFilters,
   toSearchParams,
 } from "./callFilters";
@@ -42,6 +43,25 @@ describe("parseFilters / serializeFilters", () => {
     expect(parse(qs.toString())).toEqual(f);
   });
 
+  it("round-trips a custom range of Eastern days and orders reversed days", () => {
+    const f = parse("range=custom&from=2026-10-01&to=2026-10-05");
+    expect(f.range).toBe("custom");
+    expect(f.custom).toEqual({ from: "2026-10-01", to: "2026-10-05" });
+    expect(serializeFilters(f).toString()).toBe("range=custom&from=2026-10-01&to=2026-10-05");
+    expect(parse(serializeFilters(f).toString())).toEqual(f);
+    expect(parse("range=custom&from=2026-10-05&to=2026-10-01").custom).toEqual({ from: "2026-10-01", to: "2026-10-05" });
+    expect(hasActiveFilters(f)).toBe(true);
+    expect(rangeLabel(f)).toBe("Oct 1 – Oct 5");
+  });
+
+  it("falls back to the default range when a custom link is broken or longer than a year", () => {
+    expect(parse("range=custom&from=2026-02-30&to=2026-03-02")).toEqual(DEFAULT_FILTERS);
+    expect(parse("range=custom&from=2026-10-01")).toEqual(DEFAULT_FILTERS);
+    expect(parse("range=custom&from=2024-01-01&to=2026-01-01")).toEqual(DEFAULT_FILTERS);
+    // with a search, the fallback is all time, as for any search link
+    expect(parse("q=appeal&range=custom&from=bad&to=bad").range).toBe("all");
+  });
+
   it("knows when anything narrows the list", () => {
     expect(hasActiveFilters(DEFAULT_FILTERS)).toBe(false);
     expect(hasActiveFilters({ ...DEFAULT_FILTERS, flagged: true })).toBe(true);
@@ -75,6 +95,14 @@ describe("toSearchParams", () => {
     expect(rangeBounds("all")).toEqual({ from: null, to: null });
     const today = rangeBounds("today", new Date("2026-10-12T18:00:00Z"));
     expect(today).toEqual({ from: "2026-10-12T04:00:00.000Z", to: "2026-10-13T04:00:00.000Z" });
+  });
+
+  it("spans a custom range from the first day's Eastern midnight to the midnight after the last", () => {
+    expect(rangeBounds("custom", new Date(), { from: "2026-10-01", to: "2026-10-05" })).toEqual({
+      from: "2026-10-01T04:00:00.000Z",
+      to: "2026-10-06T04:00:00.000Z",
+    });
+    expect(rangeLabel({ range: "all", custom: null })).toBe("All time");
   });
 });
 

@@ -2,11 +2,11 @@ import { ChevronDown } from "lucide-react";
 import { EscalationCard } from "@/components/calls/EscalationCard";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { EmailRow, Escalation } from "@/lib/types";
+import type { EmailRow, EscalationListRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface EscalationQueueProps {
-  rows: readonly Escalation[];
+  rows: readonly EscalationListRow[];
   emails: readonly EmailRow[];
   now: Date;
   /** How many rows are rendered; the rest sit behind "Show more". */
@@ -17,6 +17,8 @@ interface EscalationQueueProps {
   fetching?: boolean;
   /** Accessible name of the list ("Open escalations, oldest first"). */
   label: string;
+  /** The delivery rows are still loading or failed; cards say so instead of "None sent". */
+  emailsState?: "loading" | "error";
 }
 
 export const QUEUE_PAGE_SIZE = 20;
@@ -26,7 +28,7 @@ export const QUEUE_PAGE_SIZE = 20;
  * delivery error, Claim and Done, and a link to the call. Lists mask the callback number; the
  * call page shows it whole.
  */
-export function EscalationQueue({ rows, emails, now, limit, onShowMore, loading = false, fetching = false, label }: EscalationQueueProps) {
+export function EscalationQueue({ rows, emails, now, limit, onShowMore, loading = false, fetching = false, label, emailsState }: EscalationQueueProps) {
   if (loading) {
     return (
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2" role="status" aria-label="Loading escalations">
@@ -45,7 +47,7 @@ export function EscalationQueue({ rows, emails, now, limit, onShowMore, loading 
       <ul aria-label={label} className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         {shown.map((e) => (
           <li key={e.id} className="min-w-0">
-            <EscalationCard escalation={e} emails={emails} now={now} showCallLink maskCallback className="h-full" />
+            <EscalationCard escalation={e} emails={emails} emailsState={emailsState} now={now} showCallLink maskCallback className="h-full" />
           </li>
         ))}
       </ul>

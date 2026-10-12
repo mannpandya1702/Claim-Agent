@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { customRange, presetRange } from "@/lib/dates";
 import {
   buildDailySeries,
+  buildOutcomeRows,
   buildOutcomeSlices,
   buildSentimentMix,
   normalizeMetrics,
@@ -84,6 +85,26 @@ describe("buildDailySeries", () => {
     expect(s.peak).toEqual({ day: "2026-10-07", total: 5 });
   });
 
+  it("draws three hued outcomes and folds the rest into one Other mark, keeping the breakdown", () => {
+    const s = buildDailySeries(
+      [
+        { day: "2026-10-12", outcome: "resolved", n: 2 },
+        { day: "2026-10-12", outcome: "in_progress", n: 1 },
+        { day: "2026-10-12", outcome: "emergency", n: 1 },
+        { day: "2026-10-11", outcome: "not_found", n: 3 },
+      ],
+      range,
+    );
+    expect(s.stack).toEqual(["resolved", "other"]);
+    expect(s.folded).toEqual(["not_found", "emergency", "in_progress"]);
+    expect(s.stackTotals).toMatchObject({ resolved: 2, other: 5, escalated: 0, auth_failed: 0 });
+    const oct12 = s.rows[6]!;
+    expect(oct12.other).toBe(2);
+    expect(oct12.in_progress).toBe(1);
+    expect([oct12.bottom, oct12.top]).toEqual(["resolved", "other"]);
+    expect(s.rows[5]!).toMatchObject({ other: 3, bottom: "other", top: "other" });
+  });
+
   it("ignores rows outside the range (a previous range's placeholder)", () => {
     const s = buildDailySeries(
       [
@@ -106,13 +127,13 @@ describe("buildDailySeries", () => {
 
 describe("buildOutcomeSlices", () => {
   it("orders slices by outcome, not by size, with shares of the total", () => {
-    const slices = buildOutcomeSlices({ not_found: 1, resolved: 6, escalated: 3 });
-    expect(slices.map((s) => s.key)).toEqual(["resolved", "escalated", "not_found"]);
+    const slices = buildOutcomeSlices({ auth_failed: 1, resolved: 6, escalated: 3 });
+    expect(slices.map((s) => s.key)).toEqual(["resolved", "escalated", "auth_failed"]);
     expect(slices[0]!.share).toBeCloseTo(0.6);
-    expect(slices[0]!.color).toBe("var(--series-1)");
+    expect(slices.map((s) => s.color)).toEqual(["var(--series-1)", "var(--series-2)", "var(--series-3)"]);
   });
 
-  it("folds the smallest outcomes and unknown into Other past six slices", () => {
+  it("never draws more than the three validated hues plus a gray Other that names its members", () => {
     const slices = buildOutcomeSlices({
       resolved: 20,
       escalated: 9,
@@ -123,16 +144,38 @@ describe("buildOutcomeSlices", () => {
       in_progress: 2,
       unknown: 30,
     });
-    expect(slices).toHaveLength(6);
-    expect(slices.map((s) => s.key)).toEqual(["resolved", "escalated", "auth_failed", "not_found", "abandoned", "other"]);
-    const other = slices[5]!;
-    expect(other.value).toBe(33);
-    expect(other.description).toBe("Unsupported, In progress, Unknown");
+    expect(slices.map((s) => s.key)).toEqual(["resolved", "escalated", "auth_failed", "other"]);
+    const other = slices[3]!;
+    expect(other.value).toBe(46);
+    expect(other.color).toBe("var(--series-other)");
+    expect(other.members.map((m) => [m.label, m.value])).toEqual([
+      ["Not found", 7],
+      ["Unsupported", 1],
+      ["Abandoned", 6],
+      ["In progress", 2],
+      ["Unknown", 30],
+    ]);
     expect(slices.reduce((s, x) => s + x.value, 0)).toBe(83);
+  });
+
+  it("keeps in_progress out of the outcome hues (it is a state)", () => {
+    const slices = buildOutcomeSlices({ resolved: 2, in_progress: 1 });
+    expect(slices.map((s) => [s.key, s.color])).toEqual([
+      ["resolved", "var(--series-1)"],
+      ["other", "var(--series-other)"],
+    ]);
+  });
+
+  it("lists every outcome on its own row for the table view", () => {
+    expect(buildOutcomeRows({ resolved: 3, not_found: 1 }).map((r) => [r.label, r.value, r.share])).toEqual([
+      ["Resolved", 3, 0.75],
+      ["Not found", 1, 0.25],
+    ]);
   });
 
   it("returns nothing when there are no calls", () => {
     expect(buildOutcomeSlices({})).toEqual([]);
+    expect(buildOutcomeRows({})).toEqual([]);
   });
 });
 

@@ -3,7 +3,10 @@
 // 0001_init.sql, so this file stays a thin mapping. Every call is bounded at 5 s and every error
 // throws; callers turn that into system_error, never into a business answer such as not_found.
 
-import { createClient } from "@supabase/supabase-js";
+// Pinned in place (same version as the deno.json import map) so the deploy never depends on
+// import-map resolution; the function directory has no deno.json of its own.
+// deno-lint-ignore no-import-prefix
+import { createClient } from "npm:@supabase/supabase-js@2.49.4";
 import type { AlertStatus, Code, EmailKind, EmailStatus } from "./enums.ts";
 import type {
   AttemptRow,

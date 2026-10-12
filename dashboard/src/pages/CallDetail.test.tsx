@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthTestProvider } from "@/lib/auth";
 import { ROUTER_FUTURE } from "@/lib/router";
-import type { Attempt, CallInteraction, CallSession, Escalation, TranscriptLineRow } from "@/lib/types";
+import type { Attempt, CallInteraction, CallSession, Escalation, OutboxEvent, TranscriptLineRow } from "@/lib/types";
 
 const api = {
   fetchCall: vi.fn(),
@@ -13,6 +13,7 @@ const api = {
   fetchTranscriptLines: vi.fn(),
   fetchCallEscalations: vi.fn(),
   fetchCallEmails: vi.fn(),
+  fetchCallOutbox: vi.fn(),
 };
 const invoke = vi.fn();
 const useRealtimeRows = vi.fn((..._args: unknown[]) => ({ status: "SUBSCRIBED", isLive: true }));
@@ -26,6 +27,7 @@ vi.mock("@/lib/queries", async (importOriginal) => ({
   fetchTranscriptLines: (id: string) => api.fetchTranscriptLines(id),
   fetchCallEscalations: (id: string) => api.fetchCallEscalations(id),
   fetchCallEmails: (id: string) => api.fetchCallEmails(id),
+  fetchCallOutbox: (id: string) => api.fetchCallOutbox(id),
 }));
 vi.mock("@/lib/realtime", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/realtime")>()),
@@ -56,7 +58,7 @@ function call(over: Partial<CallInteraction> = {}): CallInteraction {
     duration_seconds: 180,
     ended_reason: "customer-ended-call",
     transcript: null,
-    recording_url: "rec-ref",
+    has_recording: true,
     cost: 0.1234,
     success_evaluation: "true",
     analysis_raw: null,
@@ -112,6 +114,7 @@ beforeEach(() => {
   api.fetchTranscriptLines.mockResolvedValue([]);
   api.fetchCallEscalations.mockResolvedValue([]);
   api.fetchCallEmails.mockResolvedValue([]);
+  api.fetchCallOutbox.mockResolvedValue([]);
 });
 
 describe("CallDetail after hangup", () => {
@@ -156,7 +159,7 @@ describe("CallDetail after hangup", () => {
   it("lists this call's escalations with their Claim action", async () => {
     const esc: Escalation = {
       id: "e1", call_key: ID, kind: "representative", reason: "representative_requested", details: null,
-      callback_phone: "+16025550101", channel: "webCall", verified: true, callback_source: "account",
+      callback_phone: "+16025550101", callback_phone_masked: "+1 602 ... 0101", channel: "webCall", verified: true, callback_source: "account",
       alert_status: "sent", delivery_error: null, status: "open", claimed_by: null, claimed_at: null,
       closed_by: null, closed_at: null, close_note: null, realerted_at: null,
       created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
@@ -167,6 +170,53 @@ describe("CallDetail after hangup", () => {
     const section = await screen.findByRole("region", { name: /Escalations/ });
     expect(await within(section).findByRole("button", { name: "Claim" })).toBeInTheDocument();
     expect(within(section).getByText("Number on account")).toBeInTheDocument();
+    // the call page is where staff dial: the full number, as a tel: link
+    expect(within(section).getByRole("link", { name: "+1 602 555 0101" })).toHaveAttribute("href", "tel:+16025550101");
+  });
+
+  it("lists the call's outbox deliveries with attempts and the last error", async () => {
+    const base = { kind: "interaction.completed", ref_id: ID, destination: "airtable", created_at: "2026-10-12T15:03:10Z", updated_at: "2026-10-12T15:04:00Z" };
+    const events: OutboxEvent[] = [
+      { ...base, id: "o1", delivered_at: "2026-10-12T15:03:12Z", attempts: 1, last_error: null },
+      { ...base, id: "o2", delivered_at: null, attempts: 5, last_error: "airtable: 422 INVALID_VALUE_FOR_COLUMN" },
+    ];
+    api.fetchCall.mockResolvedValue(call());
+    api.fetchCallOutbox.mockResolvedValue(events);
+    renderDetail();
+    const section = await screen.findByRole("region", { name: /Outbox events/ });
+    const items = await within(section).findAllByRole("listitem");
+    expect(items[0]).toHaveTextContent("Airtable call log");
+    expect(items[0]).toHaveTextContent("Delivered");
+    expect(items[0]).toHaveTextContent("1 of 5 attempts");
+    expect(items[1]).toHaveTextContent("Gave up");
+    expect(items[1]).toHaveTextContent("Last error: airtable: 422 INVALID_VALUE_FOR_COLUMN");
+    expect(useRealtimeRows.mock.calls.map((c) => `${c[0]} ${c[1]}`)).toContain(`outbox_events ref_id=eq.${ID}`);
+  });
+
+  it("says a per-call read failed instead of claiming there was nothing", async () => {
+    api.fetchCall.mockResolvedValue(call());
+    api.fetchCallAttempts.mockRejectedValue(new Error("attempts: permission denied"));
+    api.fetchCallSession.mockRejectedValue(new Error("call_sessions: timeout"));
+    renderDetail();
+    await screen.findByRole("heading", { level: 1, name: "Tobias Halvorsen" });
+    const timeline = screen.getByRole("region", { name: /Tool timeline/ });
+    expect(await within(timeline).findByText("Could not load tool calls")).toBeInTheDocument();
+    expect(within(timeline).queryByText(/made no tool calls/)).not.toBeInTheDocument();
+    const identity = screen.getByRole("region", { name: "Identity path" });
+    expect(within(identity).getByText("Could not load the identity path")).toBeInTheDocument();
+    // the header never claims "Not verified" from a failed read
+    expect(screen.queryByText("Not verified")).not.toBeInTheDocument();
+  });
+
+  it("shows loading placeholders, not empty states, while per-call reads are pending", async () => {
+    api.fetchCall.mockResolvedValue(call());
+    api.fetchCallSession.mockReturnValue(new Promise(() => {}));
+    api.fetchCallAttempts.mockReturnValue(new Promise(() => {}));
+    renderDetail();
+    await screen.findByRole("heading", { level: 1, name: "Tobias Halvorsen" });
+    expect(screen.queryByText("Not verified")).not.toBeInTheDocument();
+    expect(screen.queryByText(/made no tool calls/)).not.toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: /Tool timeline/ })).getByText("Loading")).toBeInTheDocument();
   });
 });
 
@@ -198,6 +248,24 @@ describe("CallDetail while live", () => {
         `emails call_key=eq.${ID}`,
       ]),
     );
+  });
+
+  it("shows a transcript read failure on a live call instead of 'waiting for the first words'", async () => {
+    api.fetchCall.mockResolvedValue(call({ ended_at: null, summary: null, sentiment: null, flags: [], messages: null, outcome: "in_progress" }));
+    api.fetchTranscriptLines.mockRejectedValue(new Error("transcript_lines: 500"));
+    renderDetail();
+    const section = await screen.findByRole("region", { name: /Transcript/ });
+    expect(await within(section).findByText("Could not load the transcript")).toBeInTheDocument();
+    expect(within(section).queryByText(/Waiting for the first words/)).not.toBeInTheDocument();
+  });
+
+  it("does not call a stub 'no data yet' when a read failed", async () => {
+    api.fetchCall.mockResolvedValue(null);
+    api.fetchCallSession.mockResolvedValue(null);
+    api.fetchCallAttempts.mockRejectedValue(new Error("attempts: 500"));
+    renderDetail();
+    expect(await screen.findByText("Could not load tool calls")).toBeInTheDocument();
+    expect(screen.queryByText("No data for this call yet")).not.toBeInTheDocument();
   });
 
   it("waits politely when no row exists yet", async () => {

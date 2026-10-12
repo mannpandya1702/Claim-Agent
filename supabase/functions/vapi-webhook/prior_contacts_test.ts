@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertFalse } from "@std/assert";
 import { verifiedSentence } from "./prior_contacts.ts";
+import { sentenceFor } from "./speak.ts";
 import type { PriorInteraction } from "./types.ts";
 
 const NOW = new Date("2026-10-12T15:00:00Z");
@@ -63,7 +64,7 @@ Deno.test("verifiedSentence: the year boundary is judged in New York too", () =>
   const now = new Date("2026-01-01T18:00:00Z");
   assertEquals(
     verifiedSentence("Tobias", [row("2026-01-01T03:00:00Z")], true, now),
-    welcome("December thirty first, twenty twenty five"),
+    welcome("December thirty-first, twenty twenty five"),
   );
 });
 
@@ -75,9 +76,9 @@ Deno.test("verifiedSentence: ordinal days are spoken as words", () => {
     ["2026-10-08T15:00:00Z", "October eighth"],
     ["2026-10-12T12:00:00Z", "October twelfth"],
     ["2026-09-20T15:00:00Z", "September twentieth"],
-    ["2026-09-22T15:00:00Z", "September twenty second"],
+    ["2026-09-22T15:00:00Z", "September twenty-second"],
     ["2026-09-30T15:00:00Z", "September thirtieth"],
-    ["2026-08-31T15:00:00Z", "August thirty first"],
+    ["2026-08-31T15:00:00Z", "August thirty-first"],
   ];
   for (const [at, date] of cases) {
     assertEquals(verifiedSentence("Tobias", [row(at)], true, NOW), welcome(date), at);
@@ -111,4 +112,15 @@ Deno.test("verifiedSentence: spoken text is printable ASCII; names are folded an
   assertEquals(verifiedSentence("", [], true, NOW), "Thank you, you're verified. What can I help you with today?");
   const s = verifiedSentence("Sloane", [row("2026-10-11T02:30:00Z")], true, NOW);
   assert(/^[\x20-\x7e]+$/.test(s));
+});
+
+Deno.test("verifiedSentence: the plain sentence is speak.ts's verified sentence, word for word", () => {
+  for (const name of ["Tobias", "  Jos\u00e9 ", "", "Mary-Jane", "O'Brien"]) {
+    assertEquals(verifiedSentence(name, [], true, NOW), sentenceFor("verified", { first_name: name }), name);
+  }
+  // The welcome-back variant opens with the same thanks clause.
+  const s = verifiedSentence("Tobias", [row("2026-10-11T02:30:00Z")], true, NOW);
+  assert(
+    s.startsWith(sentenceFor("verified", { first_name: "Tobias" }).replace(" What can I help you with today?", "")),
+  );
 });

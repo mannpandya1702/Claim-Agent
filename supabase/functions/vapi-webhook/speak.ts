@@ -273,7 +273,7 @@ function amountOf(v: unknown): number | null {
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : null;
 }
 
-function claimLine(c: Claim, refYear: number | undefined): string {
+function claimLine(c: Claim, refYear: number | undefined, withInstructions: boolean): string {
   const type = (CLAIM_TYPES as readonly string[]).includes(c.claim_type) ? `${c.claim_type} claim` : "claim";
   const last3 = digitsOf(c.claim_number).slice(-3);
   const head = last3 ? `Your ${type} ending in ${speakDigits(last3)}` : `Your ${type}`;
@@ -296,7 +296,7 @@ function claimLine(c: Claim, refYear: number | undefined): string {
       const list = docs.length > 0 && docs.every((d): d is string => d !== null) ? `: ${listWords(docs)}` : "";
       body = `needs a few documents from you before review can continue${list}.`;
       if (c.documents_due) body += ` Please send them by ${speakDate(c.documents_due, refYear)}.`;
-      body += ` ${DOCUMENT_INSTRUCTIONS}`;
+      if (withInstructions) body += ` ${DOCUMENT_INSTRUCTIONS}`;
       break;
     }
     case "approved":
@@ -337,7 +337,12 @@ export function claimsSentence(claims: Claim[], refDate: string): string {
   const n = claims.length;
   const lead = n > 1 ? `You have ${numberToWords(n)} claims on file. ` : "";
   const which = n === 1 ? "that claim" : n === 2 ? "either claim" : "any of them";
-  const text = `${lead}${claims.map((c) => claimLine(c, refYear)).join(" ")} Do you have any questions about ${which}?`;
+  // How to send documents is said once, after the last claim that needs them: repeating it per
+  // claim adds nothing for the caller and would push a busy account past VAPI's 1000-character
+  // limit on a spoken tool message.
+  const lastAwaiting = claims.map((c) => c.status).lastIndexOf("awaiting_documents");
+  const lines = claims.map((c, i) => claimLine(c, refYear, i === lastAwaiting));
+  const text = `${lead}${lines.join(" ")} Do you have any questions about ${which}?`;
   assertSpeakable(text);
   return text;
 }
@@ -358,6 +363,13 @@ function repQueued(d: Record<string, unknown>): string {
     at = last4 ? ` at the number you gave me, ending in ${speakDigits(last4)}` : " at the number you gave me";
   } else if (d.target === "caller_id") at = " at the number you're calling from";
   return `I've sent your request and a summary to our claims team. A representative will call you back${at} within one business day. ${ANYTHING_ELSE}`;
+}
+
+/** "Thank you, Tobias, you're verified." The opening both verified sentences share (the plain one
+ *  here and prior_contacts' welcome-back variant), so the name is cleaned the same way in both. */
+export function verifiedThanks(firstName: unknown): string {
+  const name = speakableName(firstName);
+  return name ? `Thank you, ${name}, you're verified.` : "Thank you, you're verified.";
 }
 
 function nationalDigits(v: unknown): string | null {
@@ -392,12 +404,8 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
     case "locked":
     case "dob_give_up":
       return LOCKED;
-    case "verified": {
-      const name = speakableName(d.first_name);
-      return name
-        ? `Thank you, ${name}, you're verified. What can I help you with today?`
-        : "Thank you, you're verified. What can I help you with today?";
-    }
+    case "verified":
+      return `${verifiedThanks(d.first_name)} What can I help you with today?`;
     case "auth_failed":
       return AUTH_FAILED;
     case "no_lookup_yet":

@@ -1,4 +1,4 @@
-import { DEFAULT_RANGE, presetRange, RANGE_PRESETS, type RangePreset } from "@/lib/dates";
+import { customCaption, customRange, DEFAULT_RANGE, parseCustomDays, presetRange, RANGE_PRESETS, type CustomDays, type RangePreset } from "@/lib/dates";
 import { OUTCOMES, SENTIMENTS, type Outcome, type SearchCallsParams, type Sentiment } from "@/lib/types";
 
 /*
@@ -10,10 +10,11 @@ import { OUTCOMES, SENTIMENTS, type Outcome, type SearchCallsParams, type Sentim
 
 export const PAGE_SIZE = 25;
 
-export type RangeValue = RangePreset | "all";
+/** "custom" carries its two days in `from` / `to`. */
+export type RangeValue = RangePreset | "all" | "custom";
 
-export const RANGE_OPTIONS: { value: RangeValue; label: string }[] = [
-  ...RANGE_PRESETS.map((p) => ({ value: p.value as RangeValue, label: p.label })),
+export const RANGE_OPTIONS: { value: Exclude<RangeValue, "custom">; label: string }[] = [
+  ...RANGE_PRESETS.map((p) => ({ value: p.value, label: p.label })),
   { value: "all", label: "All time" },
 ];
 
@@ -23,6 +24,8 @@ export const CHANNEL_FILTERS = ["webCall", "inboundPhoneCall", "outboundPhoneCal
 export interface CallFilters {
   q: string;
   range: RangeValue;
+  /** Inclusive Eastern days of a custom range; null unless range is "custom". */
+  custom: CustomDays | null;
   outcome: Outcome | null;
   sentiment: Sentiment | null;
   channel: string | null;
@@ -35,6 +38,7 @@ export interface CallFilters {
 export const DEFAULT_FILTERS: CallFilters = {
   q: "",
   range: DEFAULT_RANGE,
+  custom: null,
   outcome: null,
   sentiment: null,
   channel: null,
@@ -47,7 +51,7 @@ function oneOf<T extends string>(value: string | null, allowed: readonly T[]): T
   return value !== null && (allowed as readonly string[]).includes(value) ? (value as T) : null;
 }
 
-const RANGE_VALUES = RANGE_OPTIONS.map((o) => o.value);
+const RANGE_VALUES: RangeValue[] = [...RANGE_OPTIONS.map((o) => o.value), "custom"];
 
 /**
  * URL -> filters. Unknown values fall back to defaults rather than erroring. A link that carries
@@ -56,11 +60,16 @@ const RANGE_VALUES = RANGE_OPTIONS.map((o) => o.value);
  */
 export function parseFilters(params: URLSearchParams): CallFilters {
   const q = (params.get("q") ?? "").trim();
-  const range = oneOf(params.get("range"), RANGE_VALUES) ?? (q ? "all" : DEFAULT_FILTERS.range);
+  const fallback: RangeValue = q ? "all" : DEFAULT_FILTERS.range;
+  let range = oneOf(params.get("range"), RANGE_VALUES) ?? fallback;
+  // A custom range is only as good as its two days; a broken link falls back like an unknown range.
+  const custom = range === "custom" ? parseCustomDays(params.get("from"), params.get("to")) : null;
+  if (range === "custom" && !custom) range = fallback;
   const pageNum = Number.parseInt(params.get("page") ?? "", 10);
   return {
     q,
     range,
+    custom,
     outcome: oneOf(params.get("outcome"), OUTCOMES),
     sentiment: oneOf(params.get("sentiment"), SENTIMENTS),
     channel: oneOf(params.get("channel"), CHANNEL_FILTERS),
@@ -75,6 +84,10 @@ export function serializeFilters(f: CallFilters): URLSearchParams {
   const p = new URLSearchParams();
   if (f.q) p.set("q", f.q);
   if (f.range !== DEFAULT_FILTERS.range || f.q) p.set("range", f.range);
+  if (f.range === "custom" && f.custom) {
+    p.set("from", f.custom.from);
+    p.set("to", f.custom.to);
+  }
   if (f.outcome) p.set("outcome", f.outcome);
   if (f.sentiment) p.set("sentiment", f.sentiment);
   if (f.channel) p.set("channel", f.channel);
@@ -97,11 +110,25 @@ export function hasActiveFilters(f: CallFilters): boolean {
   );
 }
 
-/** Date bounds for a range value; "all" leaves both open. */
-export function rangeBounds(range: RangeValue, now: Date = new Date()): { from: string | null; to: string | null } {
+/** Date bounds for a range value; "all" leaves both open, "custom" spans its two Eastern days. */
+export function rangeBounds(
+  range: RangeValue,
+  now: Date = new Date(),
+  custom: CustomDays | null = null,
+): { from: string | null; to: string | null } {
   if (range === "all") return { from: null, to: null };
+  if (range === "custom") {
+    if (!custom) return rangeBounds(DEFAULT_FILTERS.range, now);
+    return customRange(custom.from, custom.to);
+  }
   const r = presetRange(range, now);
   return { from: r.from, to: r.to };
+}
+
+/** "Last 7 days", "All time" or the custom days ("Oct 1 – Oct 5"). */
+export function rangeLabel(f: Pick<CallFilters, "range" | "custom">): string {
+  if (f.range === "custom") return f.custom ? customCaption(f.custom) : "";
+  return RANGE_OPTIONS.find((o) => o.value === f.range)?.label ?? "";
 }
 
 /** search_calls arguments. Booleans are sent only when on: false would mean "only unflagged". */

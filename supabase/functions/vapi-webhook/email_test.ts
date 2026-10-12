@@ -570,7 +570,23 @@ Deno.test("emergencyEmail: header, call id, redacted note, link", () => {
   assertStringIncludes(t.html, "&lt;now&gt;");
   assertFalse(t.html.includes("602 555 0101"));
   assertStringIncludes(t.html, `${DASHBOARD}#/calls/${CALL_KEY}`);
-  assertStringIncludes(emergencyEmail({ callKey: CALL_KEY, note: null, channel: "webCall" }).html, "No note given");
+  const bare = emergencyEmail({ callKey: CALL_KEY, note: null, channel: "webCall" }).html;
+  assertStringIncludes(bare, "No note given");
+  assertMatch(bare, /Identity verified<\/th><td[^>]*>No</);
+  assertStringIncludes(bare, "None known (check the dashboard)");
+});
+
+Deno.test("emergencyEmail: the verified flag and the known callback number reach the team", () => {
+  const t = emergencyEmail({
+    callKey: CALL_KEY,
+    note: null,
+    channel: "inboundPhoneCall",
+    verified: true,
+    callbackPhone: "+16025550101",
+  });
+  assertAsciiTemplate(t);
+  assertMatch(t.html, /Identity verified<\/th><td[^>]*>Yes</);
+  assertStringIncludes(t.html, "(602) 555-0101 (+16025550101)");
 });
 
 Deno.test("slaRealertEmail: minutes open, kind, reason, link", () => {

@@ -85,7 +85,7 @@ export function KpiTile({ label, value, hint, delta, status, icon: Icon, loading
     className,
   );
   const accent = statusStyle ? (
-    <span aria-hidden="true" className="absolute inset-y-0 left-0 w-[3px]" style={{ backgroundColor: statusStyle.accent }} />
+    <span aria-hidden="true" className="viz-mark absolute inset-y-0 left-0 w-[3px]" style={{ backgroundColor: statusStyle.accent }} />
   ) : null;
 
   if (to) {

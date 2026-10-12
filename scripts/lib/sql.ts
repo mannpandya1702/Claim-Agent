@@ -16,7 +16,7 @@ export function sqlClient(env = loadEnv()) {
   const [token, ref] = need(env, "SUPABASE_ACCESS_TOKEN", "SUPABASE_PROJECT_REF");
   const url = `https://api.supabase.com/v1/projects/${ref}/database/query`;
   return async function sql<T = Record<string, unknown>>(query: string): Promise<T[]> {
-    for (let attempt = 0; ; attempt++) {
+    for (let attempt = 0;; attempt++) {
       const res = await fetch(url, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },

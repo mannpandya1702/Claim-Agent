@@ -45,9 +45,15 @@ interface AudioPlayerProps {
 
 export function AudioPlayer({ callId, hasRecording, live = false, className }: AudioPlayerProps) {
   const [state, setState] = useState<State>({ kind: "idle" });
+  const rootRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const retryRef = useRef<HTMLButtonElement>(null);
+  const playRef = useRef<HTMLButtonElement>(null);
   const retried = useRef(false);
   const seq = useRef(0);
+  // The control that had focus (Play, Try again, the player) is replaced when the state changes;
+  // remember whether focus was inside so it can move to whatever control replaces it.
+  const keepFocus = useRef(false);
 
   // A different call on the same mounted page starts from scratch.
   useEffect(() => {
@@ -58,6 +64,7 @@ export function AudioPlayer({ callId, hasRecording, live = false, className }: A
 
   const load = async () => {
     const mine = ++seq.current;
+    keepFocus.current = !!rootRef.current && rootRef.current.contains(document.activeElement);
     setState({ kind: "loading" });
     try {
       const url = await requestRecordingUrl(callId);
@@ -69,9 +76,24 @@ export function AudioPlayer({ callId, hasRecording, live = false, className }: A
 
   // Play as soon as the link arrives; the press that asked for it counts as the user gesture.
   useEffect(() => {
+    // Try again swaps the error box for the loading button: hold focus there until the outcome.
+    if (state.kind === "loading" && keepFocus.current && document.activeElement !== playRef.current) {
+      playRef.current?.focus();
+      return;
+    }
+    if (state.kind === "error" && keepFocus.current) {
+      keepFocus.current = false;
+      retryRef.current?.focus();
+      return;
+    }
     if (state.kind !== "ready") return;
     const el = audioRef.current;
-    if (!el || typeof el.play !== "function") return;
+    if (!el) return;
+    if (keepFocus.current) {
+      keepFocus.current = false;
+      el.focus();
+    }
+    if (typeof el.play !== "function") return;
     const p = el.play();
     if (p && typeof p.catch === "function") p.catch(() => {});
   }, [state]);
@@ -82,6 +104,7 @@ export function AudioPlayer({ callId, hasRecording, live = false, className }: A
       void load();
       return;
     }
+    keepFocus.current = !!rootRef.current && rootRef.current.contains(document.activeElement);
     setState({ kind: "error", message: "The audio could not be played." });
   };
 
@@ -90,7 +113,7 @@ export function AudioPlayer({ callId, hasRecording, live = false, className }: A
   }
 
   return (
-    <div className={cn("space-y-2", className)}>
+    <div ref={rootRef} className={cn("space-y-2", className)}>
       {state.kind === "ready" ? (
         <audio
           ref={audioRef}
@@ -111,6 +134,7 @@ export function AudioPlayer({ callId, hasRecording, live = false, className }: A
             </span>
           </p>
           <Button
+            ref={retryRef}
             size="sm"
             variant="outline"
             onClick={() => {
@@ -124,7 +148,16 @@ export function AudioPlayer({ callId, hasRecording, live = false, className }: A
         </div>
       ) : (
         <div className="flex flex-wrap items-center gap-3">
-          <Button size="sm" variant={hasRecording ? "default" : "outline"} onClick={() => void load()} disabled={state.kind === "loading"}>
+          {/* aria-disabled, not disabled, while loading: a disabled button drops keyboard focus. */}
+          <Button
+            ref={playRef}
+            size="sm"
+            variant={hasRecording ? "default" : "outline"}
+            onClick={() => {
+              if (state.kind !== "loading") void load();
+            }}
+            aria-disabled={state.kind === "loading" || undefined}
+          >
             {state.kind === "loading" ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Play aria-hidden="true" />}
             {state.kind === "loading" ? "Loading recording" : hasRecording ? "Play recording" : "Try to load recording"}
           </Button>

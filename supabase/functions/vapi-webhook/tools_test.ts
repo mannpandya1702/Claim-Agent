@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertFalse, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertFalse, assertMatch, assertStringIncludes } from "@std/assert";
 import type { Channel } from "./enums.ts";
 import { createFakeStore, type FakeStore } from "./fake_store.ts";
 import { assertSpeakable, sentenceFor } from "./speak.ts";
@@ -453,6 +453,10 @@ Deno.test("report_emergency writes the row, alerts both channels, and answers em
   assertEquals([row.callback_phone, row.callback_source], ["+16025550188", "caller_id"]);
   assertStringIncludes(body(h.telegramCalls()[0]).text, "POSSIBLE EMERGENCY REPORTED");
   assertEquals(header(h.resendCalls()[0], "Idempotency-Key"), `${CALL_KEY}:emergency_alert`);
+  // the team email carries how to reach the caller, and that they are not verified
+  const html = String(body(h.resendCalls()[0]).html);
+  assertStringIncludes(html, "(602) 555-0188 (+16025550188)");
+  assertMatch(html, /Identity verified<\/th><td[^>]*>No</);
 
   // a second report on the same call is the same row and pages nobody again
   assertEquals((await h.run("report_emergency", {})).code, "emergency_logged");

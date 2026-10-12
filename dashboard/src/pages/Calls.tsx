@@ -9,8 +9,8 @@ import {
   PAGE_SIZE,
   pageWindow,
   parseFilters,
-  RANGE_OPTIONS,
   rangeBounds,
+  rangeLabel,
   serializeFilters,
   toSearchParams,
   type CallFilters,
@@ -24,6 +24,7 @@ import { Card } from "@/components/ui/card";
 import { formatCount } from "@/lib/format";
 import { qk, searchCalls } from "@/lib/queries";
 import { useRealtimeRows } from "@/lib/realtime";
+import { useEasternToday } from "@/lib/useEasternToday";
 
 /**
  * Every call, newest first. Filters and search live in the URL, the list comes from the
@@ -34,8 +35,14 @@ import { useRealtimeRows } from "@/lib/realtime";
 export default function Calls() {
   const [params, setParams] = useSearchParams();
   const filters = useMemo(() => parseFilters(params), [params]);
-  // Bounds are computed once per range choice so the query key stays stable between renders.
-  const bounds = useMemo(() => rangeBounds(filters.range), [filters.range]);
+  // Bounds are computed once per range choice so the query key stays stable between renders,
+  // and again when the Eastern day changes, the same moment the Overview tiles roll over.
+  const today = useEasternToday();
+  const bounds = useMemo(
+    () => rangeBounds(filters.range, new Date(), filters.custom),
+    // `today` is a dependency on purpose: a preset's edges move at Eastern midnight.
+    [filters.range, filters.custom?.from, filters.custom?.to, today],
+  );
   const search = useMemo(() => toSearchParams(filters, bounds), [filters, bounds]);
 
   const update = useCallback(
@@ -65,7 +72,7 @@ export default function Calls() {
   }, [settled, filters.page, rows.length, update]);
 
   const exact = filters.q && rows.find((r) => r.vapi_call_id === filters.q);
-  const rangeLabel = RANGE_OPTIONS.find((o) => o.value === filters.range)?.label ?? "";
+  const rangeText = rangeLabel(filters);
   const win = pageWindow(filters.page, rows.length, total);
   const pages = total ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : 1;
   const isEmpty = settled && rows.length === 0 && filters.page === 0;
@@ -107,7 +114,7 @@ export default function Calls() {
                     matching <span className="font-medium text-ink-1">&ldquo;{filters.q}&rdquo;</span>
                   </>
                 )}
-                <span className="text-ink-3"> · {rangeLabel}</span>
+                <span className="text-ink-3"> · {rangeText}</span>
               </>
             )}
           </p>
@@ -138,7 +145,7 @@ export default function Calls() {
                   </Button>
                 )}
                 {filters.range !== "all" && (
-                  <Button variant="outline" size="sm" onClick={() => update({ range: "all" })}>
+                  <Button variant="outline" size="sm" onClick={() => update({ range: "all", custom: null })}>
                     Show all time
                   </Button>
                 )}
@@ -157,7 +164,9 @@ export default function Calls() {
           <CallTable rows={rows} loading={query.isLoading} fetching={query.isPlaceholderData} />
         )}
 
-        {settled && rows.length > 0 && (
+        {/* Kept mounted while the next page loads (placeholder rows on screen): unmounting the
+            pager would drop the focus of the button that was just pressed. */}
+        {query.data !== undefined && rows.length > 0 && (
           <nav aria-label="Pagination" className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2.5 sm:px-5">
             <p className="text-xs tabular text-ink-3">
               Showing {formatCount(win.first)}–{formatCount(win.last)} of {formatCount(win.total)}
@@ -169,8 +178,10 @@ export default function Calls() {
               <Button
                 variant="outline"
                 size="sm"
+                // Disabled only at the ends: disabling while fetching would drop keyboard focus
+                // to the page on every press. A press during the fetch just moves one more page.
                 onClick={() => update({ page: filters.page - 1 })}
-                disabled={filters.page === 0 || query.isFetching}
+                disabled={filters.page === 0}
                 aria-label="Previous page"
               >
                 <ChevronLeft aria-hidden="true" />
@@ -180,7 +191,7 @@ export default function Calls() {
                 variant="outline"
                 size="sm"
                 onClick={() => update({ page: filters.page + 1 })}
-                disabled={filters.page + 1 >= pages || query.isFetching}
+                disabled={filters.page + 1 >= pages}
                 aria-label="Next page"
               >
                 <span className="hidden min-[420px]:inline">Next</span>

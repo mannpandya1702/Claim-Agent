@@ -175,6 +175,13 @@ export default function Escalations({ now: fixedNow }: { now?: Date } = {}) {
                         onShowMore={() => setLimits((m) => ({ ...m, [limitKey]: limit + QUEUE_PAGE_SIZE }))}
                         loading={listQ.isPending}
                         label={copy.listLabel}
+                        emailsState={
+                          emailsQ.isError && !emailsQ.isPlaceholderData
+                            ? "error"
+                            : emailsQ.isPending || emailsQ.isPlaceholderData
+                              ? "loading"
+                              : undefined
+                        }
                       />
                       {counts && (listQ.data?.length ?? 0) >= LIST_CAP && counts[tab] > LIST_CAP && (
                         <p className="text-center text-xs text-ink-3">

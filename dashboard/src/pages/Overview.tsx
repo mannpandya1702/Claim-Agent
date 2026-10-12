@@ -1,6 +1,6 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { CalendarRange, ChartColumn, ChartPie, Loader2, RotateCw, Smile } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { DateRangeSelect } from "@/components/DateRangeSelect";
 import { EmptyState } from "@/components/EmptyState";
@@ -13,6 +13,7 @@ import { OverviewKpis } from "@/components/overview/OverviewKpis";
 import { SentimentBar, SentimentTable, unratedNote } from "@/components/overview/SentimentMix";
 import {
   buildDailySeries,
+  buildOutcomeRows,
   buildOutcomeSlices,
   buildSentimentMix,
   normalizeMetrics,
@@ -22,10 +23,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DEFAULT_RANGE, presetRange, RANGE_PRESETS, type RangePreset } from "@/lib/dates";
-import { etDayKey, formatCount, formatTime } from "@/lib/format";
+import { customRange, DEFAULT_RANGE, parseCustomDays, presetRange, RANGE_PRESETS, type CustomDays, type RangePreset } from "@/lib/dates";
+import { formatCount, formatTime } from "@/lib/format";
 import { fetchCallsByDay, fetchMetrics, qk } from "@/lib/queries";
 import { useRealtimeRows } from "@/lib/realtime";
+import { useEasternToday } from "@/lib/useEasternToday";
 
 // Realtime events re-read the aggregates (prefix keys, debounced in realtime.ts). A call row
 // moves every tile and the daily chart; an escalation moves the open and SLA tiles.
@@ -36,18 +38,27 @@ const ESCALATION_KEYS = [["metrics"]] as const;
 // metrics also refresh on a slow clock.
 const METRICS_REFRESH_MS = 60_000;
 
-function parsePreset(value: string | null): RangePreset {
-  return RANGE_PRESETS.some((p) => p.value === value) ? (value as RangePreset) : DEFAULT_RANGE;
+type RangeChoice = { preset: RangePreset; custom: null } | { preset: "custom"; custom: CustomDays };
+
+/** ?range=30d, or ?range=custom&from=YYYY-MM-DD&to=YYYY-MM-DD; anything broken is the default. */
+function parseRange(params: URLSearchParams): RangeChoice {
+  const value = params.get("range");
+  if (value === "custom") {
+    const custom = parseCustomDays(params.get("from"), params.get("to"));
+    if (custom) return { preset: "custom", custom };
+  }
+  const preset = RANGE_PRESETS.some((p) => p.value === value) ? (value as RangePreset) : DEFAULT_RANGE;
+  return { preset, custom: null };
 }
 
-/** The current Eastern day; changes at midnight ET so "Today" rolls over without a reload. */
-function useEasternToday(): string {
-  const [day, setDay] = useState(() => etDayKey(new Date()));
-  useEffect(() => {
-    const t = setInterval(() => setDay(etDayKey(new Date())), 60_000);
-    return () => clearInterval(t);
-  }, []);
-  return day;
+/** The same range as Calls URL parameters, so a tile opens the list on the days it counted. */
+function rangeQuery(choice: RangeChoice): string {
+  const p = new URLSearchParams({ range: choice.preset });
+  if (choice.custom) {
+    p.set("from", choice.custom.from);
+    p.set("to", choice.custom.to);
+  }
+  return p.toString();
 }
 
 function ChartSkeleton({ height = 300 }: { height?: number }) {
@@ -61,22 +72,33 @@ function ChartSkeleton({ height = 300 }: { height?: number }) {
 
 export default function Overview() {
   const [params, setParams] = useSearchParams();
-  const preset = parsePreset(params.get("range"));
+  const choice = parseRange(params);
+  const { preset, custom } = choice;
   const today = useEasternToday();
   // `today` is a dependency on purpose: the preset's edges move when the Eastern day changes.
-  const range = useMemo(() => presetRange(preset), [preset, today]);
+  const range = useMemo(
+    () => (custom ? customRange(custom.from, custom.to) : presetRange(preset as RangePreset)),
+    [preset, custom?.from, custom?.to, today],
+  );
 
-  const setPreset = (next: RangePreset) => {
+  const setRange = (next: RangePreset | CustomDays) => {
     setParams(
       (prev) => {
         const p = new URLSearchParams(prev);
-        if (next === DEFAULT_RANGE) p.delete("range");
+        p.delete("from");
+        p.delete("to");
+        if (typeof next !== "string") {
+          p.set("range", "custom");
+          p.set("from", next.from);
+          p.set("to", next.to);
+        } else if (next === DEFAULT_RANGE) p.delete("range");
         else p.set("range", next);
         return p;
       },
       { replace: true },
     );
   };
+  const setPreset = (next: RangePreset) => setRange(next);
 
   const metricsQ = useQuery({
     queryKey: qk.metrics(range),
@@ -97,6 +119,7 @@ export default function Overview() {
   const metrics = metricsQ.data;
   const series = useMemo(() => (daysQ.data ? buildDailySeries(daysQ.data, range) : null), [daysQ.data, range]);
   const slices = useMemo(() => (metrics ? buildOutcomeSlices(metrics.outcomes) : []), [metrics]);
+  const outcomeRows = useMemo(() => (metrics ? buildOutcomeRows(metrics.outcomes) : []), [metrics]);
   const sentiment = useMemo(() => (metrics ? buildSentimentMix(metrics.sentiments) : null), [metrics]);
 
   const metricsStale = metricsQ.isPlaceholderData;
@@ -162,7 +185,7 @@ export default function Overview() {
       <PageHeader title="Overview" description="How Tessa is handling calls, and what needs a person." />
 
       <div role="group" aria-label="Filters" className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-2">
-        <DateRangeSelect value={preset} onChange={setPreset} />
+        <DateRangeSelect value={preset} custom={custom} onPreset={setPreset} onCustom={setRange} />
         <span className="text-sm text-ink-2">
           {rangeCaption(range)}
           <span className="text-ink-3"> · Eastern time</span>
@@ -199,7 +222,7 @@ export default function Overview() {
           <ErrorState title="Could not load the metrics" error={metricsQ.error} onRetry={() => void metricsQ.refetch()} />
         </Card>
       ) : (
-        <OverviewKpis metrics={metrics} preset={preset} stale={metricsStale} />
+        <OverviewKpis metrics={metrics} rangeQuery={rangeQuery(choice)} stale={metricsStale} />
       )}
 
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
@@ -218,7 +241,7 @@ export default function Overview() {
           state={outcomeState}
           stale={metricsStale}
           chart={metrics ? <OutcomeDonut slices={slices} total={metrics.calls} /> : null}
-          table={metrics ? <OutcomeTable slices={slices} total={metrics.calls} /> : null}
+          table={metrics ? <OutcomeTable rows={outcomeRows} total={metrics.calls} /> : null}
         />
         <ChartCard
           title="Sentiment mix"

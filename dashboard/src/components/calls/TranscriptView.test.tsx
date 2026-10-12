@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import { fromLiveLines, fromStoredMessages } from "@/lib/transcript";
 import { chipLabel, TranscriptView } from "./TranscriptView";
 
@@ -55,6 +55,47 @@ describe("TranscriptView", () => {
     expect(rendered().map((i) => i.kind)).toEqual(["agent", "caller", "tool", "agent"]);
     expect(screen.getByRole("log", { name: "Live transcript" })).toHaveAttribute("aria-live", "polite");
     expect(screen.getByText("lookup_customer: needs_dob")).toBeInTheDocument();
+  });
+
+  it("keeps following a live bubble that grows when same-speaker lines merge", () => {
+    const scrollTo = vi.fn();
+    const original = HTMLElement.prototype.scrollTo;
+    HTMLElement.prototype.scrollTo = scrollTo as unknown as typeof HTMLElement.prototype.scrollTo;
+    try {
+      const line = (id: number, text: string, ts: number) => ({
+        id,
+        role: "assistant",
+        text,
+        ts_ms: ts,
+        created_at: new Date(Date.UTC(2026, 9, 12, 15, 0, ts / 1000)).toISOString(),
+      });
+      const first = fromLiveLines([line(1, "Thanks, Tobias.", 1000)], []);
+      const { rerender } = render(<TranscriptView items={first} live />);
+      scrollTo.mockClear();
+
+      // a second final 1.5 s later merges into the same bubble: one item, longer text
+      const merged = fromLiveLines([line(1, "Thanks, Tobias.", 1000), line(2, "Your claim is approved.", 2500)], []);
+      expect(merged).toHaveLength(1);
+      rerender(<TranscriptView items={merged} live />);
+      expect(scrollTo).toHaveBeenCalled();
+
+      // a reader who scrolled up is not yanked down; the jump button appears instead
+      const log = screen.getByRole("log", { name: "Live transcript" });
+      Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
+      Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+      log.scrollTop = 100;
+      fireEvent.scroll(log);
+      scrollTo.mockClear();
+      const longer = fromLiveLines(
+        [line(1, "Thanks, Tobias.", 1000), line(2, "Your claim is approved.", 2500), line(3, "The payment is on its way.", 4000)],
+        [],
+      );
+      rerender(<TranscriptView items={longer} live />);
+      expect(scrollTo).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Jump to latest" })).toBeInTheDocument();
+    } finally {
+      HTMLElement.prototype.scrollTo = original;
+    }
   });
 
   it("shows the empty slot when there is nothing yet", () => {

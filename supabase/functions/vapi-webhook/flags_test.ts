@@ -90,6 +90,15 @@ Deno.test("promised_callback: fires when the escalation row exists but delivery 
   ]);
 });
 
+Deno.test("promised_callback: a chat escalation stored 'skipped' backs the promise; 'pending' does not", () => {
+  // Chat sends no alert by design; tools.ts answers it with the rep_queued sentence.
+  const chatRow = { ...escalation("skipped"), channel: "chat" };
+  assertEquals(flags({ messages: [bot(PROMISE)], escalations: [chatRow] }), []);
+  assertEquals(flags({ messages: [bot(PROMISE)], escalations: [escalation("pending")] }), [
+    "promised_callback_without_escalation",
+  ]);
+});
+
 Deno.test("promised_callback: each phrasing in the rule fires; none fires with a sent alert", () => {
   for (
     const line of [
@@ -236,7 +245,9 @@ Deno.test("email_promised: fires when the only email row failed or is still send
 });
 
 Deno.test("email_promised: curly apostrophes and the other phrasings match", () => {
-  for (const line of ["I\u2019ve emailed you the checklist.", "I've sent it to your inbox.", "I've sent the summary."]) {
+  for (
+    const line of ["I\u2019ve emailed you the checklist.", "I've sent it to your inbox.", "I've sent the summary."]
+  ) {
     assertEquals(flags({ messages: [bot(line)], attempts: VERIFIED }), ["email_promised_without_send"], line);
     assertEquals(flags({ messages: [bot(line)], attempts: VERIFIED, emails: [email("sent")] }), [], line);
   }

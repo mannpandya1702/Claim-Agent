@@ -15,7 +15,6 @@ import {
 } from "lucide-react";
 import { useId } from "react";
 import { KpiTile, type KpiTileProps } from "@/components/KpiTile";
-import type { RangePreset } from "@/lib/dates";
 import { formatCount, formatDuration, formatLatency, formatMoney, formatPercent } from "@/lib/format";
 import type { DashboardMetrics } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -33,7 +32,7 @@ function plural(n: number, one: string, many = `${one}s`): string {
  * Tiles that need someone to act. Open escalations and SLA breaches are the live queue (any
  * date, as dashboard_metrics counts them); flagged calls follow the selected range.
  */
-export function attentionTiles(m: DashboardMetrics, preset: RangePreset): KpiDef[] {
+export function attentionTiles(m: DashboardMetrics, rangeQuery: string): KpiDef[] {
   return [
     {
       id: "open_escalations",
@@ -67,13 +66,13 @@ export function attentionTiles(m: DashboardMetrics, preset: RangePreset): KpiDef
       hint: "Calls in range with a post-call flag",
       // Red whenever anything is flagged: each flag is a promise or a disclosure to check.
       status: m.flagged > 0 ? { tone: "critical", label: "Needs review" } : { tone: "good", label: "No flags raised" },
-      to: `/calls?flagged=1&range=${preset}`,
+      to: `/calls?flagged=1&${rangeQuery}`,
     },
   ];
 }
 
 /** Range-scoped performance tiles, in the order the plan lists them. */
-export function performanceTiles(m: DashboardMetrics, preset: RangePreset): KpiDef[] {
+export function performanceTiles(m: DashboardMetrics, rangeQuery: string): KpiDef[] {
   const authShare = ratio(m.auth_failed, m.completed);
   const notFoundShare = ratio(m.not_found, m.completed);
   return [
@@ -86,7 +85,7 @@ export function performanceTiles(m: DashboardMetrics, preset: RangePreset): KpiD
         m.in_progress > 0
           ? `${formatCount(m.completed)} completed, ${formatCount(m.in_progress)} in progress`
           : `${formatCount(m.completed)} completed`,
-      to: `/calls?range=${preset}`,
+      to: `/calls?${rangeQuery}`,
     },
     {
       id: "containment",
@@ -162,7 +161,8 @@ export function performanceTiles(m: DashboardMetrics, preset: RangePreset): KpiD
 
 interface OverviewKpisProps {
   metrics: DashboardMetrics | undefined;
-  preset: RangePreset;
+  /** The selected range as Calls URL parameters ("range=7d"), for the tiles that link to the list. */
+  rangeQuery: string;
   /** Previous range's numbers shown while the new range loads. */
   stale?: boolean;
 }
@@ -175,7 +175,7 @@ function SectionHeading({ id, children }: { id: string; children: string }) {
   );
 }
 
-export function OverviewKpis({ metrics, preset, stale = false }: OverviewKpisProps) {
+export function OverviewKpis({ metrics, rangeQuery, stale = false }: OverviewKpisProps) {
   const attentionId = useId();
   const perfId = useId();
   const loading = metrics === undefined;
@@ -189,7 +189,7 @@ export function OverviewKpis({ metrics, preset, stale = false }: OverviewKpisPro
       <section aria-labelledby={attentionId}>
         <SectionHeading id={attentionId}>Needs attention</SectionHeading>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
-          {attentionTiles(m, preset).map(shape).map(({ id, ...tile }) => (
+          {attentionTiles(m, rangeQuery).map(shape).map(({ id, ...tile }) => (
             <KpiTile key={id} {...tile} />
           ))}
         </div>
@@ -197,7 +197,7 @@ export function OverviewKpis({ metrics, preset, stale = false }: OverviewKpisPro
       <section aria-labelledby={perfId}>
         <SectionHeading id={perfId}>Calls in range</SectionHeading>
         <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-5">
-          {performanceTiles(m, preset).map(shape).map(({ id, ...tile }) => (
+          {performanceTiles(m, rangeQuery).map(shape).map(({ id, ...tile }) => (
             <KpiTile key={id} {...tile} />
           ))}
         </div>

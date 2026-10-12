@@ -4,11 +4,26 @@ import { Link, Navigate, Outlet, useLocation } from "react-router-dom";
 import { ErrorState } from "@/components/ErrorState";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
+import { ActiveCallButton } from "./ActiveCallButton";
+
+/**
+ * The app-wide End control for screens without a header (sign-in, the gates, loading): a web
+ * call started on /call keeps running and billing on any route, so a way to end it must be
+ * on every one. Renders nothing while no call is active.
+ */
+function CallBar() {
+  return (
+    <div className="fixed right-3 top-3 z-50 sm:right-4 sm:top-4">
+      <ActiveCallButton />
+    </div>
+  );
+}
 
 /** Centered card used by the gate screens and the sign-in page. */
 export function GateLayout({ children }: { children: ReactNode }) {
   return (
-    <div className="flex min-h-dvh flex-col items-center justify-center bg-page px-4 py-10">
+    <div className="flex min-h-dvh flex-col items-center justify-center bg-page px-4 py-16">
+      <CallBar />
       <div className="w-full max-w-sm">{children}</div>
     </div>
   );
@@ -16,9 +31,12 @@ export function GateLayout({ children }: { children: ReactNode }) {
 
 export function FullPageLoading({ label = "Checking access" }: { label?: string }) {
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-page" role="status" aria-live="polite">
-      <Loader2 className="size-6 animate-spin text-ink-3" aria-hidden="true" />
-      <span className="sr-only">{label}</span>
+    <div className="flex min-h-dvh items-center justify-center bg-page">
+      <CallBar />
+      <div role="status" aria-live="polite">
+        <Loader2 className="size-6 animate-spin text-ink-3" aria-hidden="true" />
+        <span className="sr-only">{label}</span>
+      </div>
     </div>
   );
 }

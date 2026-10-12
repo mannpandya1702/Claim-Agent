@@ -1,5 +1,5 @@
 import { dayKeysInRange, type DateRange } from "@/lib/dates";
-import { etDayKey, formatDayKey, OUTCOME_META, OUTCOME_ORDER, SENTIMENT_META } from "@/lib/format";
+import { etDayKey, formatDayKey, HUED_OUTCOMES, OUTCOME_META, OUTCOME_ORDER, SENTIMENT_META } from "@/lib/format";
 import type { CallsByDayRow, DashboardMetrics } from "@/lib/types";
 
 /*
@@ -9,6 +9,22 @@ import type { CallsByDayRow, DashboardMetrics } from "@/lib/types";
  */
 
 export type OutcomeKey = (typeof OUTCOME_ORDER)[number];
+
+/** What the outcome charts draw: the three hued outcomes and one gray fold for the rest. */
+export type StackKey = (typeof HUED_OUTCOMES)[number] | "other";
+export const STACK_ORDER: readonly StackKey[] = [...HUED_OUTCOMES, "other"];
+
+export const STACK_META: Record<StackKey, { label: string; color: string }> = {
+  resolved: { label: OUTCOME_META.resolved.label, color: OUTCOME_META.resolved.color },
+  escalated: { label: OUTCOME_META.escalated.label, color: OUTCOME_META.escalated.color },
+  auth_failed: { label: OUTCOME_META.auth_failed.label, color: OUTCOME_META.auth_failed.color },
+  other: { label: "Other", color: "var(--series-other)" },
+};
+
+/** The chart mark an outcome is drawn in. */
+export function stackKeyOf(outcome: OutcomeKey): StackKey {
+  return (HUED_OUTCOMES as readonly string[]).includes(outcome) ? (outcome as StackKey) : "other";
+}
 
 function num(value: unknown): number {
   const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
@@ -80,18 +96,26 @@ export function outcomeKey(outcome: string | null | undefined): OutcomeKey {
 export type DayRow = {
   day: string;
   total: number;
-  /** Outcome drawn last in this day's stack (gets the rounded data-end), null on a zero day. */
-  top: OutcomeKey | null;
-  /** Outcome sitting on the baseline (no surface gap below it). */
-  bottom: OutcomeKey | null;
+  /** Mark drawn last in this day's stack (gets the rounded data-end), null on a zero day. */
+  top: StackKey | null;
+  /** Mark sitting on the baseline (no surface gap below it). */
+  bottom: StackKey | null;
+  /** Calls in the folded outcomes, drawn as one gray segment. */
+  other: number;
 } & Record<OutcomeKey, number>;
 
 export interface DailySeries {
   rows: DayRow[];
-  /** Outcomes with at least one call in range, in OUTCOME_ORDER (the stack and legend order). */
+  /** Outcomes with at least one call in range, in OUTCOME_ORDER (the table's columns). */
   outcomes: OutcomeKey[];
-  /** Calls per outcome across the range, for the legend. */
+  /** Marks with at least one call in range, in STACK_ORDER (the stack and legend order). */
+  stack: StackKey[];
+  /** Present outcomes that fold into Other, for the legend and tooltip. */
+  folded: OutcomeKey[];
+  /** Calls per outcome across the range. */
   totals: Record<OutcomeKey, number>;
+  /** Calls per mark across the range, for the legend. */
+  stackTotals: Record<StackKey, number>;
   total: number;
   /** The busiest day (first one on a tie); null when the range has no calls. */
   peak: { day: string; total: number } | null;
@@ -118,27 +142,31 @@ export function buildDailySeries(rows: CallsByDayRow[], range: DateRange): Daily
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([day, counts]) => {
       let total = 0;
-      let top: OutcomeKey | null = null;
-      let bottom: OutcomeKey | null = null;
+      let other = 0;
       for (const k of OUTCOME_ORDER) {
         const n = counts[k];
         totals[k] += n;
         total += n;
-        if (n > 0) {
-          bottom ??= k;
-          top = k;
-        }
+        if (stackKeyOf(k) === "other") other += n;
       }
-      return { day, total, top, bottom, ...counts };
+      const marks = STACK_ORDER.filter((k) => (k === "other" ? other : counts[k]) > 0);
+      return { day, total, top: marks[marks.length - 1] ?? null, bottom: marks[0] ?? null, other, ...counts };
     });
 
   let peak: DailySeries["peak"] = null;
   for (const r of out) if (r.total > 0 && (!peak || r.total > peak.total)) peak = { day: r.day, total: r.total };
 
+  const outcomes = OUTCOME_ORDER.filter((k) => totals[k] > 0);
+  const folded = outcomes.filter((k) => stackKeyOf(k) === "other");
+  const stackTotals = Object.fromEntries(STACK_ORDER.map((k) => [k, 0])) as Record<StackKey, number>;
+  for (const k of outcomes) stackTotals[stackKeyOf(k)] += totals[k];
   return {
     rows: out,
-    outcomes: OUTCOME_ORDER.filter((k) => totals[k] > 0),
+    outcomes,
+    stack: STACK_ORDER.filter((k) => stackTotals[k] > 0),
+    folded,
     totals,
+    stackTotals,
     total: out.reduce((s, r) => s + r.total, 0),
     peak,
   };
@@ -149,51 +177,76 @@ export function buildDailySeries(rows: CallsByDayRow[], range: DateRange): Daily
 // ---------------------------------------------------------------------------------------------
 
 export interface Slice {
-  key: OutcomeKey | "other";
+  key: StackKey;
   label: string;
   description: string;
   color: string;
   value: number;
   /** 0..1 of all calls in range. */
   share: number;
+  /** The outcomes folded into Other, each with its count (empty for a hued slice). */
+  members: { key: OutcomeKey; label: string; value: number }[];
 }
 
-/** A donut stays readable only up to about six segments; past that the smallest fold into Other. */
-export const MAX_SLICES = 6;
+/** One row per outcome, for the table view: the full breakdown the chart folds. */
+export interface OutcomeRow {
+  key: OutcomeKey;
+  label: string;
+  value: number;
+  share: number;
+}
 
-export function buildOutcomeSlices(outcomes: Record<string, number>, maxSlices = MAX_SLICES): Slice[] {
+function mergeOutcomes(outcomes: Record<string, number>): { merged: Record<OutcomeKey, number>; total: number } {
   const merged = zeroCounts();
   for (const [k, v] of Object.entries(outcomes)) merged[outcomeKey(k)] += num(v);
-  const total = OUTCOME_ORDER.reduce((s, k) => s + merged[k], 0);
-  if (total === 0) return [];
+  return { merged, total: OUTCOME_ORDER.reduce((s, k) => s + merged[k], 0) };
+}
 
-  const present = OUTCOME_ORDER.filter((k) => merged[k] > 0);
-  const slice = (k: OutcomeKey): Slice => ({
+/**
+ * Donut slices in STACK_ORDER (never by size, so a slice keeps its place and color): the hued
+ * outcomes present, then one Other slice for everything else.
+ */
+export function buildOutcomeSlices(outcomes: Record<string, number>): Slice[] {
+  const { merged, total } = mergeOutcomes(outcomes);
+  if (total === 0) return [];
+  const slices: Slice[] = HUED_OUTCOMES.filter((k) => merged[k] > 0).map((k) => ({
     key: k,
     label: OUTCOME_META[k].label,
     description: OUTCOME_META[k].description,
     color: OUTCOME_META[k].color,
     value: merged[k],
     share: merged[k] / total,
-  });
-  if (present.length <= maxSlices) return present.map(slice);
-
-  // "unknown" is already the gray "other" slot, so it always folds rather than showing two grays.
-  const named = present.filter((k) => k !== "unknown");
-  const keep = new Set<OutcomeKey>([...named].sort((a, b) => merged[b] - merged[a]).slice(0, maxSlices - 1));
-  const folded = present.filter((k) => !keep.has(k));
-  const otherValue = folded.reduce((s, k) => s + merged[k], 0);
-  return [
-    ...OUTCOME_ORDER.filter((k) => keep.has(k)).map(slice),
-    {
+    members: [],
+  }));
+  const members = OUTCOME_ORDER.filter((k) => stackKeyOf(k) === "other" && merged[k] > 0).map((k) => ({
+    key: k,
+    label: OUTCOME_META[k].label,
+    value: merged[k],
+  }));
+  const otherValue = members.reduce((s, m) => s + m.value, 0);
+  if (otherValue > 0) {
+    slices.push({
       key: "other",
-      label: "Other",
-      description: folded.map((k) => OUTCOME_META[k].label).join(", "),
-      color: "var(--series-other)",
+      label: STACK_META.other.label,
+      description: members.map((m) => m.label).join(", "),
+      color: STACK_META.other.color,
       value: otherValue,
       share: otherValue / total,
-    },
-  ];
+      members,
+    });
+  }
+  return slices;
+}
+
+export function buildOutcomeRows(outcomes: Record<string, number>): OutcomeRow[] {
+  const { merged, total } = mergeOutcomes(outcomes);
+  if (total === 0) return [];
+  return OUTCOME_ORDER.filter((k) => merged[k] > 0).map((k) => ({
+    key: k,
+    label: OUTCOME_META[k].label,
+    value: merged[k],
+    share: merged[k] / total,
+  }));
 }
 
 // ---------------------------------------------------------------------------------------------

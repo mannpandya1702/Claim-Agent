@@ -6,7 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthTestProvider } from "@/lib/auth";
 import { ROUTER_FUTURE } from "@/lib/router";
-import type { EmailRow, Escalation } from "@/lib/types";
+import type { EmailRow, Escalation, EscalationListRow } from "@/lib/types";
 
 const claimEscalation = vi.fn();
 const closeEscalation = vi.fn();
@@ -30,6 +30,7 @@ function esc(over: Partial<Escalation> = {}): Escalation {
     reason: "representative_requested",
     details: "Caller wants to talk about the appeal.",
     callback_phone: "+16025550102",
+    callback_phone_masked: "+1 602 ... 0102",
     channel: "webCall",
     verified: true,
     callback_source: "account",
@@ -53,7 +54,7 @@ const EMAILS: EmailRow[] = [
   { id: "m2", call_key: "call-1", kind: "document_checklist", to_masked: "t***@example.com", resend_id: "re_2", status: "sent", error: null, created_at: "2026-10-12T14:51:00Z" },
 ];
 
-function renderCard(e: Escalation, email = "staff@example.com") {
+function renderCard(e: Escalation | EscalationListRow, email = "staff@example.com", props: { maskCallback?: boolean } = {}) {
   const client = new QueryClient();
   const Wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>
@@ -62,7 +63,7 @@ function renderCard(e: Escalation, email = "staff@example.com") {
       </AuthTestProvider>
     </QueryClientProvider>
   );
-  return render(<EscalationCard escalation={e} emails={EMAILS} now={NOW} />, { wrapper: Wrapper });
+  return render(<EscalationCard escalation={e} emails={EMAILS} now={NOW} {...props} />, { wrapper: Wrapper });
 }
 
 beforeEach(() => {
@@ -82,6 +83,17 @@ describe("EscalationCard", () => {
     const email = screen.getByText("Email").parentElement!;
     expect(within(email).getByText("Callback request")).toBeInTheDocument();
     expect(within(email).queryByText("Document checklist")).not.toBeInTheDocument();
+  });
+
+  it("in a list, shows the callback number masked as plain text with no dialable link", () => {
+    const queueRow: EscalationListRow = { ...esc(), callback_phone: undefined };
+    renderCard(queueRow, "staff@example.com", { maskCallback: true });
+    expect(screen.getByText("+1 602 ... 0102")).toBeInTheDocument();
+    expect(screen.getByText("Number on account")).toBeInTheDocument();
+    for (const link of screen.queryAllByRole("link")) {
+      expect(link.getAttribute("href") ?? "").not.toMatch(/6025550102|tel:/);
+    }
+    expect(document.body.innerHTML).not.toContain("6025550102");
   });
 
   it("shows the delivery error when a channel failed", () => {

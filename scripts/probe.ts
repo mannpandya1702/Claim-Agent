@@ -7,7 +7,7 @@
 //   deno task probe credential   create (or reuse) the Bearer custom credential for the webhook
 
 import { loadEnv, need } from "./lib/env.ts";
-import { VapiError, vapiClient } from "./lib/vapi.ts";
+import { vapiClient, VapiError } from "./lib/vapi.ts";
 import { readState, writeState } from "./lib/state.ts";
 
 const env = loadEnv();
@@ -39,7 +39,10 @@ function fullBlock(credentialId: string) {
     properties: {
       caller_name: { type: "string" },
       sentiment: { type: "string", enum: ["positive", "neutral", "negative"] },
-      outcome: { type: "string", enum: ["resolved", "auth_failed", "not_found", "escalated", "emergency", "unsupported", "abandoned"] },
+      outcome: {
+        type: "string",
+        enum: ["resolved", "auth_failed", "not_found", "escalated", "emergency", "unsupported", "abandoned"],
+      },
       escalated: { type: "boolean" },
       emergency: { type: "boolean" },
     },
@@ -101,7 +104,11 @@ function fullBlock(credentialId: string) {
         on: "customer.speech.timeout",
         options: { timeoutSeconds: 40, triggerMaxCount: 1 },
         do: [
-          { type: "say", exact: "If this is an emergency, please hang up and call 911. Otherwise, please call back any time. Goodbye." },
+          {
+            type: "say",
+            exact:
+              "If this is an emergency, please hang up and call 911. Otherwise, please call back any time. Goodbye.",
+          },
           { type: "tool", tool: { type: "endCall" } },
         ],
       },
@@ -166,7 +173,7 @@ function diff(sent: any, got: any, path = ""): string[] {
 
 async function p1() {
   const credentialId = await ensureCredential();
-  let body: any = fullBlock(credentialId);
+  const body: any = fullBlock(credentialId);
   const rejected: string[] = [];
   let created: any;
   for (let i = 0; i < 12; i++) {
@@ -204,7 +211,10 @@ async function p1() {
   await vapi.del(`/assistant/${created.id}`);
   const result = { rejected, droppedOrChanged: drops, patchKeptOtherFields: patchKept, patchedId: patched.id };
   console.log(JSON.stringify(result, null, 2));
-  writeState({ ...readState(), probes: { ...(readState().probes ?? {}), p1: { at: new Date().toISOString(), ...result } } });
+  writeState({
+    ...readState(),
+    probes: { ...(readState().probes ?? {}), p1: { at: new Date().toISOString(), ...result } },
+  });
 }
 
 async function p3() {
@@ -212,14 +222,19 @@ async function p3() {
   try {
     const r = await vapi.post("/chat", {
       assistant: {
-        model: { provider: "openai", model: "gpt-5.4", messages: [{ role: "system", content: "Reply with the word ok." }] },
+        model: {
+          provider: "openai",
+          model: "gpt-5.4",
+          messages: [{ role: "system", content: "Reply with the word ok." }],
+        },
       },
       input: "ping",
     });
     console.log("p3 chat ok:", JSON.stringify(r.output ?? r).slice(0, 300));
   } catch (e) {
-    if (e instanceof VapiError && e.status === 402) console.log("p3: 402 — wallet empty or frozen; top up before any battery");
-    else throw e;
+    if (e instanceof VapiError && e.status === 402) {
+      console.log("p3: 402 — wallet empty or frozen; top up before any battery");
+    } else throw e;
   }
 }
 

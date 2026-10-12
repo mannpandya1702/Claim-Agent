@@ -1,6 +1,6 @@
 import { isSlaBreached } from "@/components/calls/EscalationCard";
 import { DASH, ESCALATION_STATUS_LABELS, minutesBetween } from "@/lib/format";
-import type { Escalation, EscalationKind, EscalationStatus } from "@/lib/types";
+import type { EscalationKind, EscalationListRow, EscalationStatus } from "@/lib/types";
 
 /*
  * Pure queue rules (tab and filter parsing, the open-queue summary). The SLA rule itself is
@@ -32,9 +32,9 @@ export interface OpenSummary {
   emergencies: number;
 }
 
-export function summariseOpen(rows: readonly Escalation[], now: Date): OpenSummary {
+export function summariseOpen(rows: readonly EscalationListRow[], now: Date): OpenSummary {
   const open = rows.filter((r) => r.status === "open");
-  let oldest: Escalation | null = null;
+  let oldest: EscalationListRow | null = null;
   for (const r of open) {
     if (!oldest || Date.parse(r.created_at) < Date.parse(oldest.created_at)) oldest = r;
   }
@@ -63,11 +63,11 @@ export function formatWait(minutes: number | null | undefined): string {
 }
 
 /** Rows for the current tab and kind. Status is re-checked client-side, so a row a Claim just moved leaves at once. */
-export function visibleRows(rows: readonly Escalation[], tab: QueueTab, kind: KindFilter): Escalation[] {
+export function visibleRows<T extends EscalationListRow>(rows: readonly T[], tab: QueueTab, kind: KindFilter): T[] {
   return rows.filter((r) => r.status === tab && (kind === "all" || r.kind === kind));
 }
 
 /** Sorted, de-duplicated call keys: a stable query key for the emails of the rows on screen. */
-export function callKeysOf(rows: readonly Pick<Escalation, "call_key">[]): string[] {
+export function callKeysOf(rows: readonly Pick<EscalationListRow, "call_key">[]): string[] {
   return [...new Set(rows.map((r) => r.call_key))].sort();
 }

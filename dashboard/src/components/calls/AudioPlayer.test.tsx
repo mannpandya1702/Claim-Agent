@@ -51,6 +51,45 @@ describe("AudioPlayer", () => {
     expect(invoke).toHaveBeenCalledTimes(2);
   });
 
+  it("moves keyboard focus to the player when the link arrives, and to Try again on failure", async () => {
+    // jsdom treats <audio controls> as unfocusable (browsers do not), so watch the call itself.
+    const focused: Element[] = [];
+    const focus = vi.spyOn(HTMLMediaElement.prototype, "focus").mockImplementation(function (this: HTMLMediaElement) {
+      focused.push(this);
+    });
+    let resolve!: (v: unknown) => void;
+    invoke.mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    render(<AudioPlayer callId="call-1" hasRecording />);
+    const play = screen.getByRole("button", { name: "Play recording" });
+    play.focus();
+    await userEvent.keyboard("{Enter}");
+
+    // loading: the same button, still focused, announced as unavailable rather than disabled
+    const loading = screen.getByRole("button", { name: "Loading recording" });
+    expect(loading).toHaveFocus();
+    expect(loading).toHaveAttribute("aria-disabled", "true");
+    expect(loading).not.toBeDisabled();
+    await userEvent.keyboard("{Enter}");
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    resolve({ data: { url: "https://storage.example/rec.wav" }, error: null });
+    const audio = await screen.findByLabelText("Call recording");
+    await waitFor(() => expect(focused).toContain(audio));
+    focus.mockRestore();
+
+    // the automatic retry fails too: focus lands on Try again, not on the page
+    invoke.mockResolvedValueOnce({ data: { url: "https://storage.example/again.wav" }, error: null });
+    audio.setAttribute("tabindex", "0");
+    audio.focus();
+    fireEvent.error(audio);
+    await waitFor(() => expect(screen.getByLabelText("Call recording")).toHaveAttribute("src", "https://storage.example/again.wav"));
+    const again = screen.getByLabelText("Call recording");
+    again.setAttribute("tabindex", "0");
+    again.focus();
+    fireEvent.error(again);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Try again" })).toHaveFocus());
+  });
+
   it("says the recording comes after the call while it is live", () => {
     render(<AudioPlayer callId="call-1" hasRecording={false} live />);
     expect(screen.getByText(/available after the call ends/)).toBeInTheDocument();

@@ -10,7 +10,7 @@ const m = vi.hoisted(() => ({
   fetchLiveCalls: vi.fn(),
   fetchTranscriptLines: vi.fn(),
   fetchCallAttempts: vi.fn(),
-  fetchCallSession: vi.fn(),
+  fetchCallLevel: vi.fn(),
   fetchCallEscalations: vi.fn(),
   useRealtimeRows: vi.fn(() => ({ status: "SUBSCRIBED", isLive: true })),
 }));
@@ -21,7 +21,7 @@ vi.mock("@/lib/queries", async (importOriginal) => ({
   fetchLiveCalls: () => m.fetchLiveCalls(),
   fetchTranscriptLines: (id: string) => m.fetchTranscriptLines(id),
   fetchCallAttempts: (id: string) => m.fetchCallAttempts(id),
-  fetchCallSession: (id: string) => m.fetchCallSession(id),
+  fetchCallLevel: (id: string) => m.fetchCallLevel(id),
   fetchCallEscalations: (id: string) => m.fetchCallEscalations(id),
 }));
 vi.mock("@/lib/realtime", async (importOriginal) => ({
@@ -40,7 +40,7 @@ function call(over: Partial<CallSummary>): CallSummary {
     vapi_call_id: "call-1",
     channel: "webCall",
     caller_name: null,
-    caller_phone: null,
+    caller_phone_masked: null,
     outcome: "in_progress",
     sentiment: null,
     escalated: false,
@@ -64,16 +64,8 @@ const ATTEMPTS: Attempt[] = [
   { call_key: "call-1", tool_call_id: "t1", tool_name: "lookup_customer", kind: "lookup_hit", code: "needs_dob", created_at: ago(100) },
   { call_key: "call-1", tool_call_id: "t2", tool_name: "verify_identity", kind: "dob_ok", code: "verified", created_at: ago(80) },
 ];
-const SESSION: CallSession = {
-  call_key: "call-1",
-  channel: "webCall",
-  caller_number: null,
-  level: "verified",
-  candidate_customer_id: null,
-  verified_customer_id: null,
-  created_at: ago(110),
-  updated_at: ago(80),
-};
+// Live cards read the level alone, never the session's caller number.
+const SESSION: Pick<CallSession, "call_key" | "level"> = { call_key: "call-1", level: "verified" };
 const ESCALATION = { id: "e1", call_key: "call-1", kind: "representative", status: "open", claimed_by: null } as Escalation;
 
 function renderLive(client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
@@ -92,12 +84,13 @@ beforeEach(() => {
   m.fetchLiveCalls.mockResolvedValue([call({ caller_name: "Tobias Halvorsen" })]);
   m.fetchTranscriptLines.mockResolvedValue(LINES);
   m.fetchCallAttempts.mockResolvedValue(ATTEMPTS);
-  m.fetchCallSession.mockResolvedValue(SESSION);
+  m.fetchCallLevel.mockResolvedValue(SESSION);
   m.fetchCallEscalations.mockResolvedValue([ESCALATION]);
 });
 
 describe("Live", () => {
   it("shows each call in progress with its transcript, identity, last tool code and escalation", async () => {
+    m.fetchLiveCalls.mockResolvedValue([call({ caller_name: "Tobias Halvorsen", caller_phone_masked: "+1 602 ... 0101" })]);
     renderLive();
     const card = await screen.findByRole("article", { name: /Tobias Halvorsen/ });
 
@@ -107,6 +100,7 @@ describe("Live", () => {
     expect(within(card).getByTitle("Last tool result: verify_identity: verified")).toBeInTheDocument();
     expect(within(card).getByText("Escalation open")).toBeInTheDocument();
     expect(within(card).getByText("2:05")).toBeInTheDocument();
+    expect(within(card).getByText("+1 602 ... 0101")).toBeInTheDocument();
     expect(within(card).getByRole("link", { name: /Open call/ })).toHaveAttribute("href", "/calls/call-1");
     expect(screen.getByTestId("live-count")).toHaveTextContent("1 call in progress");
   });
@@ -150,6 +144,16 @@ describe("Live", () => {
     expect(within(stuck).getByText("Unknown caller")).toBeInTheDocument();
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
     expect(m.fetchTranscriptLines).not.toHaveBeenCalled();
+  });
+
+  it("says a card's transcript or escalations failed to load instead of 'waiting for the first words'", async () => {
+    m.fetchTranscriptLines.mockRejectedValue(new Error("transcript_lines: 500"));
+    m.fetchCallEscalations.mockRejectedValue(new Error("escalations: 500"));
+    renderLive();
+    const card = await screen.findByRole("article", { name: /Tobias Halvorsen/ });
+    expect(await within(card).findByText("Could not load the transcript")).toBeInTheDocument();
+    expect(within(card).queryByText(/Waiting for the first words/)).not.toBeInTheDocument();
+    expect(await within(card).findByText("Escalations unavailable")).toBeInTheDocument();
   });
 
   it("shows an empty state that points at the call page", async () => {

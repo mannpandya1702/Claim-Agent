@@ -1100,7 +1100,8 @@ export function flagProblems(turns: TurnRecord[]): string[] {
       channel: "chat",
       verified: false,
       callback_source: "none",
-      alert_status: escalationCodes.some((c) => NOTIFIED_CODES.has(c)) ? "sent" : "failed",
+      // What tools.ts stores for a chat: no alert is sent by design, the row is marked 'skipped'.
+      alert_status: escalationCodes.some((c) => NOTIFIED_CODES.has(c)) ? "skipped" : "failed",
       delivery_error: null,
       status: "open",
       created_at: "",

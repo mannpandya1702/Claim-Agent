@@ -57,13 +57,17 @@ export function TranscriptView({ items, live = false, empty, maxHeightClass = "m
     // Only when the mode flips: new lines are handled below.
   }, [live, scrollToEnd]);
 
+  // Live lines from one speaker less than 3 s apart merge into the last bubble, which then grows
+  // without the item count changing, so follow on a content signature, not the length.
+  const last = items[items.length - 1];
+  const contentSig = `${items.length}:${last && last.kind === "bubble" ? last.text.length : 0}`;
   useEffect(() => {
     if (live) {
       if (following.current) scrollToEnd(false);
       else setShowJump(true);
     }
     measure();
-  }, [items.length, live, scrollToEnd, measure]);
+  }, [contentSig, live, scrollToEnd, measure]);
 
   const onScroll = () => {
     const atEnd = measure();

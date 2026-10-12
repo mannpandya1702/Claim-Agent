@@ -130,6 +130,9 @@ export default function TalkToTessa() {
 
 function PublicHeader({ returnTo }: { returnTo: string }) {
   const auth = useAuth();
+  // Mid-call, sign-in opens in a new tab: leaving this page would hide the call controls and the
+  // caller transcript while the call keeps running.
+  const inCall = isCallActive(useCallState());
   return (
     <header className="sticky top-0 z-40 border-b bg-card/90 backdrop-blur supports-[backdrop-filter]:bg-card/75">
       <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-2 px-4 sm:px-6">
@@ -158,10 +161,11 @@ function PublicHeader({ returnTo }: { returnTo: string }) {
             </Button>
           ) : auth.status === "signed-out" ? (
             <Button variant="ghost" size="sm" asChild>
-              <Link to={`/login?next=${encodeURIComponent(returnTo)}`}>
+              <Link to={`/login?next=${encodeURIComponent(returnTo)}`} {...(inCall ? { target: "_blank", rel: "noopener" } : {})}>
                 <LogIn aria-hidden="true" />
                 <span className="hidden sm:inline">Staff sign in</span>
                 <span className="sr-only sm:hidden">Staff sign in</span>
+                {inCall && <span className="sr-only"> (opens in a new tab)</span>}
               </Link>
             </Button>
           ) : null}

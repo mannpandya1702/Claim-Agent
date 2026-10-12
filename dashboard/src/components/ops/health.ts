@@ -1,13 +1,13 @@
 import type { StatusTone } from "@/components/KpiTile";
-import type { DeliveryGapRow, JobRun, OpsHealth } from "@/lib/types";
+import type { DeliveryChannel, DeliveryGapRow, JobRun, OpsHealth } from "@/lib/types";
 
 /*
  * Pure rules behind the Ops page, so the thresholds are testable with a fixed clock. Schedules
  * mirror 0004_automation.sql: sla every 10 minutes, reaper hourly at :07, digest daily at
- * 12:00 UTC (8 AM EDT, 7 AM EST).
+ * 12:00 UTC (8 AM EDT, 7 AM EST), outbox every minute.
  */
 
-export type JobName = "sla" | "digest" | "reaper";
+export type JobName = "sla" | "digest" | "reaper" | "outbox";
 
 export interface JobSpec {
   job: JobName;
@@ -19,7 +19,7 @@ export interface JobSpec {
   okWithinMin: number;
   /** Older than ok but within this is late; beyond it the job has stopped. */
   lateWithinMin: number;
-  healthKey: "last_sla_run" | "last_digest_run" | "last_reaper_run";
+  healthKey: "last_sla_run" | "last_digest_run" | "last_reaper_run" | "last_outbox_run";
 }
 
 export const JOB_SPECS: readonly JobSpec[] = [
@@ -49,6 +49,15 @@ export const JOB_SPECS: readonly JobSpec[] = [
     okWithinMin: 26 * 60,
     lateWithinMin: 50 * 60,
     healthKey: "last_digest_run",
+  },
+  {
+    job: "outbox",
+    label: "Outbox",
+    schedule: "Every minute",
+    purpose: "Delivers completed calls to the Airtable call log",
+    okWithinMin: 5,
+    lateWithinMin: 20,
+    healthKey: "last_outbox_run",
   },
 ];
 
@@ -102,7 +111,18 @@ export function normaliseHealth(h: OpsHealth): OpsHealth {
     emails_sent_24h: toCount(h.emails_sent_24h),
     stuck_calls: toCount(h.stuck_calls),
     analysis_missing_24h: toCount(h.analysis_missing_24h),
+    // Present only once 0005_outbox.sql is applied; absent stays absent so the page can hide them.
+    ...(h.outbox_pending !== undefined && {
+      outbox_pending: toCount(h.outbox_pending),
+      outbox_dead: toCount(h.outbox_dead),
+      outbox_delivered_24h: toCount(h.outbox_delivered_24h),
+    }),
   };
+}
+
+/** True when ops_health carries the outbox columns. */
+export function hasOutbox(h: OpsHealth | null | undefined): h is OpsHealth & Required<Pick<OpsHealth, "outbox_pending" | "outbox_dead" | "outbox_delivered_24h">> {
+  return !!h && h.outbox_pending !== undefined;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -113,7 +133,7 @@ export function normaliseHealth(h: OpsHealth): OpsHealth {
 export type ChannelTone = "good" | "warning" | "critical" | "idle";
 
 export interface ChannelHealth {
-  channel: DeliveryGapRow["channel"];
+  channel: DeliveryChannel;
   label: string;
   owed: number;
   delivered: number;
@@ -125,17 +145,19 @@ export interface ChannelHealth {
   dead: boolean;
 }
 
-export const CHANNEL_NAMES: Record<DeliveryGapRow["channel"], string> = {
+export const CHANNEL_NAMES: Record<DeliveryChannel, string> = {
   telegram: "Telegram",
   email: "Email",
+  airtable: "Airtable call log",
 };
 
-export const CHANNEL_FIX: Record<DeliveryGapRow["channel"], string> = {
+export const CHANNEL_FIX: Record<DeliveryChannel, string> = {
   telegram: "Check the bot token and chat id.",
   email: "Check the Resend key and the sender domain.",
+  airtable: "Check the Airtable token, base id and table, and the outbox rows' last error.",
 };
 
-export function channelHealth(row: DeliveryGapRow): ChannelHealth {
+export function channelHealth(row: { channel: DeliveryChannel; owed: unknown; delivered: unknown; failed: unknown }): ChannelHealth {
   const owed = toCount(row.owed);
   const delivered = toCount(row.delivered);
   const failed = toCount(row.failed);
@@ -149,11 +171,29 @@ export function channelHealth(row: DeliveryGapRow): ChannelHealth {
   return { ...base, tone: "good", status: "All delivered", dead: false };
 }
 
-/** Both channels in a fixed order, so a channel with no row still shows as "nothing to deliver". */
-export function deliveryChannels(rows: readonly DeliveryGapRow[]): ChannelHealth[] {
-  return (["telegram", "email"] as const).map((channel) =>
+/**
+ * The Airtable call log from the outbox counts in ops_health: delivered in the last 24 hours,
+ * still queued (pending), and given up after the attempt cap (failed). Queued and given-up rows
+ * are counted whatever their age, since they are still owed.
+ */
+export function airtableChannel(h: OpsHealth | null | undefined): ChannelHealth | null {
+  if (!hasOutbox(h)) return null;
+  const delivered = toCount(h.outbox_delivered_24h);
+  const failed = toCount(h.outbox_dead);
+  const pending = toCount(h.outbox_pending);
+  return channelHealth({ channel: "airtable", owed: delivered + failed + pending, delivered, failed });
+}
+
+/**
+ * Telegram and email in a fixed order, so a channel with no row still shows as "nothing to
+ * deliver", then the Airtable call log once the outbox exists.
+ */
+export function deliveryChannels(rows: readonly DeliveryGapRow[], health?: OpsHealth | null): ChannelHealth[] {
+  const alerts = (["telegram", "email"] as const).map((channel) =>
     channelHealth(rows.find((r) => r.channel === channel) ?? { channel, owed: 0, delivered: 0, failed: 0 }),
   );
+  const airtable = airtableChannel(health);
+  return airtable ? [...alerts, airtable] : alerts;
 }
 
 // ---------------------------------------------------------------------------------------------

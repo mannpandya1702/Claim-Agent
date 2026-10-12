@@ -1,13 +1,14 @@
 import { Cell, Pie, PieChart, Tooltip, type TooltipProps } from "recharts";
 import { formatCount, formatPercent } from "@/lib/format";
 import { DataTable, LegendSwatch } from "./ChartCard";
-import type { Slice } from "./metrics";
+import type { OutcomeRow, Slice } from "./metrics";
 
 /*
- * Outcome mix as a donut: part-to-whole at a glance, capped at six segments (the smallest fold
- * into Other). Slices run clockwise from twelve o'clock in OUTCOME_ORDER, separated by a 2px
- * surface gap. The legend beside it carries every count and share as text, so no value depends
- * on hover or on telling two hues apart.
+ * Outcome mix as a donut: part-to-whole at a glance. Any two slices can touch (a missing outcome
+ * closes the gap), so there are at most four: the three all-pairs-validated hues and the gray
+ * Other fold. Slices run clockwise from twelve o'clock in STACK_ORDER, separated by a 2px surface
+ * gap. The legend carries every count and share as text and names what Other holds; the table
+ * view lists each outcome on its own row.
  */
 
 const SIZE = 176;
@@ -19,12 +20,22 @@ function SliceTooltip({ active, payload }: TooltipProps<number, string>) {
   return (
     <div className="max-w-56 rounded-md bg-card px-3 py-2 text-xs shadow-pop">
       <p className="flex items-center gap-2">
-        <span aria-hidden="true" className="h-0.5 w-3 shrink-0 rounded-full" style={{ backgroundColor: slice.color }} />
+        <span aria-hidden="true" className="viz-mark h-0.5 w-3 shrink-0 rounded-full" style={{ backgroundColor: slice.color }} />
         <span className="tabular font-semibold text-ink-1">{formatCount(slice.value)}</span>
         <span className="text-ink-3">{formatPercent(slice.share)}</span>
       </p>
       <p className="mt-0.5 font-medium text-ink-1">{slice.label}</p>
-      <p className="text-ink-3">{slice.description}</p>
+      {slice.members.length > 0 ? (
+        <ul className="text-ink-3">
+          {slice.members.map((m) => (
+            <li key={m.key}>
+              {m.label} <span className="tabular">{formatCount(m.value)}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-ink-3">{slice.description}</p>
+      )}
     </div>
   );
 }
@@ -37,7 +48,7 @@ export function OutcomeDonut({ slices, total }: { slices: Slice[]; total: number
   return (
     <figure className="flex flex-col items-center gap-5 sm:flex-row">
       <figcaption className="sr-only">{summary}</figcaption>
-      <div className="relative shrink-0" style={{ width: SIZE, height: SIZE }}>
+      <div className="viz-chart relative shrink-0" style={{ width: SIZE, height: SIZE }}>
         <PieChart width={SIZE} height={SIZE}>
           <Pie
             data={slices}
@@ -66,11 +77,19 @@ export function OutcomeDonut({ slices, total }: { slices: Slice[]; total: number
       </div>
       <ul className="grid w-full min-w-0 gap-1.5 text-sm sm:max-w-xs" aria-label="Outcomes">
         {slices.map((s) => (
-          <li key={s.key} className="flex min-w-0 items-center gap-2" title={s.description}>
-            <LegendSwatch color={s.color} />
-            <span className="min-w-0 flex-1 truncate text-ink-2">{s.label}</span>
-            <span className="tabular font-medium text-ink-1">{formatCount(s.value)}</span>
-            <span className="tabular w-10 text-right text-xs text-ink-3">{formatPercent(s.share)}</span>
+          <li key={s.key} className="min-w-0" title={s.description}>
+            <span className="flex min-w-0 items-center gap-2">
+              <LegendSwatch color={s.color} />
+              <span className="min-w-0 flex-1 truncate text-ink-2">{s.label}</span>
+              <span className="tabular font-medium text-ink-1">{formatCount(s.value)}</span>
+              <span className="tabular w-10 text-right text-xs text-ink-3">{formatPercent(s.share)}</span>
+            </span>
+            {s.members.length > 0 && (
+              <span className="block pl-[1.125rem] text-xs text-ink-3">
+                {/* No-break space: a label never wraps away from its count. */}
+                {s.members.map((m) => `${m.label}\u00a0${formatCount(m.value)}`).join(" · ")}
+              </span>
+            )}
           </li>
         ))}
       </ul>
@@ -78,7 +97,8 @@ export function OutcomeDonut({ slices, total }: { slices: Slice[]; total: number
   );
 }
 
-export function OutcomeTable({ slices, total }: { slices: Slice[]; total: number }) {
+/** Every outcome on its own row: the breakdown the chart folds into Other. */
+export function OutcomeTable({ rows, total }: { rows: OutcomeRow[]; total: number }) {
   return (
     <DataTable
       caption="Calls by outcome"
@@ -87,9 +107,9 @@ export function OutcomeTable({ slices, total }: { slices: Slice[]; total: number
         { key: "calls", label: "Calls", numeric: true },
         { key: "share", label: "Share", numeric: true },
       ]}
-      rows={slices.map((s) => ({
-        key: s.key,
-        cells: [s.key === "other" ? `Other (${s.description})` : s.label, formatCount(s.value), formatPercent(s.share)],
+      rows={rows.map((r) => ({
+        key: r.key,
+        cells: [r.label, formatCount(r.value), formatPercent(r.share)],
       }))}
       footer={["All outcomes", formatCount(total), total > 0 ? "100%" : formatPercent(null)]}
     />

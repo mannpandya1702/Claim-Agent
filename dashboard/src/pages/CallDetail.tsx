@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import {
   Check,
   CircleCheck,
@@ -15,6 +15,7 @@ import {
   MessagesSquare,
   NotebookPen,
   Receipt,
+  Send,
   Siren,
   Timer,
   Volume2,
@@ -28,6 +29,7 @@ import { AudioPlayer } from "@/components/calls/AudioPlayer";
 import { ChannelLabel } from "@/components/calls/CallTable";
 import { CostBreakdown, costParts } from "@/components/calls/CostBreakdown";
 import { EmailList } from "@/components/calls/EmailList";
+import { OutboxList } from "@/components/calls/OutboxList";
 import { EscalationCard } from "@/components/calls/EscalationCard";
 import { FlagExplain } from "@/components/calls/FlagExplain";
 import { IdentityBadge, IdentityPath } from "@/components/calls/IdentityPath";
@@ -55,12 +57,14 @@ import {
   formatMoney,
   formatPhone,
   formatTime,
+  NA,
 } from "@/lib/format";
 import {
   fetchCall,
   fetchCallAttempts,
   fetchCallEmails,
   fetchCallEscalations,
+  fetchCallOutbox,
   fetchCallSession,
   fetchTranscriptLines,
   qk,
@@ -147,6 +151,8 @@ export default function CallDetail() {
   });
   const escalationsQ = useQuery({ queryKey: qk.callEscalations(id), queryFn: () => fetchCallEscalations(id), enabled: id !== "", refetchInterval: poll });
   const emailsQ = useQuery({ queryKey: qk.callEmails(id), queryFn: () => fetchCallEmails(id), enabled: id !== "", refetchInterval: poll });
+  // The outbox row is written by the end-of-call writer, so it arrives after hangup (Realtime).
+  const outboxQ = useQuery({ queryKey: qk.callOutbox(id), queryFn: () => fetchCallOutbox(id), enabled: id !== "" });
 
   // Per-call subscriptions. The streaming tables only matter while the call is live.
   const on = id !== "";
@@ -156,6 +162,7 @@ export default function CallDetail() {
   useRealtimeRows("call_sessions", `call_key=eq.${id}`, [qk.callSession(id)], { enabled: on && rowLoaded && live });
   useRealtimeRows("escalations", `call_key=eq.${id}`, [qk.callEscalations(id)], { enabled: on });
   useRealtimeRows("emails", `call_key=eq.${id}`, [qk.callEmails(id)], { enabled: on });
+  useRealtimeRows("outbox_events", `ref_id=eq.${id}`, [qk.callOutbox(id)], { enabled: on });
 
   const attempts = useMemo(() => attemptsQ.data ?? [], [attemptsQ.data]);
   const liveItems = useMemo(() => fromLiveLines(linesQ.data ?? [], attempts), [linesQ.data, attempts]);
@@ -192,7 +199,20 @@ export default function CallDetail() {
   const session = sessionQ.data ?? null;
   const escalations = escalationsQ.data ?? [];
   const emails = emailsQ.data ?? [];
-  const nothingYet = row === null && !session && attempts.length === 0 && (linesQ.data ?? []).length === 0;
+  // A query that failed or has not answered must never read as "nothing happened".
+  const sessionView = view(sessionQ);
+  const attemptsView = view(attemptsQ);
+  const linesView = needLines ? view(linesQ) : "ready";
+  // With no call row yet, wait for the other reads before deciding anything about this call.
+  if (row === null && [sessionView, attemptsView, linesView].includes("loading")) return <DetailSkeleton />;
+  const nothingYet =
+    row === null &&
+    sessionView === "ready" &&
+    attemptsView === "ready" &&
+    linesView === "ready" &&
+    !session &&
+    attempts.length === 0 &&
+    (linesQ.data ?? []).length === 0;
 
   if (nothingYet) {
     return (
@@ -221,6 +241,7 @@ export default function CallDetail() {
   const duration = live ? formatDuration(elapsedSince(startedAt, now)) : formatDuration(call?.duration_seconds);
   const lookups = attempts.filter((a) => a.tool_name === "lookup_customer" || a.tool_name === "verify_identity").length;
   const hasSplit = costParts(call?.cost_breakdown).some((p) => p.value !== null);
+  const emailsView = view(emailsQ);
 
   const exportRecord = () =>
     downloadJson(`call-${id}.json`, {
@@ -241,7 +262,11 @@ export default function CallDetail() {
         description={
           <div className="mt-1 space-y-2">
             <div className="flex flex-wrap items-center gap-1.5">
-              <IdentityBadge level={session?.level} />
+              {sessionView === "loading" ? (
+                <Skeleton className="h-6 w-24" />
+              ) : sessionView === "error" ? null : (
+                <IdentityBadge level={session?.level} />
+              )}
               <OutcomeBadge outcome={call?.outcome} live={live} />
               {!live && <SentimentBadge sentiment={call?.sentiment} />}
               {success && <SuccessBadge meta={success} />}
@@ -297,7 +322,13 @@ export default function CallDetail() {
             <KpiTile label="Duration" icon={Timer} value={duration} hint={live ? "Running" : call?.ended_at ? `Ended ${formatTime(call.ended_at)} ET` : undefined} />
             <KpiTile label="Cost" icon={Wallet} value={live ? DASH : formatMoney(call?.cost)} hint={live ? "After hangup" : hasSplit ? "Split below" : "No split reported"} />
             <KpiTile label="Avg turn latency" icon={Gauge} value={live ? DASH : formatLatency(call?.latency_avg_ms)} hint={live ? "After hangup" : "Mean across turns"} />
-            <KpiTile label="Tool calls" icon={Wrench} value={String(attempts.length)} hint={`${lookups} identity ${lookups === 1 ? "check" : "checks"}`} />
+            <KpiTile
+              label="Tool calls"
+              icon={Wrench}
+              loading={attemptsView === "loading"}
+              value={attemptsView === "error" ? NA : String(attempts.length)}
+              hint={attemptsView === "error" ? "Could not load" : `${lookups} identity ${lookups === 1 ? "check" : "checks"}`}
+            />
           </div>
 
           {call && !live && (
@@ -317,12 +348,26 @@ export default function CallDetail() {
           )}
 
           <Section title="Identity path" icon={Fingerprint}>
-            <IdentityPath session={session} attempts={attempts} />
+            {sessionView === "error" || attemptsView === "error" ? (
+              <ErrorState
+                compact
+                title="Could not load the identity path"
+                error={sessionQ.error ?? attemptsQ.error}
+                onRetry={() => {
+                  void sessionQ.refetch();
+                  void attemptsQ.refetch();
+                }}
+              />
+            ) : sessionView === "loading" || attemptsView === "loading" ? (
+              <SectionSkeleton rows={2} />
+            ) : (
+              <IdentityPath session={session} attempts={attempts} />
+            )}
           </Section>
 
           {call && !live && (
             <Section title="Recording" icon={Volume2}>
-              <AudioPlayer key={id} callId={id} hasRecording={Boolean(call.recording_url)} />
+              <AudioPlayer key={id} callId={id} hasRecording={call.has_recording} />
             </Section>
           )}
 
@@ -343,40 +388,50 @@ export default function CallDetail() {
             {source === "fallback" && (
               <p className="mb-2 text-xs text-ink-3">The stored transcript is missing, so these are the lines captured during the call.</p>
             )}
-            <TranscriptView
-              items={items}
-              live={source === "live"}
-              empty={
-                <p className="py-6 text-center text-sm text-ink-2">
-                  {live
-                    ? "Waiting for the first words. Lines appear here as each turn is finalised."
-                    : call?.analysis_status === "pending"
-                      ? "The end-of-call report has not arrived yet."
-                      : "No transcript was recorded for this call."}
-                </p>
-              }
-            />
+            {source !== "stored" && linesView === "error" ? (
+              <ErrorState compact title="Could not load the transcript" error={linesQ.error} onRetry={() => void linesQ.refetch()} />
+            ) : source !== "stored" && linesView === "loading" ? (
+              <SectionSkeleton rows={3} />
+            ) : (
+              <TranscriptView
+                items={items}
+                live={source === "live"}
+                empty={
+                  <p className="py-6 text-center text-sm text-ink-2">
+                    {live
+                      ? "Waiting for the first words. Lines appear here as each turn is finalised."
+                      : call?.analysis_status === "pending"
+                        ? "The end-of-call report has not arrived yet."
+                        : "No transcript was recorded for this call."}
+                  </p>
+                }
+              />
+            )}
           </Section>
         </div>
 
         <div className="min-w-0 space-y-4">
           <Section title="Escalations" icon={LifeBuoy} count={escalations.length}>
-            {escalationsQ.isError ? (
+            {view(escalationsQ) === "error" ? (
               <ErrorState compact title="Could not load escalations" error={escalationsQ.error} onRetry={() => void escalationsQ.refetch()} />
+            ) : view(escalationsQ) === "loading" ? (
+              <SectionSkeleton rows={2} />
             ) : escalations.length === 0 ? (
               <p className="text-sm text-ink-2">{live ? "None yet. An escalation appears here the moment Tessa queues one." : "No escalation for this call."}</p>
             ) : (
               <div className="space-y-3">
                 {escalations.map((e) => (
-                  <EscalationCard key={e.id} escalation={e} emails={emails} />
+                  <EscalationCard key={e.id} escalation={e} emails={emails} emailsState={emailsView === "ready" ? undefined : emailsView} />
                 ))}
               </div>
             )}
           </Section>
 
           <Section title="Emails sent" icon={Mail} count={emails.length}>
-            {emailsQ.isError ? (
+            {emailsView === "error" ? (
               <ErrorState compact title="Could not load emails" error={emailsQ.error} onRetry={() => void emailsQ.refetch()} />
+            ) : emailsView === "loading" ? (
+              <SectionSkeleton rows={1} />
             ) : emails.length === 0 ? (
               <p className="text-sm text-ink-2">No emails for this call.</p>
             ) : (
@@ -384,8 +439,26 @@ export default function CallDetail() {
             )}
           </Section>
 
+          <Section title="Outbox events" icon={Send} count={outboxQ.data?.length ?? 0}>
+            {view(outboxQ) === "error" ? (
+              <ErrorState compact title="Could not load outbox events" error={outboxQ.error} onRetry={() => void outboxQ.refetch()} />
+            ) : view(outboxQ) === "loading" ? (
+              <SectionSkeleton rows={1} />
+            ) : (outboxQ.data ?? []).length === 0 ? (
+              <p className="text-sm text-ink-2">
+                {live ? "Queued for the Airtable call log when the call ends." : "Nothing queued for this call."}
+              </p>
+            ) : (
+              <OutboxList events={outboxQ.data ?? []} />
+            )}
+          </Section>
+
           <Section title="Tool timeline" icon={Wrench} count={attempts.length}>
-            {attempts.length === 0 ? (
+            {attemptsView === "error" ? (
+              <ErrorState compact title="Could not load tool calls" error={attemptsQ.error} onRetry={() => void attemptsQ.refetch()} />
+            ) : attemptsView === "loading" ? (
+              <SectionSkeleton rows={2} />
+            ) : attempts.length === 0 ? (
               <p className="text-sm text-ink-2">{live ? "No tool calls yet." : "Tessa made no tool calls on this call."}</p>
             ) : (
               <ToolTimeline attempts={attempts} startedAt={call?.started_at ?? null} />
@@ -415,6 +488,30 @@ export default function CallDetail() {
 }
 
 // ---------------------------------------------------------------------------------------------
+
+type QueryView = "loading" | "error" | "ready";
+
+/**
+ * What a section may say about its query. Data already on screen wins over a failed refetch
+ * (the page polls, so the next read usually recovers); without data, a failure is an error and
+ * an unanswered read is loading, never an empty state.
+ */
+function view(q: Pick<UseQueryResult<unknown>, "data" | "isError" | "isPending">): QueryView {
+  if (q.data !== undefined) return "ready";
+  if (q.isError) return "error";
+  return q.isPending ? "loading" : "ready";
+}
+
+function SectionSkeleton({ rows }: { rows: number }) {
+  return (
+    <div className="space-y-2" role="status" aria-live="polite">
+      <span className="sr-only">Loading</span>
+      {Array.from({ length: rows }, (_, i) => (
+        <Skeleton key={i} className={cn("h-5", i % 2 === 0 ? "w-3/4" : "w-1/2")} />
+      ))}
+    </div>
+  );
+}
 
 function Section({
   title,
