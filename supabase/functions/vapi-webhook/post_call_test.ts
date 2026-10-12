@@ -456,6 +456,16 @@ Deno.test("masking: an answer split over several caller turns is withheld until 
   );
 });
 
+Deno.test("masking: a DOB question the model words itself withholds a two-digit-year answer", () => {
+  assertEquals(
+    maskTranscript("AI: When were you born?\nUser: march 14th 86\nAI: Thanks."),
+    `AI: When were you born?\nUser: ${MASKED_ANSWER}\nAI: Thanks.`,
+  );
+  const row = buildInteractionRow(askAndAnswer("And what year?", "eighty six"), facts());
+  assertEquals(textsOf(row.messages, "user"), [MASKED_ANSWER, "Okay."]);
+  assertFalse(String(row.transcript).includes("eighty six"));
+});
+
 Deno.test("maskTranscript: labels, wrapped lines and blank lines", () => {
   const text = [
     "AI: Before I can check that, I need the phone number",
@@ -581,6 +591,29 @@ Deno.test("outcome: server facts first (emergency > escalated > auth_failed > no
       m.artifact.messages = m.artifact.messages.filter((x: any) => x.role !== "user");
       return m;
     }, "abandoned"],
+    ["silence timeout with no server code is abandoned, whatever the LLM said", facts(), (m) => {
+      m.endedReason = "silence-timed-out";
+      return withLlmOutcome(m, "resolved");
+    }, "abandoned"],
+    ["max duration with no server code is abandoned, even after caller turns", facts(), (m) => {
+      m.endedReason = "exceeded-max-duration";
+      delete m.analysis.structuredData;
+      delete m.artifact.structuredOutputs;
+      return m;
+    }, "abandoned"],
+    ["max duration after a status read stays resolved: the codes say otherwise", verifiedFacts(K), (m) => {
+      m.endedReason = "exceeded-max-duration";
+      return m;
+    }, "resolved"],
+    [
+      "silence timeout after an emergency stays emergency",
+      facts({ escalations: [escalation(K, "emergency")] }),
+      (m) => {
+        m.endedReason = "silence-timed-out";
+        return m;
+      },
+      "emergency",
+    ],
   ];
   for (const [label, f, mutate, expected] of cases) {
     assertEquals(buildInteractionRow(mutate(fixture("full")), f).outcome, expected, label);
@@ -916,40 +949,72 @@ Deno.test("eocr: partial then full; the full report completes the row", async ()
   assertEquals((row.cost_breakdown as Record<string, unknown>).analysis, 0.0038);
 });
 
-Deno.test("eocr: full then partial keeps the analysis; the partial's backfill restores it from GET /call", async () => {
-  const full = fixture("full");
-  const fetchedCall = {
+function fetchedCallOf(report: Report) {
+  return {
     id: FULL_ID,
     orgId: ORG,
     type: "webCall",
     status: "ended",
-    startedAt: full.startedAt,
-    endedAt: full.endedAt,
-    endedReason: full.endedReason,
-    cost: full.cost,
-    costBreakdown: full.costBreakdown,
-    analysis: full.analysis,
-    artifact: full.artifact,
+    startedAt: report.startedAt,
+    endedAt: report.endedAt,
+    endedReason: report.endedReason,
+    cost: report.cost,
+    costBreakdown: report.costBreakdown,
+    analysis: report.analysis,
+    artifact: report.artifact,
   };
-  const { store, deps, settle } = harness({
-    env: { VAPI_PRIVATE_KEY: PRIVATE_KEY },
-    vapi: () => json(fetchedCall),
-  });
-  await walkVerified(store);
-  await onEndOfCallReport(fixture("full"), deps, { backfillDelaysMs: ZEROS });
-  const before = structuredClone(interaction(store, FULL_ID));
+}
 
-  await onEndOfCallReport(fixture("partial"), deps, { backfillDelaysMs: ZEROS });
-  let row = interaction(store, FULL_ID);
-  for (const k of ["summary", "sentiment", "sentiment_source", "caller_name", "messages", "transcript", "outcome"]) {
-    assertEquals(row[k], before[k], k);
+const COMPARED = ["summary", "sentiment", "sentiment_source", "caller_name", "messages", "transcript", "outcome"];
+
+Deno.test("eocr: a partial after the full report cannot demote the row, with or without the backfill key", async () => {
+  for (const env of [{ VAPI_PRIVATE_KEY: PRIVATE_KEY }, {}] as Partial<Env>[]) {
+    const label = env.VAPI_PRIVATE_KEY ? "with VAPI_PRIVATE_KEY" : "without VAPI_PRIVATE_KEY";
+    const { store, deps, calls, background, logs } = harness({ env, vapi: () => json(fetchedCallOf(fixture("full"))) });
+    await walkVerified(store);
+    await onEndOfCallReport(fixture("full"), deps, { backfillDelaysMs: ZEROS });
+    const before = structuredClone(interaction(store, FULL_ID));
+    assertEquals([before.analysis_status, before.sentiment_source], ["ok", "vapi"], label);
+
+    // the partial also carries a shorter transcript, which the SQL merge would take
+    const partial = fixture("partial");
+    partial.artifact.transcript = "AI: Thanks for calling Observe Insurance claims. How can I help you today?";
+    await store.insertTranscriptLine({ call_key: FULL_ID, role: "assistant", text: "Hello.", ts_ms: 1 });
+    const out = await onEndOfCallReport(partial, deps, { backfillDelaysMs: ZEROS });
+    assertEquals(out, { status: 200, body: {} }, label);
+    const row = interaction(store, FULL_ID);
+    for (const k of [...COMPARED, "analysis_status", "analysis_raw", "updated_at"]) {
+      assertEquals(row[k], before[k], `${label}: ${k}`);
+    }
+    // nothing left to backfill, and the live lines are still cleared
+    assertEquals([background.length, calls.length], [0, 0], label);
+    assertEquals(store.tables.transcript_lines.length, 0, label);
+    assert(logs.some((l) => l.event === "eocr_ignored" && l.reason === "row_already_complete"), label);
   }
-  assertEquals(row.analysis_status, "ok", "a pending status never demotes a stored one");
+});
 
-  await settle();
-  row = interaction(store, FULL_ID);
-  assertEquals([row.summary, row.sentiment, row.analysis_status], [before.summary, "positive", "backfilled"]);
-  assertEquals(row.sentiment_source, "backfill");
+Deno.test("eocr: a backfill that finishes after the full report landed leaves the full row alone", async () => {
+  for (const vapi of [() => json(fetchedCallOf(fixture("full"))), () => json({ message: "Not Found" }, 404)]) {
+    const { store, deps, settle, logs } = harness({ env: { VAPI_PRIVATE_KEY: PRIVATE_KEY }, vapi });
+    await walkVerified(store);
+    await onEndOfCallReport(fixture("partial"), deps, { backfillDelaysMs: ZEROS });
+    assertEquals(interaction(store, FULL_ID).analysis_status, "pending");
+    await onEndOfCallReport(fixture("full"), deps, { backfillDelaysMs: ZEROS });
+    const before = structuredClone(interaction(store, FULL_ID));
+
+    await settle();
+    const row = interaction(store, FULL_ID);
+    assertEquals([row.analysis_status, row.sentiment, row.sentiment_source], ["ok", "positive", "vapi"]);
+    for (const k of COMPARED) assertEquals(row[k], before[k], k);
+    assert(logs.some((l) => l.event === "backfill" && l.result === "superseded"));
+  }
+});
+
+Deno.test("eocr: a failed read of the stored status throws (5xx, VAPI redelivers) and writes nothing", async () => {
+  const { store, deps } = harness();
+  store.failNext("storedAnalysisStatus");
+  await assertRejects(() => onEndOfCallReport(fixture("partial"), deps, { backfillDelaysMs: ZEROS }));
+  assertEquals(store.tables.call_interactions.length, 0);
 });
 
 Deno.test("eocr: a duplicate delivery leaves one identical row", async () => {
@@ -1027,6 +1092,26 @@ Deno.test("eocr backfill: still nothing after every attempt -> missing, sentimen
   assertEquals([row.analysis_status, row.sentiment, row.sentiment_source, row.summary], ["missing", null, null, null]);
   assertEquals(calls.length, 3);
   assert(logs.some((l) => l.event === "backfill" && l.result === "missing" && l.attempts === 3));
+});
+
+Deno.test("eocr backfill: a summary without a sentiment is backfilled at once, sentiment NULL", async () => {
+  const { store, deps, calls, settle, logs } = harness({
+    env: { VAPI_PRIVATE_KEY: PRIVATE_KEY },
+    vapi: () => json({ id: FULL_ID, status: "ended", analysis: { summary: "Tobias checked his claims." } }),
+  });
+  await walkVerified(store);
+  await onEndOfCallReport(fixture("partial"), deps, { backfillDelaysMs: ZEROS });
+  await settle();
+  const row = interaction(store, FULL_ID);
+  assertEquals([row.analysis_status, row.summary, row.sentiment, row.sentiment_source], [
+    "backfilled",
+    "Tobias checked his claims.",
+    null,
+    null,
+  ]);
+  // the summary ended the polling: one GET, not the whole schedule
+  assertEquals(calls.length, 1);
+  assert(logs.some((l) => l.event === "backfill" && l.result === "backfilled" && l.attempts === 1));
 });
 
 Deno.test("eocr backfill: network errors are survived and end as missing", async () => {
@@ -1335,4 +1420,44 @@ Deno.test("status-update forwarding: a database error throws so VAPI redelivers"
   store.failNext("upsertEscalation");
   await assertRejects(() => onStatusUpdate(statusUpdate("forwarding"), deps));
   assertEquals(calls.length, 0, "no alert without a row");
+});
+
+Deno.test("status-update forwarding never overwrites the number or the details the caller gave to escalate", async () => {
+  const { store, deps, calls } = harness({ env: ALERT_ENV });
+  const escalated = await store.upsertEscalation({
+    callKey: PHONE_CALL_ID,
+    kind: "representative",
+    reason: "representative_requested",
+    details: "Needs help with the kitchen claim",
+    callbackPhone: "+16025550177",
+    callbackSource: "argument",
+    channel: "inboundPhoneCall",
+    verified: false,
+  });
+  await store.setEscalationDelivery(escalated.id, "sent", null);
+
+  await onStatusUpdate(statusUpdate("forwarding"), deps);
+  const rows = store.tables.escalations;
+  assertEquals(rows.length, 1);
+  assertEquals([rows[0].callback_phone, rows[0].callback_source, rows[0].details, rows[0].alert_status], [
+    "+16025550177",
+    "argument",
+    "Needs help with the kitchen claim",
+    "sent",
+  ]);
+  assertEquals(calls.length, 0, "escalate already told the team");
+});
+
+Deno.test("status-update forwarding: a failed second write still alerts, with the caller id in the email", async () => {
+  const { store, deps, calls, logs } = harness({ env: ALERT_ENV });
+  const upsert = store.upsertEscalation;
+  let writes = 0;
+  store.upsertEscalation = (p) => (++writes === 2 ? Promise.reject(new Error("connection reset")) : upsert(p));
+  await onStatusUpdate(statusUpdate("forwarding"), deps);
+  const row = store.tables.escalations[0];
+  assertEquals([row.callback_phone, row.details, row.alert_status], [null, null, "sent"]);
+  const resend = calls.filter((c) => c.url === "https://api.resend.com/emails");
+  assertEquals(resend.length, 1);
+  assertStringIncludes(JSON.parse(String(resend[0].init.body)).html, "0104");
+  assert(logs.some((l) => l.event === "post_call_error" && l.step === "upsertEscalation"));
 });

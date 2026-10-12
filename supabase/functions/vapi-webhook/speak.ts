@@ -25,6 +25,14 @@ const MONTHS = "January February March April May June July August September Octo
 // instead of turning the whole status answer into a system error.
 const MAX_WORDS = 999_999_999;
 
+/** VAPI's limit on a spoken tool message (ToolMessageComplete.content maxLength in the OpenAPI). */
+export const MAX_SPOKEN_CHARS = 1000;
+// Free text from the claims system longer than this is left out rather than cut mid-thought, so one
+// claim can never fill the whole spoken answer.
+const MAX_DETAIL_CHARS = 240;
+const MAX_DOCUMENT_LIST_CHARS = 320;
+const MAX_NAME_CHARS = 60;
+
 // ---------------------------------------------------------------------------------------------
 // Sentences (exact text; CONTRACTS.md "Sentences").
 // ---------------------------------------------------------------------------------------------
@@ -251,7 +259,13 @@ function speakableName(raw: unknown): string {
     .replace(/\s+/g, " ")
     .trim();
   // A real surname can collide with a guarded word ("Null"); drop the name rather than speak around it.
-  return /[A-Za-z]/.test(t) && isSpeakable(t) ? t : "";
+  return /[A-Za-z]/.test(t) && t.length <= MAX_NAME_CHARS && isSpeakable(t) ? t : "";
+}
+
+/** speakableText for a claim's free text, left out when it is too long to read in full. */
+function claimText(raw: unknown): string | null {
+  const t = speakableText(raw);
+  return t !== null && t.length <= MAX_DETAIL_CHARS ? t : null;
 }
 
 function sentenceCase(t: string): string {
@@ -285,7 +299,7 @@ function claimLine(c: Claim, refYear: number | undefined, withInstructions: bool
       break;
     case "under_review": {
       const adjuster = speakableName(c.adjuster_name);
-      const detail = speakableText(c.status_detail);
+      const detail = claimText(c.status_detail);
       body = adjuster ? `is under review with your adjuster, ${adjuster}.` : "is under review.";
       if (detail) body += ` ${sentenceCase(detail)}`;
       break;
@@ -293,7 +307,8 @@ function claimLine(c: Claim, refYear: number | undefined, withInstructions: bool
     case "awaiting_documents": {
       const docs = (Array.isArray(c.documents_required) ? c.documents_required : []).map(speakableText);
       // A partial list would tell the caller they are done when they are not; drop it whole.
-      const list = docs.length > 0 && docs.every((d): d is string => d !== null) ? `: ${listWords(docs)}` : "";
+      const whole = docs.length > 0 && docs.every((d): d is string => d !== null) ? listWords(docs) : "";
+      const list = whole && whole.length <= MAX_DOCUMENT_LIST_CHARS ? `: ${whole}` : "";
       body = `needs a few documents from you before review can continue${list}.`;
       if (c.documents_due) body += ` Please send them by ${speakDate(c.documents_due, refYear)}.`;
       if (withInstructions) body += ` ${DOCUMENT_INSTRUCTIONS}`;
@@ -308,7 +323,7 @@ function claimLine(c: Claim, refYear: number | undefined, withInstructions: bool
       break;
     }
     case "denied": {
-      const reason = speakableText((c.status_detail ?? "").split(";")[0]);
+      const reason = claimText((c.status_detail ?? "").split(";")[0]);
       body = "was denied, and I'm sorry about that.";
       if (reason) {
         // Lower-case the first letter so the reason reads as a clause, but keep an acronym intact.
@@ -329,6 +344,16 @@ function claimLine(c: Claim, refYear: number | undefined, withInstructions: bool
   return line;
 }
 
+/** Reading priority when not every claim fits: open claims before closed ones, then the newest. */
+function readingOrder(claims: Claim[]): number[] {
+  const closed = (c: Claim) => (c.status === "closed" ? 1 : 0);
+  return claims.map((_, i) => i).sort((a, b) =>
+    closed(claims[a]) - closed(claims[b]) ||
+    String(claims[b].filed_on).localeCompare(String(claims[a].filed_on)) ||
+    b - a
+  );
+}
+
 /** The full get_claim_status sentence for a verified caller's claims (non-empty list). refDate = today (YYYY-MM-DD) in America/New_York. */
 export function claimsSentence(claims: Claim[], refDate: string): string {
   if (!Array.isArray(claims) || claims.length === 0) throw new Error("claimsSentence: no claims");
@@ -337,12 +362,33 @@ export function claimsSentence(claims: Claim[], refDate: string): string {
   const n = claims.length;
   const lead = n > 1 ? `You have ${numberToWords(n)} claims on file. ` : "";
   const which = n === 1 ? "that claim" : n === 2 ? "either claim" : "any of them";
-  // How to send documents is said once, after the last claim that needs them: repeating it per
-  // claim adds nothing for the caller and would push a busy account past VAPI's 1000-character
-  // limit on a spoken tool message.
-  const lastAwaiting = claims.map((c) => c.status).lastIndexOf("awaiting_documents");
-  const lines = claims.map((c, i) => claimLine(c, refYear, i === lastAwaiting));
-  const text = `${lead}${lines.join(" ")} Do you have any questions about ${which}?`;
+  // Every line is built (and checked) once; a busy account then reads only what fits.
+  const lines = claims.map((c) => claimLine(c, refYear, false));
+  const withInstructions = claims.map((c) => (c.status === "awaiting_documents" ? claimLine(c, refYear, true) : ""));
+  const compose = (picked: number[]): string => {
+    // How to send documents is said once, after the last claim read that needs them.
+    const lastAwaiting = picked.filter((i) => claims[i].status === "awaiting_documents").at(-1);
+    const read = picked.map((i) => (i === lastAwaiting ? withInstructions[i] : lines[i])).join(" ");
+    const rest = n - picked.length;
+    const unread = rest === 0
+      ? ""
+      : ` ${rest === 1 ? "There is one more claim" : `There are ${numberToWords(rest)} more claims`} on file, and ` +
+        `you can find every claim at ${CLAIMS_URL_SPOKEN}.`;
+    return `${lead}${read}${unread} Do you have any questions about ${which}?`;
+  };
+  const all = claims.map((_, i) => i);
+  let text = compose(all);
+  if (text.length > MAX_SPOKEN_CHARS) {
+    // VAPI refuses a longer spoken tool message, so the claims that matter most are read (in filing
+    // order) and the caller is told the rest are on file.
+    const picked: number[] = [];
+    for (const i of readingOrder(claims)) {
+      const next = [...picked, i].sort((a, b) => a - b);
+      if (picked.length > 0 && compose(next).length > MAX_SPOKEN_CHARS) break;
+      picked.splice(0, picked.length, ...next);
+    }
+    text = compose(picked);
+  }
   assertSpeakable(text);
   return text;
 }

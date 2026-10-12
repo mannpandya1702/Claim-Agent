@@ -379,17 +379,9 @@ async function notifyTeam(
   return { notified: telegram.ok || email.ok, error: errors.length > 0 ? errors.join("; ") : null };
 }
 
-/** Callback target: the number the caller gave, else the verified account's, else caller id. Never our own line. */
-async function callbackFor(
-  ctx: Run,
-  given: string | null,
-  existing: EscalationRow | null,
-  session: Session | null,
-): Promise<Callback> {
-  if (given) return { phone: given, source: "argument" };
-  // On a repeat only a number the caller just gave may replace the one on the row; a fallback
-  // number would overwrite what they said.
-  if (existing?.callback_phone) return { phone: null, source: "none" };
+/** The callback target when the caller gave no number: the verified account's, else caller id.
+ *  Never our own line. */
+async function fallbackCallback(ctx: Run, session: Session | null): Promise<Callback> {
   const own = ownNumbers(ctx.deps.env);
   const customerId = session?.level === "verified" ? session.verified_customer_id : null;
   if (customerId) {
@@ -447,23 +439,26 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
   const [session, attempts, escalations] = await Promise.all([
     readOr<Session | null>(ctx, "getSession", () => store.getSession(callKey), null),
     readOr<AttemptRow[]>(ctx, "listAttempts", () => store.listAttempts(callKey), []),
-    readOr<EscalationRow[]>(ctx, "listEscalations", () => store.listEscalations(callKey), []),
+    readOr<EscalationRow[] | null>(ctx, "listEscalations", () => store.listEscalations(callKey), null),
   ]);
   const level: Level = session?.level ?? "none";
   const verified = level === "verified";
   const reason = escalationReason(args, level, attempts);
-  const existing = escalations.find((e) => e.kind === "representative") ?? null;
-  const callback = await callbackFor(ctx, given, existing, session);
+  const existing = escalations?.find((e) => e.kind === "representative") ?? null;
 
+  // upsert_escalation merges every non-null value into a row that already exists, so the first
+  // write carries only what a repeat may merge: a number the caller just gave, and details where
+  // the row is known to have none. A failed read therefore can never let a fallback number or new
+  // details overwrite what the caller said on an earlier request.
   let row: Awaited<ReturnType<Store["upsertEscalation"]>>;
   try {
     row = await store.upsertEscalation({
       callKey,
       kind: "representative",
       reason,
-      details,
-      callbackPhone: callback.phone,
-      callbackSource: callback.source,
+      details: existing && !existing.details ? details : null,
+      callbackPhone: given,
+      callbackSource: given ? "argument" : "none",
       channel: ctx.channel,
       verified,
     });
@@ -480,6 +475,27 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
     // A chat answered its first request as if the team had been told, so its repeat says the same.
     const told = row.alertStatus === "sent" || (ctx.isChat && row.alertStatus === "skipped");
     return answer(told ? "rep_already_queued" : "rep_recorded");
+  }
+
+  // This call created the row, so the rest of the request can go on it without overwriting anything.
+  let callback: Callback = given ? { phone: given, source: "argument" } : await fallbackCallback(ctx, session);
+  if (details || (!given && callback.phone)) {
+    try {
+      await store.upsertEscalation({
+        callKey,
+        kind: "representative",
+        reason,
+        details,
+        callbackPhone: given ? null : callback.phone,
+        callbackSource: given ? "none" : callback.source,
+        channel: ctx.channel,
+        verified,
+      });
+    } catch (e) {
+      logError(ctx, "upsertEscalation", e);
+      // A number that never reached the row is not promised; the sentence asks for one instead.
+      if (!given) callback = { phone: null, source: "none" };
+    }
   }
 
   if (ctx.isChat) {
@@ -506,9 +522,16 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
   return delivery.notified ? queued(callback) : answer("rep_recorded");
 }
 
-async function replayEscalate(code: Code, _args: Args, ctx: Run): Promise<ToolResult> {
+async function replayEscalate(code: Code, args: Args, ctx: Run): Promise<ToolResult> {
   if (code !== "rep_queued" && code !== "callback_updated") return answer(code);
-  // The sentence's number comes from the row the first delivery wrote; reading it is not a side effect.
+  // A retry carries the first delivery's arguments, so a number the caller gave is rebuilt from
+  // them. The row is not: a later request may have changed its number since.
+  const given = usableCallbackNumber(args.callback_phone, ownNumbers(ctx.deps.env));
+  if (code === "callback_updated") return answer(code, given ? { digits: nationalDigits(given) } : undefined);
+  if (given) return answer(code, queuedData("argument", given));
+  // Without an argument the first answer named the fallback this delivery wrote when it created the
+  // row. Only a number given later can have replaced it, and then that target is no longer known,
+  // so the sentence names none rather than a different one. Reading the row is not a side effect.
   const rows = await readOr<EscalationRow[]>(
     ctx,
     "listEscalations",
@@ -516,10 +539,11 @@ async function replayEscalate(code: Code, _args: Args, ctx: Run): Promise<ToolRe
     [],
   );
   const row = rows.find((r) => r.kind === "representative");
-  const phone = row?.callback_phone ?? null;
   const source = row?.callback_source ?? null;
-  if (code === "callback_updated") return answer(code, phone ? { digits: nationalDigits(phone) } : undefined);
-  return answer(code, phone ? queuedData(source, phone) : undefined);
+  if (row?.callback_phone && (source === "account" || source === "caller_id")) {
+    return answer(code, queuedData(source, row.callback_phone));
+  }
+  return answer(code);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -534,7 +558,7 @@ async function reportEmergency(args: Args, ctx: Run): Promise<ToolResult> {
   const session = await readOr<Session | null>(ctx, "getSession", () => store.getSession(callKey), null);
   const verified = session?.level === "verified";
   // The tool never asks for a number; whatever the server already knows goes on the row for staff.
-  const callback = await callbackFor(ctx, null, null, session);
+  const callback = await fallbackCallback(ctx, session);
   const alert: EscalationAlert = { kind: "emergency", reason: "emergency", callKey, channel: ctx.channel, verified };
 
   let row: Awaited<ReturnType<Store["upsertEscalation"]>>;
@@ -706,25 +730,46 @@ async function guarded(ctx: Run, spec: ToolSpec, body: () => Promise<ToolResult>
   }
 }
 
-async function execute(spec: ToolSpec, args: Args, ctx: Run): Promise<ToolResult> {
-  let claimed = false;
-  if (spec.replay) {
-    const replay = spec.replay;
-    try {
-      const prior = await ctx.deps.store.claimAttempt(ctx.callKey, ctx.toolCallId, spec.name);
-      if (prior !== null) return await guarded(ctx, spec, () => replay(asCode(prior), args, ctx));
-      claimed = true;
-    } catch (e) {
-      // Every side effect behind these tools is keyed on its own (escalation and email ledgers),
-      // so running without the claim costs a timeline entry, never a second send.
-      logError(ctx, "claimAttempt", e);
+interface Execution {
+  // Settles once the replay guard is decided: true when this delivery holds the toolCallId row.
+  claimed: Promise<boolean>;
+  result: Promise<ToolResult>;
+}
+
+function execute(spec: ToolSpec, args: Args, ctx: Run): Execution {
+  let settle!: (claimed: boolean) => void;
+  const claimed = new Promise<boolean>((resolve) => (settle = resolve));
+  const result = (async (): Promise<ToolResult> => {
+    if (spec.replay) {
+      const replay = spec.replay;
+      try {
+        const prior = await ctx.deps.store.claimAttempt(ctx.callKey, ctx.toolCallId, spec.name);
+        if (prior !== null) {
+          settle(false);
+          return await guarded(ctx, spec, () => replay(asCode(prior), args, ctx));
+        }
+        settle(true);
+      } catch (e) {
+        // Every side effect behind these tools is keyed on its own (escalation and email ledgers),
+        // so running without the claim costs a timeline entry, never a second send.
+        logError(ctx, "claimAttempt", e);
+      }
     }
-  }
-  const result = await guarded(ctx, spec, () => spec.run(args, ctx));
-  if (claimed) {
-    writeBack(ctx, "setAttemptCode", () => ctx.deps.store.setAttemptCode(ctx.callKey, ctx.toolCallId, result.code));
-  }
-  return result;
+    settle(false);
+    return await guarded(ctx, spec, () => spec.run(args, ctx));
+  })();
+  // A later settle is a no-op, so this only decides a guard that nothing above could reach.
+  result.then(() => settle(false), () => settle(false));
+  return { claimed, result };
+}
+
+/** The ledger keeps the code VAPI received: the tool's own answer, or its fallback once the budget
+ *  ran out. A run that finishes late writes nothing, so a retry of the toolCallId replays what the
+ *  caller heard and the post-call outcome reads what the server actually said. */
+function recordCode(ctx: Run, claimed: Promise<boolean>, code: Code): void {
+  writeBack(ctx, "setAttemptCode", async () => {
+    if (await claimed) await ctx.deps.store.setAttemptCode(ctx.callKey, ctx.toolCallId, code);
+  });
 }
 
 /** runTool with an explicit budget in milliseconds (tests use a short one). Never throws. */
@@ -759,10 +804,14 @@ export async function runToolWithin(
       safeLog(run, { event: "tool_bad_args", reason: "invalid_value" });
       return answer("bad_args");
     }
-    return await withinBudget(execute(spec, args, run), budgetMs, () => {
+    const { claimed, result } = execute(spec, args, run);
+    const answered = await withinBudget(result, budgetMs, () => {
       safeLog(run, { event: "tool_timeout", budget_ms: budgetMs });
       return spec.fallback();
     });
+    // Counted tools record their code inside their SQL function.
+    if (spec.replay) recordCode(run, claimed, answered.code);
+    return answered;
   } catch {
     return systemError();
   }

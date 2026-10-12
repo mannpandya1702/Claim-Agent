@@ -583,6 +583,29 @@ Deno.test("captureWebhook stores a copy of the body", async () => {
   assertEquals(store.tables.webhook_captures[0].message_type, "status-update");
 });
 
+Deno.test("captureWebhook keeps seven days of captures, whether or not a job runs", async () => {
+  const store = createFakeStore();
+  const day = 24 * 60 * 60 * 1000;
+  store.tables.webhook_captures.push(
+    {
+      id: 101,
+      message_type: "status-update",
+      call_key: "old",
+      body: {},
+      received_at: new Date(Date.now() - 8 * day).toISOString(),
+    },
+    {
+      id: 102,
+      message_type: "status-update",
+      call_key: "recent",
+      body: {},
+      received_at: new Date(Date.now() - 6 * day).toISOString(),
+    },
+  );
+  await store.captureWebhook("status-update", "c1", { message: { type: "status-update" } });
+  assertEquals(store.tables.webhook_captures.map((c) => c.call_key), ["recent", "c1"]);
+});
+
 Deno.test("demoSeed mirrors 0002_seed.sql row for row", () => {
   const sql = Deno.readTextFileSync(new URL("../../migrations/0002_seed.sql", import.meta.url));
   const seed = demoSeed();

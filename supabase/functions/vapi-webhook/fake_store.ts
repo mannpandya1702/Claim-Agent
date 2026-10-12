@@ -24,6 +24,7 @@ import {
 import type { AttemptKind, Code } from "./enums.ts";
 import { step } from "./identity.ts";
 import type { IdentityState } from "./identity.ts";
+import type { StoreExtras } from "./store.ts";
 import type {
   AttemptRow,
   Claim,
@@ -39,17 +40,20 @@ import type {
 
 /** In-memory Store with the SQL semantics (state machine via identity.step, replay guard, unique keys,
  *  upsert_interaction merge rules). failNext(method) makes the next call of that method throw. */
-export interface FakeStore extends Store {
+export interface FakeStore extends Store, StoreExtras {
   customers: (Customer & { date_of_birth: string })[];
   claims: Claim[];
   tables: Record<string, any[]>;
-  failNext(method: keyof Store): void;
+  failNext(method: keyof FullStore): void;
 }
 
+type FullStore = Store & StoreExtras;
 type Row = Record<string, any>;
 
 // The Store contract with synchronous bodies; createFakeStore wraps each one into a Promise.
-type SyncStore = { [K in keyof Store]: (...args: Parameters<Store[K]>) => Awaited<ReturnType<Store[K]>> };
+type SyncStore = {
+  [K in keyof FullStore]: (...args: Parameters<FullStore[K]>) => Awaited<ReturnType<FullStore[K]>>;
+};
 
 // The column list of upsert_interaction's INSERT, which is also every column a caller may write.
 const INTERACTION_COLUMNS = [
@@ -109,6 +113,8 @@ const KEEP_ON_NULL = new Set([
 ]);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// store.ts CAPTURE_RETENTION_MS; a value import would load supabase-js into every unit test.
+const CAPTURE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 function dbError(sqlstate: string, message: string): Error {
   return new Error(`fake store: ${sqlstate} ${message}`);
@@ -201,7 +207,7 @@ export function createFakeStore(
   let captureSeq = 0;
 
   const pendingFailures = new Map<string, number>();
-  function maybeFail(method: keyof Store): void {
+  function maybeFail(method: keyof FullStore): void {
     const n = pendingFailures.get(method) ?? 0;
     if (n > 0) {
       pendingFailures.set(method, n - 1);
@@ -655,6 +661,10 @@ export function createFakeStore(
       Object.assign(ci, next);
     },
 
+    storedAnalysisStatus(callKey) {
+      return tables.call_interactions.find((x) => x.vapi_call_id === callKey)?.analysis_status ?? null;
+    },
+
     insertTranscriptLine(line: TranscriptLine) {
       notNull("transcript_lines", "call_key", line.call_key);
       notNull("transcript_lines", "text", line.text);
@@ -701,13 +711,16 @@ export function createFakeStore(
         body: clone(body),
         received_at: nowIso(),
       });
+      const cutoff = Date.now() - CAPTURE_RETENTION_MS;
+      const kept = tables.webhook_captures.filter((c) => Date.parse(c.received_at) >= cutoff);
+      tables.webhook_captures.splice(0, tables.webhook_captures.length, ...kept);
     },
   };
 
   // Each method resolves or rejects like the real store (a throw becomes a rejection), and the
   // failure injection sits in one place in front of every method.
-  const methods = {} as Record<keyof Store, (...args: unknown[]) => Promise<unknown>>;
-  for (const name of Object.keys(impl) as (keyof Store)[]) {
+  const methods = {} as Record<keyof FullStore, (...args: unknown[]) => Promise<unknown>>;
+  for (const name of Object.keys(impl) as (keyof FullStore)[]) {
     const fn = impl[name] as (...args: unknown[]) => unknown;
     methods[name] = (...args: unknown[]) => {
       try {
@@ -720,7 +733,7 @@ export function createFakeStore(
   }
 
   return {
-    ...(methods as unknown as Store),
+    ...(methods as unknown as FullStore),
     customers,
     claims,
     tables,

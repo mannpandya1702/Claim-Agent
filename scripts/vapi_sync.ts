@@ -1,16 +1,19 @@
 // Syncs the rendered VAPI configuration onto the live org, and checks the live org for drift.
 // The repo is the source of truth; .sync-state.json maps every rendered object onto its live id.
 //
-//   deno task sync:check   render, GET every live object, report leaf diffs and broken invariants
-//                          (tool server.url, no transferCall on a web assistant, one floor tool set
-//                          across the squad, every rendered prompt hash recorded); exit 1 on drift
+//   deno task sync:check   render, GET every live object, report leaf diffs, keys the live object
+//                          has and the repo does not send, and broken invariants (tool server.url,
+//                          no transferCall on a web assistant, one floor tool set across the squad,
+//                          every rendered prompt hash recorded); exit 1 on drift
 //   deno task sync:apply   create or full-object PATCH the tools, upload the knowledge-base file,
 //                          the query tool, the assistants (model.toolIds), the squad and the phone
 //                          number binding; record ids; re-GET until the reads agree
 //   deno run --allow-env --allow-net --allow-read scripts/vapi_sync.ts print <tool|assistant|squad|kb>
 //
-// VAPI PATCHes replace nested objects whole, so every PATCH carries the full object; GETs can
-// briefly return the previous version, so apply re-reads until a full check passes.
+// VAPI PATCHes replace nested objects whole, so every PATCH carries the full object. A top-level
+// key the PATCH does not name is kept (probe p1), so a key removed from the repo, or added in the
+// dashboard, is sent as null to clear it. GETs can briefly return the previous version, so apply
+// re-reads until a full check passes.
 // solo-phone and transferCall stay off the live org until REP_PHONE_E164 is set: a transfer to a
 // placeholder number must never be callable.
 
@@ -74,6 +77,51 @@ export function leafDiff(desired: unknown, live: unknown, path = ""): string[] {
     return desired.flatMap((v, i) => leafDiff(v, live[i], `${path}[${i}]`));
   }
   return desired === live ? [] : [`changed: ${at} ${short(desired)} -> live ${short(live)}`];
+}
+
+// What VAPI writes on every object itself. Nothing else is added: a GET of every synced object
+// returned exactly the keys we sent plus these, at the root and at every depth.
+const SERVER_MANAGED_KEYS: ReadonlySet<string> = new Set([
+  "id",
+  "orgId",
+  "createdAt",
+  "updatedAt",
+  "latestVersion",
+  "isServerUrlSecretSet",
+]);
+
+const absent = (v: unknown) => v === undefined || v === null || v === "";
+
+/**
+ * Paths the live object has and the desired payload does not: what leafDiff, which walks only what
+ * we send, cannot see. A key removed from the repo after it was applied, or set in the dashboard,
+ * shows up here. Server-managed root keys and empty values are not drift.
+ */
+export function extraKeys(desired: unknown, live: unknown, path = ""): string[] {
+  if (isObject(desired) && isObject(live)) {
+    const out: string[] = [];
+    for (const [k, got] of Object.entries(live)) {
+      if (absent(got) || (!path && SERVER_MANAGED_KEYS.has(k))) continue;
+      const p = path ? `${path}.${k}` : k;
+      if (absent(desired[k])) out.push(p);
+      else out.push(...extraKeys(desired[k], got, p));
+    }
+    return out;
+  }
+  if (Array.isArray(desired) && Array.isArray(live)) {
+    // a length mismatch is leafDiff's finding; extras are looked for in the items both sides have
+    return live.slice(0, desired.length).flatMap((v, i) => extraKeys(desired[i], v, `${path}[${i}]`));
+  }
+  return [];
+}
+
+/** The PATCH body for a live object: the full desired object, plus null for each top-level key the
+ *  live object still has and the repo no longer sends. Nested extras need nothing: a nested object
+ *  is replaced whole. */
+export function patchBody(desired: Record<string, unknown>, live: unknown): Record<string, unknown> {
+  const body: Record<string, unknown> = { ...desired };
+  for (const p of extraKeys(desired, live)) if (/^[A-Za-z0-9_$]+$/.test(p)) body[p] = null;
+  return body;
 }
 
 export interface LiveView {
@@ -208,6 +256,7 @@ async function inspect(vapi: Vapi, env: Env, state: SyncState, desired: Rendered
     }
     liveTools[id!] = live;
     drift.push(...leafDiff(desired.tools[name], live).map((d) => `tool ${name}: ${d}`));
+    drift.push(...extraKeys(desired.tools[name], live).map((p) => `tool ${name}: extra: ${p}`));
   }
 
   const file = state.kbFileId ? await getOrNull(vapi, `/file/${state.kbFileId}`) : null;
@@ -231,11 +280,15 @@ async function inspect(vapi: Vapi, env: Env, state: SyncState, desired: Rendered
     }
     liveAssistants[key] = live;
     drift.push(...leafDiff(desired.assistants[key].payload, live).map((d) => `assistant ${key}: ${d}`));
+    drift.push(...extraKeys(desired.assistants[key].payload, live).map((p) => `assistant ${key}: extra: ${p}`));
   }
 
   const squad = state.squadId ? await getOrNull(vapi, `/squad/${state.squadId}`) : null;
   if (!squad) drift.push(`squad: ${state.squadId ? `live ${state.squadId} not found` : "not created"}`);
-  else drift.push(...leafDiff(desired.squad, squad).map((d) => `squad: ${d}`));
+  else {
+    drift.push(...leafDiff(desired.squad, squad).map((d) => `squad: ${d}`));
+    drift.push(...extraKeys(desired.squad, squad).map((p) => `squad: extra: ${p}`));
+  }
 
   const phone = phoneBinding(env, state, desired);
   if (!phone) notes.push("no VAPI_PHONE_NUMBER_ID: phone binding not checked");
@@ -293,18 +346,23 @@ async function upsert(
   vapi: Vapi,
   kind: "tool" | "assistant" | "squad",
   id: string | undefined,
-  body: unknown,
+  body: Record<string, unknown>,
   label: string,
 ): Promise<string> {
-  if (id) {
+  const live = id ? await getOrNull(vapi, `/${kind}/${id}`) : null;
+  if (id && live) {
     try {
-      await vapi.patch(`/${kind}/${id}`, body);
-      console.log(`patched ${label} ${id}`);
+      const patch = patchBody(body, live);
+      const cleared = Object.keys(patch).filter((k) => patch[k] === null && body[k] === undefined);
+      await vapi.patch(`/${kind}/${id}`, patch);
+      console.log(`patched ${label} ${id}${cleared.length ? ` (cleared ${cleared.join(", ")})` : ""}`);
       return id;
     } catch (e) {
       if (!(e instanceof VapiError && e.status === 404)) throw e;
       console.log(`${label}: recorded ${id} no longer exists, creating it again`);
     }
+  } else if (id) {
+    console.log(`${label}: recorded ${id} no longer exists, creating it again`);
   }
   const created = await vapi.post(`/${kind}`, body);
   console.log(`created ${label} ${created.id}`);

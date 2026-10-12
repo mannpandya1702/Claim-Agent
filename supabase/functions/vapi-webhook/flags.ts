@@ -3,7 +3,7 @@
 // stand behind it (attempts, escalations, emails). Words alone never flag a call, and neither
 // does a missing fact the agent never claimed. Pure, so twin fixtures pin every rule.
 
-import { type Flag, SERVER_TOOLS } from "./enums.ts";
+import { type Flag, INFO_EMAIL_TOPICS, SERVER_TOOLS } from "./enums.ts";
 import type { AttemptRow, EmailRow, EscalationRow } from "./types.ts";
 
 export interface FlagInput {
@@ -20,12 +20,16 @@ const CALLBACK_PROMISE_RE = /representative (will|is going to) (call|reach)|call
 const OFFER_BEFORE_RE = /\b(can|could|may|might|would you|do you want|if you)\b/i;
 // A chat escalation sends no alert by design and is stored 'skipped'; the row itself is the
 // staff queue entry, and the server answered it with the same callback sentence as a delivered
-// alert, so it backs the promise. 'pending' and 'failed' do not.
+// alert, so it backs the promise. 'pending' and 'failed' do not. Only a representative row is a
+// callback request: an emergency page asks nobody to call the caller back.
 const BACKED_ALERT_STATUSES: ReadonlySet<string> = new Set(["sent", "skipped"]);
 
 const STATUS_WORDS_RE = /claim ending in|was approved|payment of|under review|was denied|was received on/i;
 
 const EMAIL_PROMISE_RE = /(I've|I have) (emailed|sent (that|it|the))/i;
+// What the caller is told was emailed is a send_info_email topic; the team's own callback and
+// emergency emails go to staff, so they never back "I've emailed that to you".
+const CALLER_EMAIL_KINDS: ReadonlySet<string> = new Set(INFO_EMAIL_TOPICS);
 
 // VAPI-native tool names are markup too when spoken.
 const NATIVE_TOOLS = ["transferCall", "endCall", "faq_search", "handoff_"];
@@ -82,7 +86,10 @@ export function computeFlags(input: FlagInput): Flag[] {
   const emails = input.emails ?? [];
   const flags = new Set<Flag>();
 
-  if (lines.some(promisesCallback) && !escalations.some((e) => BACKED_ALERT_STATUSES.has(e.alert_status))) {
+  const callbackBacked = escalations.some((e) =>
+    e.kind === "representative" && BACKED_ALERT_STATUSES.has(e.alert_status)
+  );
+  if (lines.some(promisesCallback) && !callbackBacked) {
     flags.add("promised_callback_without_escalation");
   }
   // Ordering a spoken line against the ledger would compare two clocks (VAPI seconds vs Postgres
@@ -94,7 +101,8 @@ export function computeFlags(input: FlagInput): Flag[] {
   if (lines.some((l) => MARKUP_RE.test(l))) {
     flags.add("tool_markup_spoken");
   }
-  if (lines.some((l) => EMAIL_PROMISE_RE.test(l)) && !emails.some((e) => e.status === "sent")) {
+  const emailBacked = emails.some((e) => CALLER_EMAIL_KINDS.has(e.kind) && e.status === "sent");
+  if (lines.some((l) => EMAIL_PROMISE_RE.test(l)) && !emailBacked) {
     flags.add("email_promised_without_send");
   }
   return [...flags].sort();

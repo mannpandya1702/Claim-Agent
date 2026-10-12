@@ -4,6 +4,7 @@ import type { Claim } from "./types.ts";
 import {
   assertSpeakable,
   claimsSentence,
+  MAX_SPOKEN_CHARS,
   numberToWords,
   sentenceFor,
   speakDate,
@@ -294,6 +295,53 @@ Deno.test("several claims awaiting documents hear the instructions once, after t
     const own = SEED_CLAIMS.filter((c) => c.customer_id === customer);
     assert(claimsSentence(own, TODAY).length <= 1000, customer);
   }
+});
+
+Deno.test("a busy account stays within VAPI's 1000 characters: open and newest claims first, the rest pointed to", () => {
+  assertEquals(MAX_SPOKEN_CHARS, 1000);
+  const docs = byNumber("CLM-240198")[0];
+  const many: Claim[] = [
+    ...SEED_CLAIMS,
+    { ...docs, id: "c-301", claim_number: "CLM-240301", filed_on: "2026-10-02", documents_due: "2026-10-28" },
+    { ...SEED_CLAIMS[0], id: "c-302", claim_number: "CLM-240302", status: "closed", filed_on: "2026-10-11" },
+    { ...byNumber("CLM-240211")[0], id: "c-303", claim_number: "CLM-240303", filed_on: "2026-10-05" },
+  ];
+  // five seed claims alone already ran past the limit before claims were budgeted
+  for (const set of [SEED_CLAIMS, many]) {
+    const s = claimsSentence(set, TODAY);
+    assert(s.length <= MAX_SPOKEN_CHARS, `${s.length} characters`);
+    assertSpeakable(s);
+    assertStringIncludes(s, `You have ${numberToWords(set.length)} claims on file. `);
+    assertStringIncludes(
+      s,
+      "more claims on file, and you can find every claim at observeinsurance dot com slash claims.",
+    );
+    assert(s.endsWith("Do you have any questions about any of them?"));
+    assertEquals(s.split("You can upload them at").length - 1, 1, "the instructions are said once");
+  }
+  const s = claimsSentence(many, TODAY);
+  // the newest open claims are read; the closed one waits even though it is the newest
+  assertStringIncludes(s, "ending in three zero one");
+  assertStringIncludes(s, "ending in two three zero");
+  assert(!s.includes("three zero two"), "a closed claim is read last");
+  // read in filing order
+  assert(s.indexOf("one nine eight") < s.indexOf("three zero one"));
+});
+
+Deno.test("claim free text too long to read in full is left out, never cut", () => {
+  const base = byNumber("CLM-240211")[0];
+  const long = `The adjuster is ${"still reviewing the repair estimates and the photos, ".repeat(6)}and will call you.`;
+  assertEquals(
+    claimsSentence([{ ...base, status_detail: long }], TODAY),
+    claimsSentence([{ ...base, status_detail: null }], TODAY),
+  );
+  const docs = byNumber("CLM-240198")[0];
+  const listed = claimsSentence([{ ...docs, documents_required: Array(12).fill("a signed statement of loss") }], TODAY);
+  assertStringIncludes(listed, "needs a few documents from you before review can continue. Please send them by");
+  assertStringIncludes(
+    claimsSentence([{ ...base, adjuster_name: "A".repeat(80) }], TODAY),
+    "is under review. A decision",
+  );
 });
 
 Deno.test("claim free text is made speakable or left out", () => {

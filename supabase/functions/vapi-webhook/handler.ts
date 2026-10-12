@@ -8,9 +8,9 @@ import { type Channel, CHANNELS, type Code, CODES } from "./enums.ts";
 import { callerIdNumber } from "./identity.ts";
 import { callKeyOf, parseCalls } from "./parse_tool_request.ts";
 import { onEndOfCallReport, onStatusUpdate, onTranscript } from "./post_call.ts";
-import { redactPII } from "./redact.ts";
-import { sentenceFor } from "./speak.ts";
-import { runTool, TOOL_BUDGET_MS } from "./tools.ts";
+import { redactDeep, redactPII } from "./redact.ts";
+import { MAX_SPOKEN_CHARS, sentenceFor } from "./speak.ts";
+import { runTool, runToolWithin, TOOL_BUDGET_MS } from "./tools.ts";
 import type { Deps, ParsedToolCall, ToolCtx, ToolResult, VapiMessage } from "./types.ts";
 
 /** Per-tool budget, enforced inside runTool with each tool's own fallback sentence (one source:
@@ -23,10 +23,23 @@ export const TOOL_BACKSTOP_MS = TOOL_BUDGET_MS + 1000;
 /** VAPI waits 10 s for the whole delivery, not per call. Calls run one after another, so later
  *  calls in a batch get only what is left of this; one call alone keeps its full backstop. */
 export const BATCH_BUDGET_MS = 8500;
+// How far the tool's own budget ends ahead of the backstop. When a batch is short of time the
+// tool gets a shorter budget too, so its fallback (the code it records) is still what VAPI receives.
+const BACKSTOP_LEAD_MS = TOOL_BACKSTOP_MS - TOOL_BUDGET_MS;
+
+/** One tool call under a budget in milliseconds (omitted: the tools' own TOOL_BUDGET_MS). */
+export type RunTool = (
+  call: ParsedToolCall,
+  ctx: Omit<ToolCtx, "toolCallId">,
+  budgetMs?: number,
+) => Promise<ToolResult>;
+
+const runToolBudgeted: RunTool = (call, ctx, budgetMs) =>
+  budgetMs === undefined ? runTool(call, ctx) : runToolWithin(call, ctx, budgetMs);
 
 /** The modules the router dispatches to; createHandler swaps them for fakes in tests. */
 export interface Routes {
-  runTool: typeof runTool;
+  runTool: RunTool;
   onStatusUpdate: typeof onStatusUpdate;
   onTranscript: typeof onTranscript;
   onEndOfCallReport: typeof onEndOfCallReport;
@@ -53,6 +66,9 @@ const JOB_PATH_RE = /\/jobs\/([A-Za-z0-9_-]{1,64})$/;
 const BEARER_RE = /^Bearer[ \t]+(\S+)[ \t]*$/i;
 const CODE_SET: ReadonlySet<string> = new Set(CODES);
 const CHANNEL_SET: ReadonlySet<string> = new Set(CHANNELS);
+// The keys that carry tool arguments in every envelope shape: function.arguments, a flat
+// parameters object, the tool_calls entries inside artifact.messages, toolWithToolCallList.
+const ARGUMENT_KEYS: ReadonlySet<string> = new Set(["arguments", "parameters"]);
 const TIMED_OUT = Symbol("timed_out");
 const encoder = new TextEncoder();
 
@@ -164,6 +180,20 @@ function wellFormed(out: unknown): ToolResult | null {
   return result;
 }
 
+function withoutArguments(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutArguments);
+  if (!isObj(value)) return value;
+  const out: Obj = {};
+  for (const [k, v] of Object.entries(value)) if (!ARGUMENT_KEYS.has(k)) out[k] = withoutArguments(v);
+  return out;
+}
+
+/** What webhook_captures keeps of a body: no tool arguments at any depth (a DOB or a phone number
+ *  as the caller said it), and every other string redacted like any stored text. */
+export function captureCopy(body: unknown): unknown {
+  return redactDeep(withoutArguments(body));
+}
+
 function keepAlive(deps: Deps, p: Promise<unknown>): void {
   const settled = p.then(() => undefined, () => undefined);
   try {
@@ -185,7 +215,8 @@ async function runWithBackstop(
   backstopMs: number,
 ): Promise<Outcome> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const work = Promise.resolve().then(() => routes.runTool(call, ctx));
+  const budgetMs = Math.max(0, Math.min(TOOL_BUDGET_MS, backstopMs - BACKSTOP_LEAD_MS));
+  const work = Promise.resolve().then(() => routes.runTool(call, ctx, budgetMs));
   const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
     timer = setTimeout(() => resolve(TIMED_OUT), backstopMs);
   });
@@ -237,7 +268,7 @@ export function createHandler(
   overrides: Partial<Routes> = {},
   options: HandlerOptions = {},
 ): (req: Request, deps: Deps) => Promise<Response> {
-  const routes: Routes = { runTool, onStatusUpdate, onTranscript, onEndOfCallReport, ...overrides };
+  const routes: Routes = { runTool: runToolBudgeted, onStatusUpdate, onTranscript, onEndOfCallReport, ...overrides };
   const backstopMs = options.backstopMs ?? TOOL_BACKSTOP_MS;
   const batchMs = options.batchMs ?? BATCH_BUDGET_MS;
 
@@ -268,10 +299,14 @@ export function createHandler(
       // paged), but its answer is the fallback once the batch is out of time.
       const left = Math.max(0, Math.floor(batchDeadline - performance.now()));
       const { result, error } = await runWithBackstop(routes, call, ctx, Math.min(backstopMs, left));
-      results.push(toResponse(call, result, native));
+      // VAPI refuses a longer spoken message; without it the model reads result.message instead
+      // (the NATIVE_TOOL_MESSAGES=false path), which beats the request-failed line.
+      const tooLong = result.sentence.length > MAX_SPOKEN_CHARS;
+      results.push(toResponse(call, result, native && !tooLong));
       tools.push(call.name);
       codes.push(result.code);
       if (error) errors.push(error);
+      if (tooLong) errors.push("tool_message_too_long");
     }
     line.tool = tools.join(",");
     line.code = codes.join(",");
@@ -307,7 +342,7 @@ export function createHandler(
   function capture(deps: Deps, type: string | null, callKey: string | null, body: unknown): void {
     if (deps.env.CAPTURE_WEBHOOKS !== "true") return;
     const p = Promise.resolve()
-      .then(() => deps.store.captureWebhook(type, callKey, body))
+      .then(() => deps.store.captureWebhook(type, callKey, captureCopy(body)))
       .catch((e) => {
         try {
           deps.log({ event: "capture_failed", call_key: callKey, type, error: errorText(e) });

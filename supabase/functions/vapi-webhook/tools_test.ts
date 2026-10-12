@@ -567,6 +567,51 @@ Deno.test("the budget turns a hung store into each tool's honest fallback", asyn
   }
 });
 
+function gate() {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => (open = resolve));
+  return { opened, open };
+}
+
+const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms));
+
+Deno.test("after a budget timeout the ledger keeps the fallback the caller heard, not the late real code", async () => {
+  // get_claim_status: the late read would have said ok, which the post-call outcome reads as resolved
+  const h = harness();
+  await verifyTobias(h);
+  const getClaims = h.store.getClaims;
+  const slow = gate();
+  h.store.getClaims = async (id) => {
+    await slow.opened;
+    return await getClaims(id);
+  };
+  const r = await runToolWithin({ id: "tc-slow-status", name: "get_claim_status", args: {} }, h.ctx, 30);
+  assertEquals(r, { code: "system_error", sentence: SYSTEM_ERROR });
+  slow.open();
+  await tick();
+  assertEquals(h.store.tables.attempts.find((a) => a.tool_call_id === "tc-slow-status")?.code, "system_error");
+
+  // escalate: the caller heard the main-line apology, so a retry of the same toolCallId says it again
+  const e = harness({ env: { TELEGRAM_BOT_TOKEN: undefined } });
+  const upsert = e.store.upsertEscalation;
+  const held = gate();
+  e.store.upsertEscalation = async (p) => {
+    await held.opened;
+    return await upsert(p);
+  };
+  const first = await runToolWithin({ id: "tc-slow-escalate", name: "escalate", args: {} }, e.ctx, 30);
+  assertEquals(first.code, "rep_unavailable");
+  held.open();
+  await tick();
+  assertEquals(e.store.tables.escalations.length, 1, "the late run still wrote its row");
+  assertEquals(
+    e.store.tables.attempts.find((a) => a.tool_call_id === "tc-slow-escalate")?.code,
+    "rep_unavailable",
+  );
+  e.store.upsertEscalation = upsert;
+  assertEquals(await e.run("escalate", {}, "tc-slow-escalate"), first);
+});
+
 // Deno's test sanitizer does not report a pending timer, so the timers are counted by hand: a
 // budget timer left running would keep a worker alive for five seconds after every tool call.
 async function pendingTimersAfter(body: () => Promise<unknown>): Promise<number> {

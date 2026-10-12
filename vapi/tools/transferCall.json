@@ -13,12 +13,7 @@
       "description": "A claims representative, when the caller asks for a person.",
       "message": "Please hold while I connect you to a claims representative.",
       "transferPlan": {
-        "mode": "blind-transfer",
-        "sipVerb": "refer",
-        "fallbackPlan": {
-          "message": "I'm sorry, a representative isn't available right now. I'm still here with you. Would you like me to arrange a callback instead?",
-          "endCallEnabled": false
-        }
+        "mode": "blind-transfer"
       }
     }
   ]

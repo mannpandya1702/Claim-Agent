@@ -9,6 +9,7 @@ import { MAIN_LINE_SPOKEN } from "./enums.ts";
 export const MASKED_ANSWER = "[answer withheld]";
 
 const DOB_TOKEN = "[date of birth]";
+const EMAIL_TOKEN = "[email]";
 const phoneToken = (digits: string) => `[phone ending ${digits.slice(-4)}]`;
 
 // A date is DOB-shaped only with a year at least this many years back. Claim, filing and
@@ -214,12 +215,17 @@ const DAY =
   String.raw`(?:(?:3[01]|[12]\d|0?[1-9])(?:st|nd|rd|th)?|(?:twenty|thirty)${J}(?:${ORD_UNIT_ALT}|${CARD_UNIT_ALT})` +
   String.raw`|${ORD_TEEN_ALT}|${TEEN_ALT}|twentieth|thirtieth|twenty|thirty|${ORD_UNIT_ALT}|${CARD_UNIT_ALT})\b`;
 
-// Year as digits (1986, '86) or words (nineteen eighty six, nineteen oh five, two thousand five).
+// Year as digits (1986, '86, 86) or words (nineteen eighty six, nineteen oh five, two thousand
+// five, eighty six). A bare two-digit year only counts here, right after a month and a day: that
+// is how callers shorten a birth year, and the plausibility check still keeps recent years out.
 const YEAR_TAIL = String
   .raw`(?:(?:oh|o|zero)${J}(?:${CARD_UNIT_ALT})|${TEEN_ALT}|(?:${TENS_ALT})(?:${J}(?:${CARD_UNIT_ALT}))?|hundred)`;
-const YEAR = String.raw`(?:(?:19|20)\d\d(?!\d)|'\d\d(?!\d)|(?:nineteen|twenty)${J}${YEAR_TAIL}\b` +
+const SHORT_SPOKEN_YEAR = String
+  .raw`(?:oh|o|zero)${J}(?:${CARD_UNIT_ALT})|(?:${TENS_ALT})(?:${J}(?:${CARD_UNIT_ALT}))?`;
+const YEAR = String.raw`(?:(?:19|20)\d\d(?!\d)|'?\d\d(?!\d|[.,]\d)|(?:nineteen|twenty)${J}${YEAR_TAIL}\b` +
   String
-    .raw`|two${J}thousand(?:${J}(?:and${J})?(?:${TEEN_ALT}|(?:${TENS_ALT})(?:${J}(?:${CARD_UNIT_ALT}))?|${CARD_UNIT_ALT}))?\b)`;
+    .raw`|two${J}thousand(?:${J}(?:and${J})?(?:${TEEN_ALT}|(?:${TENS_ALT})(?:${J}(?:${CARD_UNIT_ALT}))?|${CARD_UNIT_ALT}))?\b` +
+  String.raw`|(?:${SHORT_SPOKEN_YEAR})\b)`;
 const DAY_YEAR_SEP = String.raw`(?:[ \t]*,[ \t]*|[ \t]+)(?:of[ \t]+)?`;
 
 const DOB_MONTH_FIRST_RE = new RegExp(
@@ -234,8 +240,12 @@ const DOB_DAY_FIRST_RE = new RegExp(
 const NUM_END = String.raw`(?:(?![\w/]|[.\-]\d)|(?=T\d))`;
 const DOB_MDY_RE = new RegExp(String.raw`(?<![\w/.\-])(\d{1,2})([/.\-])(\d{1,2})\2(\d{4}|\d{2})${NUM_END}`, "g");
 const DOB_YMD_RE = new RegExp(String.raw`(?<![\w/.\-])((?:19|20)\d{2})([/.\-])(\d{1,2})\2(\d{1,2})${NUM_END}`, "g");
-// "3 14 1986" as the ASR writes a spoken DOB; never the middle of a longer digit run.
-const DOB_SPACED_RE = /(?<![\w.,$\-])(?<!\d[ \t])(\d{1,2})[ \t]+(\d{1,2})[ \t]+((?:19|20)\d{2})(?![\w]|[.,\-]\d)/g;
+// "3 14 1986" or "3 14 86" as the ASR writes a spoken DOB; never the middle of a longer digit run.
+const DOB_SPACED_RE =
+  /(?<![\w.,$\-])(?<!\d[ \t])(\d{1,2})[ \t]+(\d{1,2})[ \t]+((?:19|20)\d{2}|\d{2})(?![\w]|[.,\-]\d)/g;
+// A written address: local part, @, a dotted domain. Brackets and quotes end it, so the tokens
+// this file writes are never read as part of one.
+const EMAIL_RE = /[^\s@,;:<>()"'\[\]]+@[^\s@,;:<>()"'\[\]]+\.[A-Za-z]{2,}(?![A-Za-z])/g;
 
 function expandTwoDigitYear(yy: number, refYear: number): number {
   return 2000 + yy <= refYear ? 2000 + yy : 1900 + yy;
@@ -244,7 +254,7 @@ function expandTwoDigitYear(yy: number, refYear: number): number {
 function yearValue(text: string, refYear: number): number | null {
   const t = text.trim();
   if (/^\d{4}$/.test(t)) return Number(t);
-  if (/^'\d{2}$/.test(t)) return expandTwoDigitYear(Number(t.slice(1)), refYear);
+  if (/^'?\d{2}$/.test(t)) return expandTwoDigitYear(Number(t.replace("'", "")), refYear);
   const words = splitWords(t);
   if (words[0] === "two" && words[1] === "thousand") {
     if (words.length === 2) return 2000;
@@ -252,7 +262,13 @@ function yearValue(text: string, refYear: number): number | null {
     return rest === null || rest > 99 ? null : 2000 + rest;
   }
   const century = words[0] === "nineteen" ? 1900 : words[0] === "twenty" ? 2000 : null;
-  if (century === null) return null;
+  if (century === null || words.length === 1 && words[0] === "twenty") {
+    // a spoken two-digit year: "eighty six", "oh five", "twenty" alone
+    const short = wordsValue(words);
+    return short === null || short > 99 || words.some((w) => TEEN_VALUE.has(w) || ORDINAL_VALUE.has(w))
+      ? null
+      : expandTwoDigitYear(short, refYear);
+  }
   const tail = words.slice(1);
   if (tail.length === 1 && tail[0] === "hundred") return century;
   const rest = wordsValue(tail);
@@ -293,10 +309,14 @@ function redactDates(text: string, refYear: number): string {
       const year = y.length === 2 ? expandTwoDigitYear(Number(y), refYear) : Number(y);
       return numeric(m, Number(mo), Number(d), year, true);
     })
-    .replace(
-      DOB_SPACED_RE,
-      (m, mo: string, d: string, y: string) => numeric(m, Number(mo), Number(d), Number(y), true),
-    );
+    .replace(DOB_SPACED_RE, (m, mo: string, d: string, y: string) => {
+      const year = y.length === 2 ? expandTwoDigitYear(Number(y), refYear) : Number(y);
+      return numeric(m, Number(mo), Number(d), year, true);
+    });
+}
+
+function redactEmails(text: string): string {
+  return text.replace(EMAIL_RE, EMAIL_TOKEN);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -304,12 +324,14 @@ function redactDates(text: string, refYear: number): string {
 // ---------------------------------------------------------------------------------------------
 /** redactPII against an explicit reference year (the DOB year bound); redactPII uses today's. */
 export function redactPIIAsOf(text: string, refYear: number): string {
-  // dates first: a spoken DOB next to a phone must not be read as part of the phone's digits
-  return redactPhones(redactDates(text, refYear));
+  // Addresses first, so the digits in one are never read as a phone or a date; then dates, so a
+  // spoken DOB next to a phone is not read as part of the phone's digits.
+  return redactPhones(redactDates(redactEmails(text), refYear));
 }
 
 /** Phone-like digit runs (602-555-0101, (602) 555 0101, +16025550101, 6025550101, spaced digits) -> "[phone ending 0101]";
- *  DOB-shaped dates (March 14, 1986 / 3/14/1986 / 1986-03-14 / 14 March 1986 / march fourteenth nineteen eighty six) -> "[date of birth]".
+ *  DOB-shaped dates (March 14, 1986 / 3/14/1986 / 1986-03-14 / 14 March 1986 / march fourteenth nineteen eighty six /
+ *  march 14th 86 / 3 14 86) -> "[date of birth]"; written email addresses -> "[email]".
  *  Claim numbers (CLM-240115) and money stay. Idempotent. null/undefined -> same. */
 export function redactPII(text: string): string;
 export function redactPII(text: null | undefined): null;
@@ -321,9 +343,10 @@ export function redactPII(text: string | null | undefined): string | null {
 // The contract floor (date of birth, birthday, phone number, number on the account, ten-digit)
 // plus the other server sentences whose answer is a DOB or a phone number: dob_unreadable asks
 // for "the month, day and year", not_found asks "Is that the right number?", and
-// rep_queued_no_number asks for "the best number".
+// rep_queued_no_number asks for "the best number". The model words its own follow-ups for a
+// partial date ("When were you born?", "And what year?"), so those count too.
 const SENSITIVE_ASK_RE =
-  /(date of birth|birth ?date|birthday|\bDOB\b|phone number|number on (the|your) account|ten-digit|ten digit|month, day,? and (the )?year|(best|right) number)/i;
+  /(date of birth|birth ?date|birthday|\bborn\b|\bDOB\b|(month|day|year) of birth|(what|which) year|phone number|number on (the|your) account|ten-digit|ten digit|month, day,? and (the )?year|(best|right) number)/i;
 
 /** True when an assistant line asks for a date of birth or phone number. */
 export function asksForSensitive(assistantText: string | null | undefined): boolean {

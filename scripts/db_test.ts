@@ -13,7 +13,7 @@
 import { assert, assertEquals, assertFalse, assertRejects } from "@std/assert";
 import { loadEnv } from "./lib/env.ts";
 import { lit, sqlClient } from "./lib/sql.ts";
-import { createStore } from "../supabase/functions/vapi-webhook/store.ts";
+import { createStore, type StoreExtras } from "../supabase/functions/vapi-webhook/store.ts";
 
 const env = loadEnv();
 if (!env.SUPABASE_ACCESS_TOKEN || !env.SUPABASE_PROJECT_REF) {
@@ -410,6 +410,9 @@ await test("upsert_interaction merge order: stub, full, partial, stub after full
          and c.flags = '{tool_markup_spoken}' and c.escalated and c.analysis_status = 'ok'
          and c.duration_seconds = 210 and c.customer_id = ${lit(f.customerId)}, format('full: %s', row_to_json(c));
 
+  -- The merge itself lets a partial's shorter transcript replace the full one (text columns take any
+  -- non-empty value). post_call.ts never sends a report without the analysis over a row whose
+  -- analysis_status is ok or backfilled, so this path is pinned here as the function behaves.
   perform upsert_interaction(${j(partial)});
   ${row}
   assert c.summary = 'Caller asked about a claim.' and c.sentiment = 'positive' and c.outcome = 'resolved'
@@ -624,7 +627,10 @@ await test("store.ts round trip through PostgREST maps every method onto the sch
            (${lit(f.customerId)}, ${lit(claimNo("a"))}, 'auto', 'approved', '{}', '2026-10-02', '2026-10-06', 1250.50),
            (${lit(f.customerId)}, ${lit(claimNo("c"))}, 'property', 'closed', '{}', '2026-09-01', '2026-09-20', null);
     commit;`);
-  const store = createStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+  // createStore keeps the Store contract's type; the extra reads are there at runtime too
+  const store = createStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY) as
+    & ReturnType<typeof createStore>
+    & StoreExtras;
   const lookupP = (toolCallId: string, phoneE164: string | null) =>
     store.lookupCustomerAttempt({ callKey: k, channel: "webCall", phoneE164, toolCallId, callerNumber: null });
   try {
@@ -736,12 +742,14 @@ await test("store.ts round trip through PostgREST maps every method onto the sch
       error: null,
     }]);
 
+    assertEquals(await store.storedAnalysisStatus(k), null);
     await store.ensureInteraction({
       vapi_call_id: k,
       channel: "webCall",
       started_at: "2026-10-12T14:00:00Z",
       outcome: "in_progress",
     });
+    assertEquals(await store.storedAnalysisStatus(k), "pending");
     await store.ensureInteraction({ vapi_call_id: k, channel: "chat", outcome: "in_progress" });
     await store.upsertInteraction({
       vapi_call_id: k,
@@ -757,6 +765,7 @@ await test("store.ts round trip through PostgREST maps every method onto the sch
       messages: [{ role: "user", text: "hi", t: "00:01" }],
       analysis_status: "ok",
     });
+    assertEquals(await store.storedAnalysisStatus(k), "ok");
     const [ci] = await sql<{ channel: string; status: string; outcome: string; messages: unknown }>(
       `select channel, status, outcome, messages from call_interactions where vapi_call_id = ${lit(k)}`,
     );
@@ -788,11 +797,14 @@ await test("store.ts round trip through PostgREST maps every method onto the sch
     await store.deleteTranscriptLines(k);
     assertEquals(await store.lastAssistantLine(k), null);
 
+    // a capture also enforces the 7-day retention on the table
+    await sql(`insert into webhook_captures (message_type, call_key, body, received_at)
+      values ('status-update', ${lit(k)}, '{"stale":true}', now() - interval '8 days')`);
     await store.captureWebhook("status-update", k, { message: { type: "status-update", status: "in-progress" } });
-    const [cap] = await sql<{ message_type: string; status: string }>(
+    const caps = await sql<{ message_type: string; status: string }>(
       `select message_type, body->'message'->>'status' status from webhook_captures where call_key = ${lit(k)}`,
     );
-    assertEquals(cap, { message_type: "status-update", status: "in-progress" });
+    assertEquals(caps, [{ message_type: "status-update", status: "in-progress" }]);
   } finally {
     const kk = lit(k);
     await sql(`begin;

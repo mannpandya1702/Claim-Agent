@@ -598,6 +598,44 @@ Deno.test("a batch shares one deadline: calls after a slow one still run but ans
   assertEquals(finished.sort(), ["slow", "sos"]);
 });
 
+Deno.test("each tool gets a budget that ends before its backstop, so its own fallback is what VAPI receives", async () => {
+  const budgets: (number | undefined)[] = [];
+  const routes: Partial<Routes> = {
+    runTool: async (call, _ctx, budgetMs) => {
+      budgets.push(budgetMs);
+      if (call.id === "slow") await new Promise((r) => setTimeout(r, 60));
+      return { code: "needs_dob", sentence: sentenceFor("needs_dob") };
+    },
+  };
+  const { deps } = makeDeps({}, untouchableStore);
+  const one = fnCall("only", "lookup_customer", {});
+  await results(await createHandler(routes)(post({ message: callEnvelope({ toolCallList: [one] }) }), deps));
+  assertEquals(budgets, [TOOLS_OWN_BUDGET_MS], "one call alone keeps the full tool budget");
+
+  // a batch short of time hands the later call a budget that still ends a second before its backstop
+  budgets.length = 0;
+  const batch = [fnCall("slow", "lookup_customer", {}), fnCall("next", "get_claim_status", {})];
+  await results(
+    await createHandler(routes, { batchMs: 2000 })(post({ message: callEnvelope({ toolCallList: batch }) }), deps),
+  );
+  assert(budgets[0]! > 950 && budgets[0]! <= 1000, String(budgets[0]));
+  assert(budgets[1]! < budgets[0]! - 50 && budgets[1]! >= 0, String(budgets[1]));
+});
+
+Deno.test("a sentence over VAPI's 1000-character limit goes out without the native message", async () => {
+  const long = `${"Your claim is under review. ".repeat(40)}Do you have any questions?`;
+  const { routes } = fakeRoutes(() => ({ code: "ok", sentence: long }));
+  const { deps, logs } = makeDeps({}, untouchableStore);
+  const res = await createHandler(routes)(
+    post({ message: callEnvelope({ toolCallList: [fnCall("t1", "get_claim_status", {})] }) }),
+    deps,
+  );
+  const [r] = await results(res);
+  assertEquals(r.message, undefined);
+  assertEquals(r.json, { code: "ok", message: long });
+  assertStringIncludes(String(logs.at(-1)?.error), "tool_message_too_long");
+});
+
 Deno.test("the batch budget leaves one call its full backstop and stays under VAPI's 10 s", () => {
   assert(BATCH_BUDGET_MS >= TOOL_BACKSTOP_MS);
   assert(BATCH_BUDGET_MS <= 9000);
@@ -796,7 +834,42 @@ Deno.test("an end-of-call-report result with an unusable status becomes 500", as
 // ---------------------------------------------------------------------------------------------
 // Capture, logging, jobs
 // ---------------------------------------------------------------------------------------------
-Deno.test("CAPTURE_WEBHOOKS=true stores the raw body through waitUntil and never blocks or fails", async () => {
+Deno.test("a captured body keeps no tool arguments and no unredacted phone, DOB or email", async () => {
+  const store = createFakeStore();
+  const { deps, background } = makeDeps({ CAPTURE_WEBHOOKS: "true" }, store);
+  const dob = { dob_month: 3, dob_day: 14, dob_year: 1986 };
+  const message = callEnvelope({
+    call: { id: CALL_ID, orgId: ORG, type: "inboundPhoneCall", customer: { number: "+16025550101" } },
+    toolCallList: [fnCall("t1", "verify_identity", JSON.stringify(dob)), {
+      id: "t2",
+      name: "lookup_customer",
+      parameters: { phone: "602-555-0101" },
+    }],
+    toolWithToolCallList: [{ type: "function", toolCall: fnCall("t1", "verify_identity", dob) }],
+    artifact: {
+      messages: [
+        { role: "user", message: "It's March 14, 1986, and my email is tobias.reyes@example.com" },
+        { role: "tool_calls", toolCalls: [fnCall("t1", "verify_identity", JSON.stringify(dob))] },
+      ],
+    },
+  });
+  const res = await createHandler(fakeRoutes().routes)(post({ message }), deps);
+  assertEquals(res.status, 200);
+  await Promise.all(background);
+  const captured = store.tables.webhook_captures[0].body;
+  const text = JSON.stringify(captured);
+  for (const leak of ["arguments", "parameters", "1986", "dob_year", "5550101", "555-0101", "tobias.reyes"]) {
+    assertFalse(text.includes(leak), leak);
+  }
+  // the shape replays still need survives
+  assertEquals(captured.message.call.id, CALL_ID);
+  assertEquals(captured.message.toolCallList[0].function.name, "verify_identity");
+  assertEquals(captured.message.call.customer.number, "[phone ending 0101]");
+  assertStringIncludes(text, "[date of birth]");
+  assertStringIncludes(text, "[email]");
+});
+
+Deno.test("CAPTURE_WEBHOOKS=true stores the body through waitUntil and never blocks or fails", async () => {
   const store = createFakeStore();
   const { deps, background, logs } = makeDeps({ CAPTURE_WEBHOOKS: "true" }, store);
   const body = { message: { type: "speech-update", call: { id: CALL_ID, orgId: ORG } } };

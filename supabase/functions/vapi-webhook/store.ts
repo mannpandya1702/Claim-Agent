@@ -22,6 +22,15 @@ import type {
 } from "./types.ts";
 
 const TIMEOUT_MS = 5000;
+/** How long a captured webhook body is kept (0001_init.sql: webhook_captures). */
+export const CAPTURE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Reads beyond the Store contract. Both stores implement them; callers check for the method, so a
+ *  stand-in store without them still works (and gets the conservative answer). */
+export interface StoreExtras {
+  // call_interactions.analysis_status for the call, or null when there is no row yet
+  storedAnalysisStatus(callKey: string): Promise<string | null>;
+}
 
 // date_of_birth is deliberately absent: no tool needs it, the SQL function compares it in place.
 const CUSTOMER_COLUMNS = "id, phone_e164, first_name, last_name, policy_number, email";
@@ -75,7 +84,7 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  return {
+  const store: Store & StoreExtras = {
     async lookupCustomerAttempt(p) {
       const { data, error } = await db.rpc("lookup_customer_attempt", {
         p_call_key: p.callKey,
@@ -278,6 +287,13 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
       if (error) fail("upsertInteraction", error);
     },
 
+    async storedAnalysisStatus(callKey) {
+      const { data, error } = await db.from("call_interactions").select("analysis_status").eq("vapi_call_id", callKey)
+        .abortSignal(signal()).maybeSingle();
+      if (error) fail("storedAnalysisStatus", error);
+      return (data as { analysis_status: string } | null)?.analysis_status ?? null;
+    },
+
     async insertTranscriptLine(line: TranscriptLine) {
       const { error } = await db.from("transcript_lines")
         .upsert(
@@ -308,6 +324,13 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
         .insert({ message_type: messageType, call_key: callKey, body })
         .abortSignal(signal());
       if (error) fail("captureWebhook", error);
+      // Captures only accrue while CAPTURE_WEBHOOKS is on, so each one also enforces the 7-day
+      // retention, whether or not a scheduled job runs.
+      const pruned = await db.from("webhook_captures").delete()
+        .lt("received_at", new Date(Date.now() - CAPTURE_RETENTION_MS).toISOString())
+        .abortSignal(signal());
+      if (pruned.error) fail("captureWebhook.prune", pruned.error);
     },
   };
+  return store;
 }

@@ -99,6 +99,19 @@ Deno.test("promised_callback: a chat escalation stored 'skipped' backs the promi
   ]);
 });
 
+Deno.test("promised_callback: an emergency page is not a callback request; a representative row is", () => {
+  for (const status of ["sent", "skipped"] as const) {
+    assertEquals(flags({ messages: [bot(PROMISE)], escalations: [escalation(status, "emergency")] }), [
+      "promised_callback_without_escalation",
+    ], status);
+    assertEquals(
+      flags({ messages: [bot(PROMISE)], escalations: [escalation(status, "emergency"), escalation(status)] }),
+      [],
+      status,
+    );
+  }
+});
+
 Deno.test("promised_callback: each phrasing in the rule fires; none fires with a sent alert", () => {
   for (
     const line of [
@@ -232,6 +245,39 @@ Deno.test("email_promised: fires when the agent says it emailed and no email was
 
 Deno.test("email_promised: does not fire when an email row is sent", () => {
   assertEquals(flags({ messages: [bot(EMAILED)], attempts: VERIFIED, emails: [email("sent")] }), []);
+});
+
+Deno.test("email_promised: a sent team email does not back an email to the caller; an info email does", () => {
+  const line = "I've emailed the checklist to you.";
+  for (const kind of ["callback_request", "emergency_alert", "sla_realert"] as const) {
+    assertEquals(flags({ messages: [bot(line)], attempts: VERIFIED, emails: [email("sent", kind)] }), [
+      "email_promised_without_send",
+    ], kind);
+  }
+  for (const kind of ["document_checklist", "claim_summary", "how_to_start_claim"] as const) {
+    assertEquals(
+      flags({
+        messages: [bot(line)],
+        attempts: VERIFIED,
+        emails: [email("sent", "callback_request"), email("sent", kind)],
+      }),
+      [],
+      kind,
+    );
+  }
+});
+
+Deno.test("both promises at once with only an emergency page and a team email behind them", () => {
+  const messages = [bot("I've emailed the checklist to you."), bot("A representative will call you back tomorrow.")];
+  assertEquals(
+    flags({
+      messages,
+      attempts: VERIFIED,
+      escalations: [escalation("sent", "emergency")],
+      emails: [email("sent", "callback_request")],
+    }),
+    ["email_promised_without_send", "promised_callback_without_escalation"],
+  );
 });
 
 Deno.test("email_promised: fires when the only email row failed or is still sending", () => {

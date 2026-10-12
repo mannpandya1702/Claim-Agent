@@ -34,7 +34,7 @@ import {
   REP_PHONE_PLACEHOLDER,
   SQUAD_MEMBERS,
 } from "./render.ts";
-import { invariantProblems, leafDiff, type LiveView } from "./vapi_sync.ts";
+import { extraKeys, invariantProblems, leafDiff, type LiveView, patchBody } from "./vapi_sync.ts";
 
 const FINAL_TRANSCRIPT = 'transcript[transcriptType="final"]';
 const REP_PHONE = "+16025550188";
@@ -261,11 +261,36 @@ Deno.test("web assistants carry no transferCall; solo-phone transfers to exactly
     const d = transfer.destinations[0];
     assertEquals(d.type, "number");
     assertEquals(d.number, r === withRep ? REP_PHONE : REP_PHONE_PLACEHOLDER);
-    assertEquals(d.transferPlan.fallbackPlan.endCallEnabled, false);
-    assert(d.transferPlan.fallbackPlan.message.endsWith("?"));
+    // A blind PSTN transfer leaves the call once it starts: nothing a fallback plan says is ever heard.
+    assertEquals(d.transferPlan, { mode: "blind-transfer" });
     const failed = transfer.messages.find((m: any) => m.type === "request-failed");
     assert(failed?.content.endsWith("?"), "transferCall request-failed must end in a question");
   }
+});
+
+Deno.test("a transfer fallback plan only where VAPI uses it, and SIP options only on SIP destinations", () => {
+  let plans = 0;
+  for (const [label, r] of BOTH) {
+    for (const [name, t] of Object.entries(r.tools)) {
+      (t.destinations ?? []).forEach((d: any, i: number) => {
+        const plan = d.transferPlan;
+        if (!plan) return;
+        plans++;
+        const where = `${label} ${name}.destinations[${i}]`;
+        // OpenAPI TransferPlan.fallbackPlan: used with warm-transfer-experimental (and SIP cold
+        // transfers behind an org flag); on a blind PSTN transfer the assistant is already gone.
+        if ("fallbackPlan" in plan) assertEquals(plan.mode, "warm-transfer-experimental", where);
+        if ("sipVerb" in plan) assertEquals(d.type, "sip", `${where}: sipVerb is SIP-only`);
+      });
+    }
+  }
+  assert(plans >= 2, "collector found no transfer plans");
+});
+
+Deno.test("the phone prompt promises no fallback line after a transfer starts", () => {
+  const phone = withRep.assistants["solo-phone"].prompt;
+  assert(!/transfer does not connect|told a representative is not available/i.test(phone));
+  assertMatch(phone, /transfer cannot start, its failure line asks/);
 });
 
 Deno.test("analysis schema and structured output share the enums.ts value lists", () => {
@@ -451,6 +476,39 @@ Deno.test("leafDiff: compares only what is sent and names the leaf that drifted"
   assertEquals(leafDiff({ a: [1, 2] }, { a: [1] }), ["changed: a has 1 items, expected 2"]);
   assertEquals(leafDiff({ a: "x" }, {}), ["missing: a"]);
   assertEquals(leafDiff({ m: [{ c: "p" }] }, { m: [{ c: "q" }] }), ['changed: m[0].c "p" -> live "q"']);
+});
+
+Deno.test("extraKeys: keys the live object has and the repo does not send are drift, at any depth", () => {
+  const want = { name: "a", model: { provider: "openai", messages: [{ role: "system", content: "x" }] } };
+  const live = {
+    ...structuredClone(want),
+    id: "z",
+    orgId: "o",
+    createdAt: "t",
+    updatedAt: "t",
+    latestVersion: 3,
+    isServerUrlSecretSet: false,
+  };
+  assertEquals(extraKeys(want, live), []);
+  // removed from the repo after it was applied, or added in the dashboard
+  assertEquals(extraKeys(want, { ...live, hooks: [{ on: "x" }], silenceTimeoutSeconds: 45 }), [
+    "hooks",
+    "silenceTimeoutSeconds",
+  ]);
+  const nested = structuredClone(live) as any;
+  nested.model.tools = [{ type: "function" }];
+  nested.model.messages[0].name = "extra";
+  assertEquals(extraKeys(want, nested), ["model.messages[0].name", "model.tools"]);
+  // null and empty values, and server-managed keys only at the root, are not drift
+  assertEquals(extraKeys(want, { ...live, voicemailMessage: null, endCallMessage: "" }), []);
+  assertEquals(extraKeys(want, { ...live, model: { ...live.model, id: "m" } }), ["model.id"]);
+});
+
+Deno.test("patchBody: clears every top-level key the repo no longer sends; nested objects go whole", () => {
+  const want = { name: "a", model: { provider: "openai" } };
+  const live = { ...want, id: "z", hooks: [{ on: "x" }], model: { provider: "openai", tools: [] }, metadata: {} };
+  assertEquals(patchBody(want, live), { name: "a", model: { provider: "openai" }, hooks: null, metadata: null });
+  assertEquals(patchBody(want, { ...want, id: "z" }), want);
 });
 
 function liveViewOf(r: Rendered): LiveView {

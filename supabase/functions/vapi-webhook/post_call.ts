@@ -25,6 +25,7 @@ import { computeFlags } from "./flags.ts";
 import { callerIdNumber } from "./identity.ts";
 import type { CallFacts } from "./post_call_facts.ts";
 import { asksForSensitive, MASKED_ANSWER, redactDeep, redactPII } from "./redact.ts";
+import type { StoreExtras } from "./store.ts";
 import type { AttemptRow, Deps, Env, InteractionRow, Session, Store, VapiMessage } from "./types.ts";
 
 /** Backfill schedule: GET /call/{id} this many ms apart until the analysis shows up. */
@@ -47,6 +48,12 @@ const MAX_CALLER_NAME = 80;
 const MAX_LOG_ERROR = 300;
 // Server words for the escalation row a phone transfer writes; nothing the caller or model said.
 const FORWARDING_DETAILS = "Live phone transfer to a representative started by the assistant.";
+
+// A report that ends this way with no server code behind the call is abandoned, whatever the
+// analysis guessed: nobody was left on the line to be helped.
+const IDLE_ENDED_REASONS: ReadonlySet<string> = new Set(["silence-timed-out", "exceeded-max-duration"]);
+// Statuses of a row that already holds the full analysis; nothing later may write less over it.
+const COMPLETE_ANALYSIS: ReadonlySet<string> = new Set(["ok", "backfilled"]);
 
 const CODE_SET: ReadonlySet<string> = new Set(CODES);
 const CHANNEL_SET: ReadonlySet<string> = new Set(CHANNELS);
@@ -336,6 +343,10 @@ function firstOf<T>(values: unknown[], pick: (v: unknown) => T | null): T | null
   return null;
 }
 
+function idleOutcome(message: VapiMessage): Outcome | null {
+  return typeof message.endedReason === "string" && IDLE_ENDED_REASONS.has(message.endedReason) ? "abandoned" : null;
+}
+
 function llmOutcome(message: VapiMessage): Outcome | null {
   const values = [obj(obj(message.analysis).structuredData).outcome, ...outputValues(message, "outcome")];
   return firstOf(values, analysisOutcomeOf);
@@ -454,7 +465,7 @@ export function buildInteractionRow(
   const byTransfer = transferred(message, raw);
   const everVerified = session?.level === "verified" ||
     attempts.some((a) => a.tool_name === "verify_identity" && a.code === "verified");
-  const outcome = serverOutcome(facts, byTransfer, everVerified) ?? llmOutcome(message) ??
+  const outcome = serverOutcome(facts, byTransfer, everVerified) ?? idleOutcome(message) ?? llmOutcome(message) ??
     (hasUserTurn(raw, transcriptText) ? "resolved" : "abandoned");
 
   const startedAt = isoOrNull(message.startedAt);
@@ -564,7 +575,14 @@ async function fetchCall(deps: Deps, callKey: string, privateKey: string): Promi
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)));
 
-/** Off the request path: re-read the call until the analysis is there, then write it. Only reads
+/** The analysis_status already stored for the call, or null with no row (or a store that cannot
+ *  say). A read error throws. */
+async function storedAnalysisStatus(store: Store, callKey: string): Promise<string | null> {
+  const read = (store as Store & Partial<StoreExtras>).storedAnalysisStatus;
+  return typeof read === "function" ? await read.call(store, callKey) : null;
+}
+
+/** Off the request path: re-read the call until the summary is there, then write it. Only reads
  *  VAPI and writes call_interactions; it never alerts anyone. Never throws. */
 async function backfill(
   deps: Deps,
@@ -581,6 +599,16 @@ async function backfill(
   // Sentiment found only now is the backfill's; one the report already had keeps its source.
   const sourced = (row: InteractionRow): InteractionRow =>
     row.sentiment && !original.sentiment ? { ...row, sentiment_source: "backfill" } : row;
+  // A complete report can land while this waits; upsert_interaction takes any status but
+  // 'pending', so writing after it would demote the row and relabel its sentiment.
+  const write = async (row: InteractionRow, result: "backfilled" | "missing"): Promise<void> => {
+    if (COMPLETE_ANALYSIS.has(await storedAnalysisStatus(deps.store, callKey) ?? "")) {
+      safeLog(deps, { event: "backfill", call_key: callKey, result: "superseded", attempts });
+      return;
+    }
+    await deps.store.upsertInteraction({ ...sourced(row), analysis_status: result });
+    safeLog(deps, { event: "backfill", call_key: callKey, result, attempts });
+  };
   try {
     for (const delay of delays) {
       await sleep(delay);
@@ -588,17 +616,23 @@ async function backfill(
       const fetched = await fetchCall(deps, callKey, privateKey);
       if (!fetched) continue;
       best = buildInteractionRow(withFetchedCall(message, fetched), facts, own);
-      if (best.summary && best.sentiment) {
-        await deps.store.upsertInteraction({ ...sourced(best), analysis_status: "backfilled" });
-        safeLog(deps, { event: "backfill", call_key: callKey, result: "backfilled", attempts });
-        return;
-      }
+      // The summary decides; a sentiment the analysis never produced stays NULL rather than
+      // holding the summary back as 'missing'.
+      if (best.summary) return await write(best, "backfilled");
     }
-    // Whatever arrived is kept; the status says the rest never did. Sentiment is never invented.
-    await deps.store.upsertInteraction({ ...sourced(best), analysis_status: "missing" });
-    safeLog(deps, { event: "backfill", call_key: callKey, result: "missing", attempts });
+    // Whatever arrived is kept; the status says the summary never did. Sentiment is never invented.
+    await write(best, "missing");
   } catch (e) {
     safeLog(deps, { event: "backfill_failed", call_key: callKey, error: errorText(e) });
+  }
+}
+
+async function clearLiveLines(deps: Deps, callKey: string): Promise<void> {
+  try {
+    // The live view switches to the stored messages; the reaper removes anything left behind.
+    await deps.store.deleteTranscriptLines(callKey);
+  } catch (e) {
+    safeLog(deps, { event: "post_call_error", call_key: callKey, step: "deleteTranscriptLines", error: errorText(e) });
   }
 }
 
@@ -621,6 +655,15 @@ export async function onEndOfCallReport(
 
   const privateKey = str(env.VAPI_PRIVATE_KEY);
   const incomplete = row.analysis_status !== "ok";
+  if (incomplete && COMPLETE_ANALYSIS.has(await storedAnalysisStatus(store, callKey) ?? "")) {
+    // A partial report, or a redelivery without the analysis, after the complete one. The stored
+    // row already holds everything this one carries (the server facts do not change once the call
+    // has ended), and the merge would let it replace the transcript, the caller's name, the
+    // status and the sentiment source with less.
+    safeLog(deps, { event: "eocr_ignored", call_key: callKey, reason: "row_already_complete" });
+    await clearLiveLines(deps, callKey);
+    return { status: 200, body: {} };
+  }
   const conversation = hadConversation(message);
   // Nothing to analyse (a call that never connected), or no way to ask: the answer is already known.
   const runBackfill = incomplete && conversation && privateKey !== null;
@@ -632,12 +675,7 @@ export async function onEndOfCallReport(
   }
 
   await store.upsertInteraction(row);
-  try {
-    // The live view switches to the stored messages; the reaper removes anything left behind.
-    await store.deleteTranscriptLines(callKey);
-  } catch (e) {
-    safeLog(deps, { event: "post_call_error", call_key: callKey, step: "deleteTranscriptLines", error: errorText(e) });
-  }
+  await clearLiveLines(deps, callKey);
 
   if (runBackfill) {
     const delays = options.backfillDelaysMs ?? BACKFILL_DELAYS_MS;
@@ -771,18 +809,24 @@ async function onForwarding(message: VapiMessage, deps: Deps, callKey: string): 
   const verified = level === "verified";
   const reason = forwardingReason(level, attempts);
 
-  // A database error throws (5xx): VAPI redelivers and the row is written then.
-  const row = await store.upsertEscalation({
-    callKey,
-    kind: "representative",
-    reason,
-    details: FORWARDING_DETAILS,
-    callbackPhone: callerNumber,
-    callbackSource: callerNumber ? "caller_id" : "none",
-    channel,
-    verified,
-  });
+  // upsert_escalation merges every non-null value into an existing row, so this first write
+  // carries nothing to merge: a row escalate already wrote keeps the number and the details the
+  // caller gave. A database error throws (5xx): VAPI redelivers and the row is written then.
+  const base = { callKey, kind: "representative" as const, reason, channel, verified };
+  const row = await store.upsertEscalation({ ...base, details: null, callbackPhone: null, callbackSource: "none" });
   if (!row.inserted) return;
+  try {
+    // The row is this transfer's own, so the server's words and the caller id go on it.
+    await store.upsertEscalation({
+      ...base,
+      details: FORWARDING_DETAILS,
+      callbackPhone: callerNumber,
+      callbackSource: callerNumber ? "caller_id" : "none",
+    });
+  } catch (e) {
+    // The alert still goes out; a 5xx would find the row on redelivery and never send it.
+    safeLog(deps, { event: "post_call_error", call_key: callKey, step: "upsertEscalation", error: errorText(e) });
+  }
 
   const alert: EscalationAlert = { kind: "representative", reason, callKey, channel, verified };
   const timedOut = (): Delivery => ({ ok: false, error: "timeout" });

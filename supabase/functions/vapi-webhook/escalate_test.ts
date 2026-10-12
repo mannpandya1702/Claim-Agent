@@ -443,3 +443,71 @@ Deno.test("replays keep each code and its number without paging again", async ()
     [["tc-first", "rep_queued_no_number"], ["tc-second", "callback_updated"]],
   );
 });
+
+Deno.test("a failed escalations read cannot let a fallback number or new details overwrite the caller's", async () => {
+  const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+  const first = await h.run("escalate", { callback_phone: "6025550177", details: "Needs help with the kitchen claim" });
+  assertEquals(first.data, { target: "given", digits: "0177" });
+
+  h.store.failNext("listEscalations");
+  assertEquals(await h.run("escalate", { details: "Wants a call about the car" }), {
+    code: "rep_already_queued",
+    sentence: REP_ALREADY_QUEUED,
+  });
+  const row = h.rows()[0];
+  assertEquals([row.callback_phone, row.callback_source, row.details], [
+    "+16025550177",
+    "argument",
+    "Needs help with the kitchen claim",
+  ]);
+  assertEquals(h.telegramCalls().length, 1);
+});
+
+Deno.test("a repeat fills details only where the row has none, and never replaces them", async () => {
+  const h = harness();
+  assertEquals((await h.run("escalate", {})).code, "rep_queued_no_number");
+  assertEquals(h.rows()[0].details, null);
+  await h.run("escalate", { callback_phone: "6025550177", details: "Wants to talk about the kitchen claim" });
+  assertEquals(h.rows()[0].details, "Wants to talk about the kitchen claim");
+  await h.run("escalate", { details: "Something else entirely" });
+  assertEquals(h.rows()[0].details, "Wants to talk about the kitchen claim");
+});
+
+Deno.test("a failed write of the fallback number is not promised: the sentence asks for a number", async () => {
+  const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+  const upsert = h.store.upsertEscalation;
+  let writes = 0;
+  h.store.upsertEscalation = (p) => (++writes === 2 ? Promise.reject(new Error("connection reset")) : upsert(p));
+  assertEquals(await h.run("escalate", { details: "Kitchen claim" }), {
+    code: "rep_queued_no_number",
+    sentence: REP_QUEUED_NO_NUMBER,
+  });
+  assertEquals([h.rows()[0].callback_phone, h.rows()[0].alert_status], [null, "sent"]);
+  assert(h.logs.some((l) => l.event === "tool_error" && l.step === "upsertEscalation"));
+});
+
+Deno.test("a replayed rep_queued speaks the first answer's target, never one a later request wrote", async () => {
+  // fallback target, then the caller gives a number: the replay no longer knows the fallback, so it names none
+  const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+  const first = await h.run("escalate", {}, "tc1");
+  assertEquals(first.sentence, queuedAt("the number you're calling from"));
+  assertEquals(await h.run("escalate", {}, "tc1"), first, "a replay before anything changed is identical");
+  assertEquals((await h.run("escalate", { callback_phone: "6025550177" }, "tc2")).code, "callback_updated");
+  const replay = await h.run("escalate", {}, "tc1");
+  assertEquals(replay, {
+    code: "rep_queued",
+    sentence:
+      `I've sent your request and a summary to our claims team. A representative will call you back within one business day. ${ANYTHING_ELSE}`,
+  });
+
+  // a number given in the first request is rebuilt from the retry's own arguments
+  const g = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+  const given = await g.run("escalate", { callback_phone: "6025550177" }, "tc1");
+  await g.run("escalate", { callback_phone: "6025550166" }, "tc2");
+  assertEquals(await g.run("escalate", { callback_phone: "6025550177" }, "tc1"), given);
+  // and a replayed callback_updated says the number of its own request
+  const updated = await g.run("escalate", { callback_phone: "6025550155" }, "tc3");
+  await g.run("escalate", { callback_phone: "6025550144" }, "tc4");
+  assertEquals(await g.run("escalate", { callback_phone: "6025550155" }, "tc3"), updated);
+  assertEquals(g.telegramCalls().length, 1);
+});

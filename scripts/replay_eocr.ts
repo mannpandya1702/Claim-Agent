@@ -4,14 +4,19 @@
 // Options:
 //   --url <url>       target (default: $SUPABASE_URL/functions/v1/vapi-webhook; a local
 //                     `supabase functions serve` URL works too)
-//   --call-id <id>    replace message.call.id, to replay into a chosen call
-//   --new-id          replace message.call.id with a fresh UUID, so a replay never merges into a real call's row
+//   --call-id <id>    replace the call key (message.call.id; for a chat body, chat.sessionId or chat.id),
+//                     to replay into a chosen call
+//   --new-id          replace the call key with a fresh UUID, so a replay never merges into a real call's row
+//   --allow-side-effects
+//                     also send a body that acts when replayed: tool-calls (runs the tools: alerts,
+//                     emails, identity counters) or a forwarding status-update (pages the team)
 //   --dry-run         print what would be sent and stop
 //
 // The body is sent as VAPI sends it, with the Bearer from .env (VAPI_WEBHOOK_SECRET). Fixtures carry
 // a placeholder org id, so message.call.orgId (and message.chat.orgId) is set to VAPI_ORG_ID first;
-// otherwise the function's org check answers 403. The response status and body are printed; the
-// exit code is 1 for any status of 400 or above. The secret is never printed.
+// otherwise the function's org check answers 403. A chat body stays a chat body (the handler sends
+// no alert for a chat), whatever id it is replayed under. The response status and body are
+// printed; the exit code is 1 for any status of 400 or above. The secret is never printed.
 
 import { loadEnv, need } from "./lib/env.ts";
 
@@ -23,11 +28,12 @@ interface Options {
   url: string | null;
   callId: string | null;
   newId: boolean;
+  allowSideEffects: boolean;
   dryRun: boolean;
 }
 
-const USAGE =
-  "usage: deno task replay <fixture.json> | --capture <id>  [--url <url>] [--call-id <id> | --new-id] [--dry-run]";
+const USAGE = "usage: deno task replay <fixture.json> | --capture <id>  [--url <url>] [--call-id <id> | --new-id] " +
+  "[--allow-side-effects] [--dry-run]";
 
 function isObj(v: unknown): v is Obj {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -39,7 +45,15 @@ function fail(message: string): never {
 }
 
 export function parseArgs(args: string[]): Options {
-  const out: Options = { file: null, capture: null, url: null, callId: null, newId: false, dryRun: false };
+  const out: Options = {
+    file: null,
+    capture: null,
+    url: null,
+    callId: null,
+    newId: false,
+    allowSideEffects: false,
+    dryRun: false,
+  };
   const value = (i: number, flag: string) => {
     const v = args[i + 1];
     if (v === undefined || v.startsWith("--")) fail(`${flag} needs a value\n${USAGE}`);
@@ -54,6 +68,7 @@ export function parseArgs(args: string[]): Options {
     } else if (a === "--url") out.url = value(i++, a);
     else if (a === "--call-id") out.callId = value(i++, a);
     else if (a === "--new-id") out.newId = true;
+    else if (a === "--allow-side-effects") out.allowSideEffects = true;
     else if (a === "--dry-run") out.dryRun = true;
     else if (a === "--help" || a === "-h") {
       console.log(USAGE);
@@ -67,18 +82,37 @@ export function parseArgs(args: string[]): Options {
   return out;
 }
 
-/** The body as it will be sent: org ids set to ours and, when asked, the call id replaced. */
+/** The body as it will be sent: org ids set to ours and, when asked, the call key replaced where
+ *  the handler reads it. A chat body never gains a call object: that would turn it into a call
+ *  envelope, and the handler alerts the team for calls but never for chats. */
 export function prepareBody(body: unknown, p: { orgId: string; callId?: string | null }): { message: Obj } {
   if (!isObj(body) || !isObj(body.message)) throw new Error('not a webhook body: expected {"message": {...}}');
   const message: Obj = structuredClone(body.message);
   if (isObj(message.call)) {
     message.call.orgId = p.orgId;
     if (p.callId) message.call.id = p.callId;
+  } else if (isObj(message.chat)) {
+    if (p.callId) {
+      // the handler keys a chat on chat.sessionId, else chat.id
+      if (typeof message.chat.sessionId === "string" && message.chat.sessionId) message.chat.sessionId = p.callId;
+      else message.chat.id = p.callId;
+    }
   } else if (p.callId) {
     message.call = { id: p.callId, orgId: p.orgId };
   }
   if (isObj(message.chat)) message.chat.orgId = p.orgId;
   return { ...body, message };
+}
+
+/** Why replaying this body would act rather than only record, or null when it is safe to resend. */
+export function sideEffectOf(message: Obj): string | null {
+  if (message.type === "tool-calls") {
+    return "a tool-calls body runs the tools again (alerts, emails, identity counters)";
+  }
+  if (message.type === "status-update" && message.status === "forwarding") {
+    return "a forwarding status-update writes an escalation and pages the team";
+  }
+  return null;
 }
 
 async function readCapture(env: Record<string, string>, id: number): Promise<unknown> {
@@ -119,9 +153,15 @@ async function main() {
 
   const source = opts.capture !== null ? `capture ${opts.capture}` : opts.file;
   console.log(`${source}: ${describe(body.message)} (${payload.length} bytes) -> ${target.origin}${target.pathname}`);
+  const effect = sideEffectOf(body.message);
   if (opts.dryRun) {
-    console.log("dry run: nothing sent");
+    console.log(
+      effect ? `dry run: nothing sent (sending needs --allow-side-effects: ${effect})` : "dry run: nothing sent",
+    );
     return;
+  }
+  if (effect && !opts.allowSideEffects) {
+    fail(`refusing to replay: ${effect}; pass --allow-side-effects to send it anyway`);
   }
 
   const [secret] = need(env, "VAPI_WEBHOOK_SECRET");

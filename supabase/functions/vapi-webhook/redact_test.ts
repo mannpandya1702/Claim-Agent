@@ -44,6 +44,60 @@ Deno.test("redactPII: the PDF shapes, independent of today's date", () => {
   assertEquals(redactPII(untouched), untouched);
 });
 
+Deno.test("redactPII: a two-digit birth year after a month and day, written or spoken", () => {
+  for (
+    const d of [
+      "march 14th 86",
+      "3 14 86",
+      "14 March, 86",
+      "March 14 '86",
+      "march fourteenth eighty six",
+      "march fourteenth eighty-six",
+      "the 2nd of May 99",
+      "january first oh five",
+    ]
+  ) {
+    assertEquals(redactPIIAsOf(`my birthday is ${d}`, 2026), "my birthday is [date of birth]", d);
+  }
+  // a recent two-digit year, money and a lone month-and-day stay readable
+  for (const t of ["June 1, 22", "May 5, 25,000 dollars", "May 5, 25.50", "October 8 at 10", "on October eighth"]) {
+    assertEquals(redactPIIAsOf(t, 2026), t, t);
+  }
+  // a DOB said right before a phone number: both go, and no digits of either survive
+  assertEquals(redactPIIAsOf("3 14 86 602 555 0101", 2026), "[date of birth] [phone ending 0101]");
+});
+
+Deno.test("redactPII: written email addresses become [email], before any digit in one is read", () => {
+  assertEquals(redactPII("my email is tobias.reyes@example.com."), "my email is [email].");
+  assertEquals(redactPII("Email: First.Last+tag@sub.example.co.uk, thanks"), "Email: [email], thanks");
+  assertEquals(redactPII("write to 6025550101@vtext.com please"), "write to [email] please");
+  assertEquals(
+    redactPII("call 602-555-0101 or email me at a.b@example.org"),
+    "call [phone ending 0101] or email me at [email]",
+  );
+  // not an address, and our spoken claims address is words, not an address
+  for (const t of ["a@b", "x@y.c", "claims docs at observeinsurance dot com", "[email]"]) {
+    assertEquals(redactPII(t), t, t);
+  }
+});
+
+Deno.test("asksForSensitive: the model's own wording of a DOB question counts", () => {
+  for (
+    const q of [
+      "When were you born?",
+      "Could you confirm the date you were born?",
+      "And what year?",
+      "Which year was that?",
+      "What's your year of birth?",
+    ]
+  ) {
+    assert(asksForSensitive(q), q);
+  }
+  for (const q of ["I'll escalate this to our team.", "That sounds like a stubborn problem."]) {
+    assertFalse(asksForSensitive(q), q);
+  }
+});
+
 Deno.test("redactPII: null and undefined pass through as null", () => {
   assertEquals(redactPII(null), null);
   assertEquals(redactPII(undefined), null);
@@ -178,6 +232,11 @@ Deno.test("jsonLogger: strings are redacted and capped at 300 characters", () =>
   const error = out.error as string;
   assertEquals(error.length, 300);
   assertMatch(error, /^duplicate key \(phone_e164\)=\(\[phone ending 0101\]\) born \[date of birth\] x+$/);
+});
+
+Deno.test("jsonLogger: an email address inside a string value is redacted, not only an email key", () => {
+  const out = captureLog({ error: "resend 422: invalid recipient owner@example.com" });
+  assertEquals(out.error, "resend 422: invalid recipient [email]");
 });
 
 Deno.test("jsonLogger: Error values log as name and message", () => {
