@@ -1,0 +1,326 @@
+{
+  "phones": [
+    {
+      "input": "602-555-0101",
+      "expected": "+16025550101",
+      "note": "dashed"
+    },
+    {
+      "input": "(602) 555 0101",
+      "expected": "+16025550101",
+      "note": "parenthesised area code"
+    },
+    {
+      "input": "+1 602 555 0101",
+      "expected": "+16025550101",
+      "note": "spaced E.164"
+    },
+    {
+      "input": "+16025550101",
+      "expected": "+16025550101",
+      "note": "E.164"
+    },
+    {
+      "input": "16025550101",
+      "expected": "+16025550101",
+      "note": "11 digits with leading 1"
+    },
+    {
+      "input": "6025550101",
+      "expected": "+16025550101",
+      "note": "10 digits"
+    },
+    {
+      "input": "602.555.0199",
+      "expected": "+16025550199",
+      "note": "dotted; matches nobody in the seed"
+    },
+    {
+      "input": " 602 555 0102 ",
+      "expected": "+16025550102",
+      "note": "surrounding whitespace"
+    },
+    {
+      "input": 6025550101,
+      "expected": "+16025550101",
+      "note": "JSON number"
+    },
+    {
+      "input": "602555010",
+      "expected": null,
+      "note": "9 digits"
+    },
+    {
+      "input": "60255501011",
+      "expected": null,
+      "note": "11 digits not starting with 1"
+    },
+    {
+      "input": "26025550101",
+      "expected": null,
+      "note": "11 digits not starting with 1"
+    },
+    {
+      "input": "116025550101",
+      "expected": null,
+      "note": "12 digits"
+    },
+    {
+      "input": "1111111111",
+      "expected": null,
+      "note": "all same digit"
+    },
+    {
+      "input": "2222222222",
+      "expected": null,
+      "note": "all same digit"
+    },
+    {
+      "input": "0125550101",
+      "expected": null,
+      "note": "area code starts with 0"
+    },
+    {
+      "input": "1025550101",
+      "expected": null,
+      "note": "area code starts with 1"
+    },
+    {
+      "input": "6020550101",
+      "expected": null,
+      "note": "exchange starts with 0"
+    },
+    {
+      "input": "6021550101",
+      "expected": null,
+      "note": "exchange starts with 1"
+    },
+    {
+      "input": "six zero two five five five zero one zero one",
+      "expected": null,
+      "note": "words, not digits"
+    },
+    {
+      "input": "anonymous",
+      "expected": null,
+      "note": "caller-id placeholder"
+    },
+    {
+      "input": "",
+      "expected": null,
+      "note": "empty"
+    },
+    {
+      "input": null,
+      "expected": null,
+      "note": "null"
+    },
+    {
+      "input": 6025550101.5,
+      "expected": null,
+      "note": "non-integer number"
+    }
+  ],
+  "dobs": [
+    {
+      "month": 3,
+      "day": 14,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": true,
+      "note": "seed DOB"
+    },
+    {
+      "month": "3",
+      "day": "14",
+      "year": "1986",
+      "refYear": 2026,
+      "valid": true,
+      "note": "numeric strings"
+    },
+    {
+      "month": " 03 ",
+      "day": "14",
+      "year": "1986",
+      "refYear": 2026,
+      "valid": true,
+      "note": "padded numeric string"
+    },
+    {
+      "month": 1,
+      "day": 31,
+      "year": 1965,
+      "refYear": 2026,
+      "valid": true,
+      "note": "month end"
+    },
+    {
+      "month": 2,
+      "day": 29,
+      "year": 1988,
+      "refYear": 2026,
+      "valid": true,
+      "note": "leap day in a leap year"
+    },
+    {
+      "month": 2,
+      "day": 29,
+      "year": 2000,
+      "refYear": 2026,
+      "valid": true,
+      "note": "leap day, divisible by 400"
+    },
+    {
+      "month": 12,
+      "day": 31,
+      "year": 2026,
+      "refYear": 2026,
+      "valid": true,
+      "note": "year equal to refYear"
+    },
+    {
+      "month": 1,
+      "day": 1,
+      "year": 1900,
+      "refYear": 2026,
+      "valid": true,
+      "note": "lower year bound"
+    },
+    {
+      "month": 13,
+      "day": 1,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": false,
+      "note": "month 13"
+    },
+    {
+      "month": 0,
+      "day": 14,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": false,
+      "note": "month 0"
+    },
+    {
+      "month": 2,
+      "day": 30,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": false,
+      "note": "Feb 30"
+    },
+    {
+      "month": 2,
+      "day": 29,
+      "year": 1987,
+      "refYear": 2026,
+      "valid": false,
+      "note": "leap day in a common year"
+    },
+    {
+      "month": 2,
+      "day": 29,
+      "year": 1900,
+      "refYear": 2026,
+      "valid": false,
+      "note": "1900 is not a leap year"
+    },
+    {
+      "month": 4,
+      "day": 31,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": false,
+      "note": "April 31"
+    },
+    {
+      "month": 3,
+      "day": 0,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": false,
+      "note": "day 0"
+    },
+    {
+      "month": 3,
+      "day": 32,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": false,
+      "note": "day 32"
+    },
+    {
+      "month": 3,
+      "day": 14,
+      "year": 1899,
+      "refYear": 2026,
+      "valid": false,
+      "note": "year before 1900"
+    },
+    {
+      "month": 3,
+      "day": 14,
+      "year": 2027,
+      "refYear": 2026,
+      "valid": false,
+      "note": "year after refYear"
+    },
+    {
+      "month": 3,
+      "day": 14,
+      "year": 86,
+      "refYear": 2026,
+      "valid": false,
+      "note": "two-digit year"
+    },
+    {
+      "month": 3.5,
+      "day": 14,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": false,
+      "note": "non-integer month"
+    },
+    {
+      "month": "March",
+      "day": 14,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": false,
+      "note": "month name, not a number"
+    },
+    {
+      "month": "3/14",
+      "day": 14,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": false,
+      "note": "formatted text"
+    },
+    {
+      "month": "-3",
+      "day": 14,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": false,
+      "note": "signed string"
+    },
+    {
+      "month": "",
+      "day": 14,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": false,
+      "note": "empty string"
+    },
+    {
+      "month": null,
+      "day": 14,
+      "year": 1986,
+      "refYear": 2026,
+      "valid": false,
+      "note": "missing month"
+    }
+  ]
+}
