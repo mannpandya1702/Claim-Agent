@@ -77,23 +77,23 @@
     },
     {
       "input": "0125550101",
-      "expected": null,
-      "note": "area code starts with 0"
+      "expected": "+10125550101",
+      "note": "area code starts with 0; still a lookup key (the database answers not found)"
     },
     {
       "input": "1025550101",
-      "expected": null,
-      "note": "area code starts with 1"
+      "expected": "+11025550101",
+      "note": "area code starts with 1; still a lookup key (the database answers not found)"
     },
     {
       "input": "6020550101",
-      "expected": null,
-      "note": "exchange starts with 0"
+      "expected": "+16020550101",
+      "note": "exchange starts with 0; still a lookup key (the database answers not found)"
     },
     {
       "input": "6021550101",
-      "expected": null,
-      "note": "exchange starts with 1"
+      "expected": "+16021550101",
+      "note": "exchange starts with 1; still a lookup key (the database answers not found)"
     },
     {
       "input": "six zero two five five five zero one zero one",
@@ -119,6 +119,11 @@
       "input": 6025550101.5,
       "expected": null,
       "note": "non-integer number"
+    },
+    {
+      "input": "9601550123",
+      "expected": "+19601550123",
+      "note": "ten digits as a caller misheard them (exchange starts with 1): looked up, not rejected"
     }
   ],
   "dobs": [
@@ -321,6 +326,38 @@
       "refYear": 2026,
       "valid": false,
       "note": "missing month"
+    }
+  ],
+  "callbacks": [
+    {
+      "input": "0125550101",
+      "expected": null,
+      "note": "area code starts with 0 (not dialable)"
+    },
+    {
+      "input": "1025550101",
+      "expected": null,
+      "note": "area code starts with 1 (not dialable)"
+    },
+    {
+      "input": "6020550101",
+      "expected": null,
+      "note": "exchange starts with 0 (not dialable)"
+    },
+    {
+      "input": "6021550101",
+      "expected": null,
+      "note": "exchange starts with 1 (not dialable)"
+    },
+    {
+      "input": "602-555-0101",
+      "expected": "+16025550101",
+      "note": "dialable"
+    },
+    {
+      "input": "9601550123",
+      "expected": null,
+      "note": "exchange starts with 1: not dialable in NANP"
     }
   ]
 }

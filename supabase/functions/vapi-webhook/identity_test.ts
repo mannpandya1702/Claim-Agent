@@ -6,6 +6,7 @@ import {
   type IdentityState,
   initialIdentity,
   lastFour,
+  normaliseNanp,
   normalisePhone,
   parseDobParts,
   step,
@@ -15,6 +16,7 @@ import { sentenceFor } from "./speak.ts";
 
 interface Vectors {
   phones: { input: unknown; expected: string | null; note: string }[];
+  callbacks: { input: unknown; expected: string | null; note: string }[];
   dobs: { month: unknown; day: unknown; year: unknown; refYear: number; valid: boolean; note: string }[];
 }
 const vectors: Vectors = JSON.parse(
@@ -245,4 +247,16 @@ Deno.test("system_error is distinct from not_found", () => {
   assertNotEquals(sentenceFor("system_error"), sentenceFor("not_found"));
   assertNotEquals(sentenceFor("system_error"), sentenceFor("not_found_final"));
   assert(!/find/i.test(sentenceFor("system_error")));
+});
+
+Deno.test("normaliseNanp and usableCallbackNumber: a callback must be dialable, a lookup key need not be", () => {
+  assert(vectors.callbacks.length > 0);
+  for (const v of vectors.callbacks) {
+    assertEquals(normaliseNanp(v.input), v.expected, v.note);
+    assertEquals(usableCallbackNumber(v.input, []), v.expected, v.note);
+  }
+  // Ten digits that break the numbering plan (a misheard number) are still looked up (the database
+  // answers not found and the caller can correct a digit), but never become a callback target.
+  assertEquals(normalisePhone("9601550123"), "+19601550123");
+  assertEquals(usableCallbackNumber("9601550123", []), null);
 });

@@ -16,10 +16,22 @@ export function normalisePhone(raw: unknown): string | null {
   if (digits.length === 11 && digits[0] === "1") digits = digits.slice(1);
   if (digits.length !== 10) return null;
   if (/^(\d)\1{9}$/.test(digits)) return null;
-  // NANP: neither the area code nor the exchange may start with 0 or 1. 555-01xx stays valid on
-  // purpose, since the demo data lives in the fiction range.
-  if (digits[0] === "0" || digits[0] === "1" || digits[3] === "0" || digits[3] === "1") return null;
+  // No numbering-plan rule here: this is a lookup key, and any ten digits the caller said deserve
+  // an answer from the database ("I'm not finding an account under ..."), which lets them correct
+  // a digit. Rejecting a full ten digits as unreadable told a real caller "I need the full
+  // ten-digit number" after they had said ten digits. Dialability is checked only for callbacks.
   return `+1${digits}`;
+}
+
+/** A number the claims team can dial back: normalisePhone plus the NANP rule (neither the area
+ *  code nor the exchange may start with 0 or 1). 555-01xx stays valid on purpose, since the demo
+ *  data lives in the fiction range. */
+export function normaliseNanp(raw: unknown): string | null {
+  const e164 = normalisePhone(raw);
+  if (!e164) return null;
+  const d = e164.slice(2);
+  if (d[0] === "0" || d[0] === "1" || d[3] === "0" || d[3] === "1") return null;
+  return e164;
 }
 
 function toInt(v: unknown): number | null {
@@ -53,7 +65,7 @@ export function parseDobParts(
 /** A usable callback number: normalisePhone + junk filter (Anonymous/unknown/restricted, repeated digits, any of ownNumbers). */
 export function usableCallbackNumber(raw: unknown, ownNumbers: string[]): string | null {
   if (typeof raw === "string" && JUNK_CALLER_ID.test(raw.trim())) return null;
-  const e164 = normalisePhone(raw);
+  const e164 = normaliseNanp(raw);
   if (!e164) return null;
   // Our own line must never become a callback target, however the env list was written.
   const own = (Array.isArray(ownNumbers) ? ownNumbers : []).map(normalisePhone);
