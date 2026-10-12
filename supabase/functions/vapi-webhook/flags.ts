@@ -51,18 +51,32 @@ const MARKUP_RE = new RegExp(
   "i",
 );
 
-/** Assistant speech in order. VAPI writes role "bot" with `message`; OpenAI-shaped history uses
- *  role "assistant" with `content`. Typographic apostrophes are folded to ASCII before matching. */
+/** Assistant speech in order, one entry per assistant turn. VAPI writes role "bot" with `message`;
+ *  OpenAI-shaped history uses role "assistant" with `content`. On voice calls VAPI splits one
+ *  spoken sentence into several bot messages around the tool-call entries ("...I can explain how
+ *  to" | tool call | "start a new claim or have a representative call you back."), so fragments
+ *  are joined until the caller speaks; judged alone, the second half of an offer reads as a
+ *  promise. Typographic apostrophes are folded to ASCII before matching. */
 function assistantLines(messages: unknown): string[] {
   if (!Array.isArray(messages)) return [];
   const lines: string[] = [];
+  let turn: string[] = [];
+  const flush = () => {
+    if (turn.length) lines.push(turn.join(" ").replace(/[\u2018\u2019\u02bc]/g, "'"));
+    turn = [];
+  };
   for (const m of messages) {
     if (!m || typeof m !== "object") continue;
     const { role, message, content } = m as Record<string, unknown>;
+    if (role === "user") {
+      flush();
+      continue;
+    }
     if (role !== "bot" && role !== "assistant") continue;
     const text = typeof message === "string" ? message : typeof content === "string" ? content : "";
-    if (text.trim()) lines.push(text.replace(/[\u2018\u2019\u02bc]/g, "'"));
+    if (text.trim()) turn.push(text.trim());
   }
+  flush();
   return lines;
 }
 

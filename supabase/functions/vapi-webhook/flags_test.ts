@@ -372,3 +372,29 @@ Deno.test("computeFlags: empty and malformed input yields no flags and never thr
     [],
   );
 });
+
+Deno.test("promised_callback: an offer split around a tool call on a voice call is still an offer", () => {
+  // Shape of a real voice artifact: VAPI split the not_found_final sentence into two bot messages
+  // around the tool-call entry. Judged alone, the second fragment would read as a promise.
+  const messages = [
+    { role: "user", message: "Yes. That's right." },
+    { role: "bot", message: "1 moment while I look that up. I'm sorry, I can't find an account for that number. I can explain how to" },
+    { role: "tool_calls", toolCalls: [{ function: { name: "lookup_customer" } }] },
+    { role: "bot", message: "start a new claim or have a representative call you back. Which would you like?" },
+    { role: "user", message: "Okay. No. Thanks. Goodbye." },
+    { role: "tool_call_result", name: "lookup_customer", result: '{"code":"not_found_final"}' },
+  ];
+  assertEquals(computeFlags({ messages, attempts: [], escalations: [], emails: [] }), []);
+});
+
+Deno.test("promised_callback: a real promise split across fragments of one turn still fires", () => {
+  const messages = [
+    { role: "user", message: "Can someone call me?" },
+    { role: "bot", message: "Sure. A representative" },
+    { role: "tool_calls", toolCalls: [{ function: { name: "lookup_customer" } }] },
+    { role: "bot", message: "will call you back tomorrow." },
+  ];
+  assertEquals(computeFlags({ messages, attempts: [], escalations: [], emails: [] }), [
+    "promised_callback_without_escalation",
+  ]);
+});
