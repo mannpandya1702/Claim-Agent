@@ -1,5 +1,5 @@
 // The fake must behave like 0001_init.sql, or every test built on it proves the wrong thing. These
-// cases walk the same sequences scripts/db_test.ts runs against the live database.
+// cases walk the same sequences scripts/db_suite.ts runs against the live database.
 
 import { assert, assertEquals, assertFalse, assertRejects } from "@std/assert";
 import { createFakeStore, demoSeed } from "./fake_store.ts";
@@ -636,7 +636,7 @@ Deno.test("demoSeed mirrors 0002_seed.sql row for row", () => {
 
 // ---------------------------------------------------------------------------------------------
 // Outbox (0005_outbox.sql), job runs and the scheduled jobs' reads (0001, 0004). The same
-// sequences run against the live database in scripts/db_test.ts.
+// sequences run against the live database in scripts/db_suite.ts.
 // ---------------------------------------------------------------------------------------------
 const DAY = 24 * 60 * 60 * 1000;
 const isoAgo = (ms: number) => new Date(Date.now() - ms).toISOString();

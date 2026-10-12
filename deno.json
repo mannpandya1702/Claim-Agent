@@ -4,7 +4,7 @@
     "test": "deno test --allow-env --allow-net --allow-read supabase/functions/vapi-webhook/ scripts/",
     "lint": "deno lint supabase/functions scripts",
     "db": "deno run --allow-env --allow-net --allow-read scripts/db.ts",
-    "db:test": "deno run --allow-env --allow-net --allow-read scripts/db_test.ts",
+    "db:test": "deno run --allow-env --allow-net --allow-read scripts/db_suite.ts",
     "render": "deno run --allow-read --allow-write scripts/render.ts",
     "sync:check": "deno run --allow-env --allow-net --allow-read --allow-write scripts/vapi_sync.ts check",
     "sync:apply": "deno run --allow-env --allow-net --allow-read --allow-write scripts/vapi_sync.ts apply",
