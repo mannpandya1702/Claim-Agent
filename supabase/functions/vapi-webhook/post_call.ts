@@ -1,13 +1,16 @@
 // Post-call write-back (integration #2) and the live call view. Three VAPI server messages feed
 // call_interactions and transcript_lines:
 //   status-update      in-progress -> stub row; forwarding (phone transfer) -> escalation + alert
-//   transcript (final) -> one redacted, masked live line; the first line also writes the stub row
+//   transcript (final) -> one redacted, masked live line; the first line also writes the stub row,
+//                         and a line arriving after the call was closed and cleared is dropped
 //   end-of-call-report -> the full row, built from server facts first and VAPI's words second
 // Every write is an idempotent upsert or an on-conflict-do-nothing insert, because VAPI redelivers
 // on 5xx and partial reports can arrive before full ones. Stored text is redacted, the caller's
 // answer to a date-of-birth or phone question is masked whole, and tool arguments never leave the
-// envelope.
+// envelope. A row that has ended is queued for the Airtable call log (outbox.ts) by whichever
+// path wrote it: the report, the backfill that improves it, or the reaper.
 
+import { airtableConfigured } from "./airtable.ts";
 import { alertSinks, type EscalationAlert, sendAlert } from "./alert.ts";
 import { callbackRequestEmail, maskEmail, sendEmail } from "./email.ts";
 import {
@@ -23,6 +26,7 @@ import {
 } from "./enums.ts";
 import { computeFlags } from "./flags.ts";
 import { callerIdNumber } from "./identity.ts";
+import { deliverSoon, enqueueInteraction } from "./outbox.ts";
 import type { CallFacts } from "./post_call_facts.ts";
 import { asksForSensitive, MASKED_ANSWER, redactDeep, redactPII } from "./redact.ts";
 import type { StoreExtras } from "./store.ts";
@@ -553,23 +557,32 @@ function withFetchedCall(message: VapiMessage, fetched: Obj): VapiMessage {
   };
 }
 
-async function fetchCall(deps: Deps, callKey: string, privateKey: string): Promise<Obj | null> {
+/** GET /call/{id}: the call, or why not. gone is VAPI's 404 (it holds no call under this id); any
+ *  other failure (429, 5xx, a timeout, the network, an unreadable body, a rejected key) may pass. */
+type FetchedCall = { ok: true; call: Obj } | { ok: false; gone: boolean };
+
+async function fetchCall(
+  deps: Deps,
+  callKey: string,
+  privateKey: string,
+  timeoutMs = BACKFILL_FETCH_TIMEOUT_MS,
+): Promise<FetchedCall> {
   try {
     const res = await deps.fetch(`${VAPI_API}/call/${encodeURIComponent(callKey)}`, {
       method: "GET",
       headers: { Authorization: `Bearer ${privateKey}` },
-      signal: AbortSignal.timeout(BACKFILL_FETCH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) {
       await res.body?.cancel();
       safeLog(deps, { event: "backfill_fetch_failed", call_key: callKey, status: res.status });
-      return null;
+      return { ok: false, gone: res.status === 404 };
     }
     const body = await res.json();
-    return isObj(body) ? body : null;
+    return isObj(body) ? { ok: true, call: body } : { ok: false, gone: false };
   } catch (e) {
     safeLog(deps, { event: "backfill_fetch_failed", call_key: callKey, error: errorText(e) });
-    return null;
+    return { ok: false, gone: false };
   }
 }
 
@@ -580,6 +593,12 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 async function storedAnalysisStatus(store: Store, callKey: string): Promise<string | null> {
   const read = (store as Store & Partial<StoreExtras>).storedAnalysisStatus;
   return typeof read === "function" ? await read.call(store, callKey) : null;
+}
+
+/** Whether the call's row has ended, or false for a store that cannot say. A read error throws. */
+async function interactionEnded(store: Store, callKey: string): Promise<boolean> {
+  const read = (store as Store & Partial<StoreExtras>).interactionEnded;
+  return typeof read === "function" ? await read.call(store, callKey) : false;
 }
 
 /** Off the request path: re-read the call until the summary is there, then write it. Only reads
@@ -608,14 +627,16 @@ async function backfill(
     }
     await deps.store.upsertInteraction({ ...sourced(row), analysis_status: result });
     safeLog(deps, { event: "backfill", call_key: callKey, result, attempts });
+    // Re-arms the outbox row, so the call log gets the improved record on the next delivery.
+    if (row.ended_at) await enqueueInteraction(deps, callKey, "backfill");
   };
   try {
     for (const delay of delays) {
       await sleep(delay);
       attempts++;
       const fetched = await fetchCall(deps, callKey, privateKey);
-      if (!fetched) continue;
-      best = buildInteractionRow(withFetchedCall(message, fetched), facts, own);
+      if (!fetched.ok) continue;
+      best = buildInteractionRow(withFetchedCall(message, fetched.call), facts, own);
       // The summary decides; a sentiment the analysis never produced stays NULL rather than
       // holding the summary back as 'missing'.
       if (best.summary) return await write(best, "backfilled");
@@ -627,13 +648,21 @@ async function backfill(
   }
 }
 
-async function clearLiveLines(deps: Deps, callKey: string): Promise<void> {
+/** Removes the call's live lines once the call is closed. Never throws (a failure is logged). */
+export async function clearLiveLines(deps: Deps, callKey: string): Promise<void> {
   try {
-    // The live view switches to the stored messages; the reaper removes anything left behind.
+    // The live view switches to the stored messages; the reaper's 7-day sweep removes anything left.
     await deps.store.deleteTranscriptLines(callKey);
   } catch (e) {
     safeLog(deps, { event: "post_call_error", call_key: callKey, step: "deleteTranscriptLines", error: errorText(e) });
   }
+}
+
+/** A completed row goes to the call log: queued in this request, then one short delivery try off
+ *  the request path. Neither can fail the request; the every-minute outbox job retries. */
+async function queueForCallLog(deps: Deps, callKey: string): Promise<void> {
+  const queued = await enqueueInteraction(deps, callKey, "end-of-call-report");
+  if (queued && airtableConfigured(deps.env)) keepAlive(deps, deliverSoon(deps, callKey));
 }
 
 export async function onEndOfCallReport(
@@ -676,12 +705,62 @@ export async function onEndOfCallReport(
 
   await store.upsertInteraction(row);
   await clearLiveLines(deps, callKey);
+  // A report without an end time is not a finished call yet; the reaper closes it if nothing else does.
+  if (row.ended_at) await queueForCallLog(deps, callKey);
 
   if (runBackfill) {
     const delays = options.backfillDelaysMs ?? BACKFILL_DELAYS_MS;
     keepAlive(deps, backfill(deps, message, facts, own, privateKey, delays));
   }
   return { status: 200, body: {} };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Recovery of a call whose report never came (the reaper, jobs.ts).
+// ---------------------------------------------------------------------------------------------
+// not_found: VAPI holds no call under the id. unavailable: VAPI could not answer this time.
+export type RecoverResult = "recovered" | "superseded" | "not_ended" | "not_found" | "unavailable";
+
+/** The fetched VAPI call shaped as the end-of-call-report it stands in for: the call object
+ *  carries the same analysis, artifact, timestamps, cost and customer fields a report does. */
+function reportFromCall(fetched: Obj, callKey: string): VapiMessage {
+  return { ...fetched, type: "end-of-call-report", call: { ...fetched, id: callKey } };
+}
+
+/** GET /call/{id} for a call still open in the database and, when VAPI says it ended, the row the
+ *  report would have written, built by the same code from the same server facts. analysis_status
+ *  is backfilled with a summary, else missing; a sentiment found is the backfill's. Only reads VAPI
+ *  and writes call_interactions, the live lines and the outbox; it never alerts anyone. A store
+ *  error throws; VAPI's 404 is "not_found" and any other VAPI failure "unavailable" (the caller
+ *  decides what happens next). */
+export async function recoverFromCall(
+  deps: Deps,
+  callKey: string,
+  privateKey: string,
+  timeoutMs = BACKFILL_FETCH_TIMEOUT_MS,
+): Promise<RecoverResult> {
+  const response = await fetchCall(deps, callKey, privateKey, timeoutMs);
+  if (!response.ok) return response.gone ? "not_found" : "unavailable";
+  const fetched = response.call;
+  const status = fetched.status;
+  if (isoOrNull(fetched.endedAt) === null || (status !== undefined && status !== "ended")) return "not_ended";
+
+  const { store } = deps;
+  const facts = await readCallFacts(store, callKey);
+  const row = buildInteractionRow(reportFromCall(fetched, callKey), facts, ownNumbers(deps.env));
+  // The report can land while this ran; the merge would let this row replace its analysis.
+  if (COMPLETE_ANALYSIS.has(await storedAnalysisStatus(store, callKey) ?? "")) return "superseded";
+  await store.upsertInteraction({
+    ...row,
+    sentiment_source: row.sentiment ? "backfill" : null,
+    analysis_status: row.summary ? "backfilled" : "missing",
+  });
+  safeLog(deps, { event: "recovered", call_key: callKey, summary: row.summary !== null });
+  // The live lines give way only to stored messages: without them they are the dashboard's only
+  // transcript of the call (its fallback view), kept until the 7-day sweep.
+  if (Array.isArray(row.messages) && row.messages.length > 0) await clearLiveLines(deps, callKey);
+  await enqueueInteraction(deps, callKey, "reaper");
+  return "recovered";
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -708,9 +787,26 @@ export async function onTranscript(message: VapiMessage, deps: Deps): Promise<vo
     unknownContext = true;
     safeLog(deps, { event: "post_call_error", call_key: callKey, step: "lastAssistantLine", error: errorText(e) });
   }
+  if (lastAssistant === null && !unknownContext) {
+    // No assistant line stored: the start of the call, or a line VAPI delivered after the report
+    // closed the call and cleared its lines, when the question this answers is gone with them.
+    // The record already holds the conversation, so a late line is dropped rather than stored
+    // without the masking its question would have given it.
+    let ended = false;
+    try {
+      ended = await interactionEnded(store, callKey);
+    } catch (e) {
+      unknownContext = true;
+      safeLog(deps, { event: "post_call_error", call_key: callKey, step: "interactionEnded", error: errorText(e) });
+    }
+    if (ended) {
+      safeLog(deps, { event: "transcript_dropped", call_key: callKey, reason: "call_ended" });
+      return;
+    }
+  }
   if (lastAssistant === null) {
-    // No assistant line stored yet: the start of the call. The stub row lets the dashboard show
-    // it even on web calls, where status-update never says in-progress.
+    // The start of the call: the stub row lets the dashboard show it even on web calls, where
+    // status-update never says in-progress.
     try {
       await store.ensureInteraction(stubRow(message, deps, callKey));
     } catch (e) {

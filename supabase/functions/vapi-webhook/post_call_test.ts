@@ -7,6 +7,7 @@ import { assert, assertEquals, assertFalse, assertNotMatch, assertRejects, asser
 import type { Outcome } from "./enums.ts";
 import { createFakeStore, demoSeed, type FakeStore } from "./fake_store.ts";
 import { handle } from "./handler.ts";
+import { deliverOutbox } from "./outbox.ts";
 import {
   BACKFILL_DELAYS_MS,
   buildInteractionRow,
@@ -20,6 +21,7 @@ import {
 } from "./post_call.ts";
 import type { CallFacts } from "./post_call_facts.ts";
 import { MASKED_ANSWER, redactPII } from "./redact.ts";
+import { OUTBOX_LEASE_MS } from "./store_rules.ts";
 import type { AttemptRow, Customer, Deps, Env, EscalationRow, Session, VapiMessage } from "./types.ts";
 
 const ORG = "4f1c2d3e-0000-4000-8000-00000000a0a0";
@@ -153,6 +155,7 @@ function harness(opts: {
   vapi?: Responder;
   telegram?: Responder;
   resend?: Responder;
+  airtable?: Responder;
 } = {}) {
   const store = opts.store ?? createFakeStore();
   const calls: { url: string; init: RequestInit }[] = [];
@@ -169,6 +172,9 @@ function harness(opts: {
     }
     if (url === "https://api.resend.com/emails") {
       return await (opts.resend ?? (() => json({ id: "re_test_1" })))(url, init ?? {});
+    }
+    if (url.startsWith("https://api.airtable.com/")) {
+      return await (opts.airtable ?? (() => json({ records: [{ id: "rec_test_1" }] })))(url, init ?? {});
     }
     throw new Error(`unexpected fetch to ${url}`);
   }) as typeof fetch;
@@ -1202,6 +1208,162 @@ Deno.test("eocr through the handler: Bearer, org check, 200 {} and the stored ro
 });
 
 // ---------------------------------------------------------------------------------------------
+// The call log: a row that has ended is queued for Airtable and tried once off the request path.
+// ---------------------------------------------------------------------------------------------
+const AIRTABLE_ENV: Partial<Env> = { AIRTABLE_TOKEN: "pat_post_call_test", AIRTABLE_BASE_ID: "appPOSTCALL" };
+
+function queuedRow(store: FakeStore, callKey: string) {
+  const rows = store.tables.outbox_events.filter((o) => o.ref_id === callKey);
+  assert(rows.length <= 1, "one outbox row per call");
+  return rows[0];
+}
+
+Deno.test("call log: a completed report is queued in the request and the fast path delivers it in the background", async () => {
+  const { store, deps, calls, background, settle } = harness({
+    env: AIRTABLE_ENV,
+    airtable: () => json({ records: [{ id: "recFULL" }], createdRecords: ["recFULL"] }),
+  });
+  await walkVerified(store);
+  const out = await onEndOfCallReport(fixture("full"), deps, { backfillDelaysMs: ZEROS });
+  assertEquals(out, { status: 200, body: {} });
+  const queued = queuedRow(store, FULL_ID);
+  assertEquals([queued.kind, queued.destination], ["interaction.completed", "airtable"]);
+  assertEquals(background.length, 1, "delivery runs through waitUntil, never on the request path");
+
+  await settle();
+  assertEquals(calls.map((c) => c.url), ["https://api.airtable.com/v0/appPOSTCALL/Call%20Log"]);
+  const fields = JSON.parse(String(calls[0].init.body)).records[0].fields;
+  assertEquals([fields["Call ID"], fields["Caller Name"], fields["Outcome"]], [FULL_ID, "Tobias Halvorsen", "resolved"]);
+  assertEquals(fields["Analysis Status"], "ok");
+  assertFalse(JSON.stringify(fields).includes("6025550101"), "the caller's number never crosses whole");
+  assertEquals([queued.attempts, queued.external_id, queued.last_error], [1, "recFULL", null]);
+  assert(queued.delivered_at);
+});
+
+Deno.test("call log: through the handler a completed report answers 200 and is delivered after the response", async () => {
+  const { store, deps, calls, settle } = harness({ env: AIRTABLE_ENV });
+  await walkVerified(store);
+  const res = await handle(
+    new Request("https://example.supabase.co/functions/v1/vapi-webhook", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body("full")),
+    }),
+    deps,
+  );
+  assertEquals([res.status, await res.json()], [200, {}]);
+  await settle();
+  assertEquals(calls.length, 1);
+  assert(queuedRow(store, FULL_ID).delivered_at);
+});
+
+Deno.test("call log: stubs, live lines, a report without an end time and an ignored partial queue nothing", async () => {
+  const { store, deps, calls, background, settle } = harness({ env: AIRTABLE_ENV });
+  await onStatusUpdate(statusUpdate("in-progress"), deps);
+  await onTranscript(liveLine("assistant", "Thanks for calling Observe Insurance claims."), deps);
+  assert(store.tables.call_interactions.length > 0, "the stub rows were written");
+  const noEnd = fixture("partial");
+  delete noEnd.endedAt;
+  await onEndOfCallReport(noEnd, deps, { backfillDelaysMs: ZEROS });
+  assertEquals(interaction(store, FULL_ID).ended_at, null);
+  assertEquals(store.tables.outbox_events.length, 0);
+  assertEquals([background.length, calls.length], [0, 0]);
+
+  // the full report queues the call once; a partial that arrives after it is ignored and re-arms nothing
+  await walkVerified(store);
+  await onEndOfCallReport(fixture("full"), deps, { backfillDelaysMs: ZEROS });
+  await settle();
+  const before = structuredClone(queuedRow(store, FULL_ID));
+  assertEquals([before.attempts, before.external_id], [1, "rec_test_1"]);
+  await onEndOfCallReport(fixture("partial"), deps, { backfillDelaysMs: ZEROS });
+  assertEquals(queuedRow(store, FULL_ID), before);
+  assertEquals([background.length, calls.length], [0, 1]);
+});
+
+Deno.test("call log: the fast path delivers only the call's own row; an older backlog row is left to the job", async () => {
+  const { store, deps, calls, settle, logs } = harness({ env: AIRTABLE_ENV });
+  await store.upsertInteraction({ vapi_call_id: LIVE_ID, ended_at: "2026-10-12T14:00:00Z", outcome: "resolved" });
+  await store.enqueueOutbox("interaction.completed", LIVE_ID); // waiting since an Airtable outage
+  await walkVerified(store);
+  await onEndOfCallReport(fixture("full"), deps, { backfillDelaysMs: ZEROS });
+  await settle();
+  assertEquals(calls.map((c) => JSON.parse(String(c.init.body)).records[0].fields["Call ID"]), [FULL_ID]);
+  assert(queuedRow(store, FULL_ID).delivered_at);
+  assertEquals([queuedRow(store, LIVE_ID).attempts, queuedRow(store, LIVE_ID).delivered_at], [0, null]);
+  assert(logs.some((l) => l.event === "outbox_fast_path" && l.call_key === FULL_ID && l.delivered === 1));
+});
+
+Deno.test("call log: a failed enqueue is logged and the report still answers 200 with the row written", async () => {
+  const { store, deps, background, logs } = harness({ env: AIRTABLE_ENV });
+  await walkVerified(store);
+  store.failNext("enqueueOutbox");
+  const out = await onEndOfCallReport(fixture("full"), deps, { backfillDelaysMs: ZEROS });
+  assertEquals(out, { status: 200, body: {} });
+  assertEquals(interaction(store, FULL_ID).analysis_status, "ok");
+  assertEquals(store.tables.outbox_events.length, 0);
+  assertEquals(background.length, 0, "nothing queued, so no fast path");
+  const failed = logs.find((l) => l.event === "outbox_enqueue_failed");
+  assertEquals([failed?.call_key, failed?.source], [FULL_ID, "end-of-call-report"]);
+
+  // and through the handler the same failure is still a 200 for VAPI
+  store.failNext("enqueueOutbox");
+  const res = await handle(
+    new Request("https://example.supabase.co/functions/v1/vapi-webhook", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body("full")),
+    }),
+    deps,
+  );
+  assertEquals(res.status, 200);
+  await res.body?.cancel();
+});
+
+Deno.test("call log: a failed fast path is only logged; the row stays queued for the every-minute job", async () => {
+  const { store, deps, settle, logs } = harness({ env: AIRTABLE_ENV, airtable: () => json({ error: "X" }, 503) });
+  await walkVerified(store);
+  store.failNext("claimOutbox");
+  const out = await onEndOfCallReport(fixture("full"), deps, { backfillDelaysMs: ZEROS });
+  assertEquals(out.status, 200);
+  await settle();
+  assert(logs.some((l) => l.event === "outbox_fast_path_failed"));
+  assertEquals([queuedRow(store, FULL_ID).attempts, queuedRow(store, FULL_ID).delivered_at], [0, null]);
+});
+
+Deno.test("call log: the backfill re-arms a delivered row, so the improved record is delivered again", async () => {
+  let t = NOW.getTime();
+  const { store, deps, settle } = harness({
+    store: createFakeStore(undefined, { now: () => new Date(t) }),
+    env: { VAPI_PRIVATE_KEY: PRIVATE_KEY },
+    vapi: () => json(fetchedCallOf(fixture("full"))),
+  });
+  await walkVerified(store);
+  await onEndOfCallReport(fixture("partial"), deps, { backfillDelaysMs: ZEROS });
+  const queued = queuedRow(store, FULL_ID);
+  assertEquals(interaction(store, FULL_ID).analysis_status, "pending");
+  // as if the first version had already gone out
+  Object.assign(queued, { delivered_at: "2026-10-12T15:03:00.000Z", attempts: 1, external_id: "recFULL" });
+
+  await settle();
+  assertEquals(interaction(store, FULL_ID).analysis_status, "backfilled");
+  assertEquals([queued.delivered_at, queued.attempts, queued.external_id], [null, 0, "recFULL"]);
+
+  const sent: Record<string, unknown>[] = [];
+  deps.env = { ...deps.env, ...AIRTABLE_ENV };
+  deps.fetch = ((_url: string, init: RequestInit) => {
+    sent.push(JSON.parse(String(init.body)).records[0].fields);
+    return Promise.resolve(json({ records: [{ id: "recFULL" }] }));
+  }) as unknown as typeof fetch;
+  // the re-arm holds the row for the lease, so a delivery of the old version has finished first
+  assertEquals(await deliverOutbox(deps, { deadlineMs: 8000 }), { delivered: 0, retried: 0, dead: 0, errors: 0 });
+  t += OUTBOX_LEASE_MS + 1000;
+  const counts = await deliverOutbox(deps, { deadlineMs: 8000 });
+  assertEquals(counts, { delivered: 1, retried: 0, dead: 0, errors: 0 });
+  assertEquals(sent.map((f) => f["Analysis Status"]), ["backfilled"]);
+  assertEquals(sent[0]["Summary"], fixture("full").analysis.summary);
+});
+
+// ---------------------------------------------------------------------------------------------
 // onTranscript.
 // ---------------------------------------------------------------------------------------------
 function liveLine(role: string, transcript: string, timestamp?: number, extra: Partial<VapiMessage> = {}): VapiMessage {
@@ -1292,6 +1454,33 @@ Deno.test("transcript: lines are redacted; the read-back question masks the next
     "Okay.",
     "I was born on [date of birth] if that helps.",
   ]);
+});
+
+Deno.test("transcript: a line VAPI delivers after the report closed the call is dropped, not stored without its mask", async () => {
+  const { store, deps, logs } = harness();
+  await walkVerified(store);
+  const onFull: Partial<VapiMessage> = { call: { id: FULL_ID, orgId: ORG, type: "webCall" } };
+  await onTranscript(liveLine("assistant", "Could you tell me your date of birth?", 1000, onFull), deps);
+  await onEndOfCallReport(fixture("full"), deps, { backfillDelaysMs: ZEROS });
+  assertEquals(store.tables.transcript_lines.length, 0, "the report cleared the live lines");
+  // the answer arrives late, and the question that would have masked it went with the cleared lines
+  await onTranscript(liveLine("user", "march fourteenth nineteen eighty six", 2000, onFull), deps);
+  await onTranscript(liveLine("assistant", "Thank you.", 3000, onFull), deps);
+  assertEquals(store.tables.transcript_lines.length, 0);
+  assert(logs.some((l) => l.event === "transcript_dropped" && l.reason === "call_ended" && l.call_key === FULL_ID));
+  // a call still on gets its first line and its stub row as before
+  await onTranscript(liveLine("user", "Hello?", 1000), deps);
+  assertEquals(store.tables.transcript_lines.map((l) => [l.call_key, l.text]), [[LIVE_ID, "Hello?"]]);
+  assertEquals(interaction(store, LIVE_ID).ended_at, null);
+});
+
+Deno.test("transcript: when the call's end cannot be read, a caller line with no question before it is withheld", async () => {
+  const { store, deps, logs } = harness();
+  store.failNext("interactionEnded");
+  await onTranscript(liveLine("user", "march fourteenth", 1000), deps);
+  assertEquals(store.tables.transcript_lines.map((l) => l.text), [MASKED_ANSWER]);
+  assert(logs.some((l) => l.event === "post_call_error" && l.step === "interactionEnded"));
+  assert(interaction(store, LIVE_ID), "the stub row is still written");
 });
 
 Deno.test("transcript: when the previous question cannot be read, a caller line is withheld", async () => {

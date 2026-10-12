@@ -7,6 +7,7 @@
 // Every method body runs synchronously after its failure check, so one call is atomic the way the
 // call_sessions row lock makes it atomic in Postgres.
 
+import { type InteractionForMirror, MIRROR_COLUMNS } from "./airtable.ts";
 import {
   ALERT_STATUSES,
   ANALYSIS_STATUSES,
@@ -17,6 +18,8 @@ import {
   ESCALATION_KINDS,
   ESCALATION_REASONS,
   LEVELS,
+  OUTBOX_DESTINATIONS,
+  OUTBOX_KINDS,
   OUTCOMES,
   SENTIMENT_SOURCES,
   SENTIMENTS,
@@ -25,6 +28,15 @@ import type { AttemptKind, Code } from "./enums.ts";
 import { step } from "./identity.ts";
 import type { IdentityState } from "./identity.ts";
 import type { StoreExtras } from "./store.ts";
+import {
+  type DigestCallRow,
+  digestFromRows,
+  JOB_LIST_LIMIT,
+  OUTBOX_MAX_ATTEMPTS,
+  outboxClaimable,
+  outboxErrorText,
+  outboxGap,
+} from "./store_rules.ts";
 import type {
   AttemptRow,
   Claim,
@@ -32,14 +44,19 @@ import type {
   EmailRow,
   EscalationRow,
   InteractionRow,
+  OutboxRow,
   PriorInteraction,
   Session,
+  StaleEscalation,
   Store,
+  StuckInteraction,
   TranscriptLine,
 } from "./types.ts";
 
 /** In-memory Store with the SQL semantics (state machine via identity.step, replay guard, unique keys,
- *  upsert_interaction merge rules). failNext(method) makes the next call of that method throw. */
+ *  upsert_interaction merge rules). failNext(method) makes the next call of that method throw. Every
+ *  timestamp the database would take from now() comes from options.now (default: the real clock), so
+ *  a test can move time for the store and the code under test together. */
 export interface FakeStore extends Store, StoreExtras {
   customers: (Customer & { date_of_birth: string })[];
   claims: Claim[];
@@ -155,12 +172,19 @@ function timestampOrNull(column: string, value: unknown): void {
   }
 }
 
-function clone<T>(v: T): T {
-  return v === undefined ? v : structuredClone(v);
+// A timestamptz parameter: Postgres rejects anything it cannot parse before it reads a row.
+function timestampArg(name: string, value: unknown): number {
+  const t = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(t)) {
+    throw dbError("22007", `invalid input syntax for type timestamp with time zone: "${String(value)}" (${name})`);
+  }
+  return t;
 }
 
-function nowIso(): string {
-  return new Date().toISOString();
+const before = (iso: string | null | undefined, cutoff: number) => typeof iso === "string" && Date.parse(iso) < cutoff;
+
+function clone<T>(v: T): T {
+  return v === undefined ? v : structuredClone(v);
 }
 
 /** The date Postgres make_date would build, as YYYY-MM-DD, or null where verify_dob_attempt
@@ -188,7 +212,16 @@ function interactionStatus(r: Row): string {
 
 export function createFakeStore(
   seed?: { customers?: (Customer & { date_of_birth: string })[]; claims?: Claim[] },
+  options: { now?: () => Date } = {},
 ): FakeStore {
+  const clock = options.now ?? (() => new Date());
+  const nowIso = () => clock().toISOString();
+  // touch_updated_at: every write moves updated_at, and two writes in Postgres never share a
+  // timestamp; the outbox lease and the claim's compare-and-set rely on both.
+  const touched = (prev: string | undefined): string => {
+    const p = typeof prev === "string" ? Date.parse(prev) : Number.NaN;
+    return new Date(Number.isFinite(p) ? Math.max(clock().getTime(), p + 1) : clock().getTime()).toISOString();
+  };
   const base = seed ?? demoSeed();
   const customers = clone(base.customers ?? []);
   const claims = clone(base.claims ?? []);
@@ -202,6 +235,8 @@ export function createFakeStore(
     call_interactions: [],
     transcript_lines: [],
     webhook_captures: [],
+    outbox_events: [],
+    job_runs: [],
   };
   let transcriptSeq = 0;
   let captureSeq = 0;
@@ -315,6 +350,21 @@ export function createFakeStore(
     if (!customers.some((c) => c.id === customerId)) {
       throw dbError("23503", 'insert or update on table "call_interactions" violates foreign key constraint');
     }
+  }
+
+  function outboxRow(o: Row): OutboxRow {
+    return {
+      id: o.id,
+      kind: o.kind,
+      ref_id: o.ref_id,
+      destination: o.destination,
+      attempts: o.attempts,
+      delivered_at: o.delivered_at,
+      last_error: o.last_error,
+      external_id: o.external_id,
+      created_at: o.created_at,
+      updated_at: o.updated_at,
+    };
   }
 
   function insertInteraction(values: Row): void {
@@ -665,6 +715,10 @@ export function createFakeStore(
       return tables.call_interactions.find((x) => x.vapi_call_id === callKey)?.analysis_status ?? null;
     },
 
+    interactionEnded(callKey) {
+      return typeof tables.call_interactions.find((x) => x.vapi_call_id === callKey)?.ended_at === "string";
+    },
+
     insertTranscriptLine(line: TranscriptLine) {
       notNull("transcript_lines", "call_key", line.call_key);
       notNull("transcript_lines", "text", line.text);
@@ -711,9 +765,220 @@ export function createFakeStore(
         body: clone(body),
         received_at: nowIso(),
       });
-      const cutoff = Date.now() - CAPTURE_RETENTION_MS;
+      const cutoff = clock().getTime() - CAPTURE_RETENTION_MS;
       const kept = tables.webhook_captures.filter((c) => Date.parse(c.received_at) >= cutoff);
       tables.webhook_captures.splice(0, tables.webhook_captures.length, ...kept);
+    },
+
+    // enqueue_outbox: insert, or re-arm the existing (kind, ref_id, destination) row with a fresh budget.
+    enqueueOutbox(kind, refId, destination = "airtable") {
+      notNull("outbox_events", "kind", kind);
+      notNull("outbox_events", "ref_id", refId);
+      notNull("outbox_events", "destination", destination);
+      checkIn("outbox_events", "kind", kind, OUTBOX_KINDS);
+      checkIn("outbox_events", "destination", destination, OUTBOX_DESTINATIONS);
+      const at = nowIso();
+      const existing = tables.outbox_events.find((o) =>
+        o.kind === kind && o.ref_id === refId && o.destination === destination
+      );
+      if (existing) {
+        const updated_at = touched(existing.updated_at);
+        Object.assign(existing, { delivered_at: null, attempts: 0, last_error: null, updated_at });
+        return;
+      }
+      tables.outbox_events.push({
+        id: crypto.randomUUID(),
+        kind,
+        ref_id: refId,
+        destination,
+        delivered_at: null,
+        attempts: 0,
+        last_error: null,
+        external_id: null,
+        created_at: at,
+        updated_at: at,
+      });
+    },
+
+    // store.ts claimOutbox: the head of the queue (or the ref's row), the rows outside a lease, each
+    // bumped once. One synchronous body, so the compare-and-set always holds here.
+    claimOutbox(limit, ref): OutboxRow[] {
+      integerOrNull("p_limit", limit);
+      notNull("claim_outbox", "p_limit", limit);
+      const nowMs = clock().getTime();
+      const due = tables.outbox_events
+        .filter((o) => o.delivered_at === null && o.attempts < OUTBOX_MAX_ATTEMPTS)
+        .filter((o) => !ref || (o.kind === ref.kind && o.ref_id === ref.refId && o.destination === ref.destination))
+        // insertion order breaks a tie, as distinct transactions never share created_at in Postgres
+        .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+        .slice(0, 50)
+        .filter((o) => outboxClaimable(o as OutboxRow, nowMs))
+        .slice(0, Math.max(limit, 1));
+      for (const o of due) {
+        o.attempts += 1;
+        o.updated_at = touched(o.updated_at);
+      }
+      return due.map(outboxRow);
+    },
+
+    finishOutbox(id, result) {
+      uuidArg(id);
+      const row = tables.outbox_events.find((o) => o.id === id);
+      if (!row) return false;
+      if (typeof result.attempt === "number" && row.attempts !== result.attempt) return false;
+      if (typeof result.claimedAt === "string" && Date.parse(row.updated_at) !== Date.parse(result.claimedAt)) {
+        return false;
+      }
+      if (result.delivered) {
+        row.delivered_at = nowIso();
+        row.last_error = null;
+        if (result.externalId) row.external_id = result.externalId;
+      } else {
+        row.last_error = outboxErrorText(result.error);
+        if (result.dead) row.attempts = OUTBOX_MAX_ATTEMPTS;
+        else if (result.refund && typeof result.attempt === "number") row.attempts = Math.max(result.attempt - 1, 0);
+      }
+      row.updated_at = touched(row.updated_at);
+      return true;
+    },
+
+    getInteractionForMirror(vapiCallId): InteractionForMirror | null {
+      const r = tables.call_interactions.find((x) => x.vapi_call_id === vapiCallId);
+      if (!r) return null;
+      const out: Row = {};
+      for (const c of MIRROR_COLUMNS) out[c] = clone(r[c]);
+      return out as InteractionForMirror;
+    },
+
+    listOutboxGaps(fromIso, toIso): string[] {
+      const from = timestampArg("from", fromIso);
+      const to = timestampArg("to", toIso);
+      return tables.call_interactions
+        .filter((r) => typeof r.ended_at === "string" && Date.parse(r.ended_at) >= from && Date.parse(r.ended_at) < to)
+        .sort((a, b) => Date.parse(a.ended_at) - Date.parse(b.ended_at))
+        .filter((r) =>
+          outboxGap(
+            r.updated_at,
+            tables.outbox_events.find((o) =>
+              o.kind === "interaction.completed" && o.destination === "airtable" && o.ref_id === r.vapi_call_id
+            ),
+          )
+        )
+        .slice(0, JOB_LIST_LIMIT)
+        .map((r) => r.vapi_call_id);
+    },
+
+    claimJobRun(job, periodKey) {
+      notNull("job_runs", "job", job);
+      notNull("job_runs", "period_key", periodKey);
+      if (tables.job_runs.some((j) => j.job === job && j.period_key === periodKey)) return false;
+      tables.job_runs.push({ job, period_key: periodKey, started_at: nowIso(), finished_at: null, result: null });
+      return true;
+    },
+
+    finishJobRun(job, periodKey, result) {
+      const row = tables.job_runs.find((j) => j.job === job && j.period_key === periodKey);
+      if (!row) return;
+      row.finished_at = nowIso();
+      row.result = clone(result);
+    },
+
+    releaseJobRun(job, periodKey) {
+      const open = (j: Row) => j.job === job && j.period_key === periodKey && j.finished_at === null;
+      const kept = tables.job_runs.filter((j) => !open(j));
+      tables.job_runs.splice(0, tables.job_runs.length, ...kept);
+    },
+
+    listStaleEscalations(cutoffIso): StaleEscalation[] {
+      const cutoff = timestampArg("cutoff", cutoffIso);
+      return tables.escalations
+        .filter((e) =>
+          e.status === "open" && before(e.created_at, cutoff) && e.realerted_at === null && e.channel !== "chat"
+        )
+        .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+        .slice(0, JOB_LIST_LIMIT)
+        .map((e) => ({
+          id: e.id,
+          call_key: e.call_key,
+          kind: e.kind,
+          reason: e.reason,
+          channel: e.channel,
+          verified: e.verified,
+          created_at: e.created_at,
+        }));
+    },
+
+    markRealerted(id) {
+      uuidArg(id);
+      const row = tables.escalations.find((e) => e.id === id);
+      if (!row || row.realerted_at !== null || row.status !== "open") return false;
+      row.realerted_at = nowIso();
+      row.updated_at = row.realerted_at;
+      return true;
+    },
+
+    digestStats(fromIso, toIso) {
+      const from = timestampArg("from", fromIso);
+      const to = timestampArg("to", toIso);
+      const inWindow = (iso: string) => Date.parse(iso) >= from && Date.parse(iso) < to;
+      const calls: DigestCallRow[] = tables.call_interactions.filter((r) => inWindow(r.created_at)).map((r) => ({
+        outcome: r.outcome,
+        sentiment: r.sentiment,
+        flags: clone(r.flags),
+        cost: r.cost,
+        ended_at: r.ended_at,
+      }));
+      const statuses = tables.escalations.filter((e) => inWindow(e.created_at)).map((e) => e.status as string);
+      const sent = tables.emails.filter((m) => m.status === "sent" && inWindow(m.created_at)).length;
+      return digestFromRows(calls, statuses, sent);
+    },
+
+    listStuckInteractions(cutoffIso): StuckInteraction[] {
+      const cutoff = timestampArg("cutoff", cutoffIso);
+      return tables.call_interactions
+        .filter((r) => r.ended_at === null && before(r.created_at, cutoff))
+        .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+        .slice(0, JOB_LIST_LIMIT)
+        .map((r) => ({ vapi_call_id: r.vapi_call_id, created_at: r.created_at }));
+    },
+
+    reapInteraction(vapiCallId) {
+      const row = tables.call_interactions.find((r) => r.vapi_call_id === vapiCallId);
+      if (!row || row.ended_at !== null) return false;
+      const at = nowIso();
+      Object.assign(row, {
+        outcome: "abandoned",
+        analysis_status: "missing",
+        ended_at: at,
+        ended_reason: row.ended_reason ?? "reaped",
+        updated_at: at,
+      });
+      row.status = interactionStatus(row);
+      return true;
+    },
+
+    deleteOldTranscriptLines(cutoffIso) {
+      const cutoff = timestampArg("cutoff", cutoffIso);
+      const kept = tables.transcript_lines.filter((t) => !before(t.created_at, cutoff));
+      const deleted = tables.transcript_lines.length - kept.length;
+      tables.transcript_lines.splice(0, tables.transcript_lines.length, ...kept);
+      return deleted;
+    },
+
+    pruneWebhookCaptures(cutoffIso) {
+      const cutoff = timestampArg("cutoff", cutoffIso);
+      const kept = tables.webhook_captures.filter((c) => !before(c.received_at, cutoff));
+      const deleted = tables.webhook_captures.length - kept.length;
+      tables.webhook_captures.splice(0, tables.webhook_captures.length, ...kept);
+      return deleted;
+    },
+
+    pruneJobRuns(jobs, cutoffIso) {
+      const cutoff = timestampArg("cutoff", cutoffIso);
+      const kept = tables.job_runs.filter((j) => !(jobs.includes(j.job) && before(j.started_at, cutoff)));
+      const deleted = tables.job_runs.length - kept.length;
+      tables.job_runs.splice(0, tables.job_runs.length, ...kept);
+      return deleted;
     },
   };
 

@@ -954,11 +954,75 @@ Deno.test("jobs routes are 404 unless JOBS_BEARER matches", async () => {
   const unknown = await run(req("drop_tables", `Bearer ${jobsBearer}`), set.deps);
   assertEquals(unknown.status, 404);
   await unknown.body?.cancel();
-  for (const name of ["sla", "digest", "reaper"]) {
-    const res = await run(req(name, `Bearer ${jobsBearer}`), set.deps);
-    assertEquals(res.status, 501, name);
-    assertEquals(await res.json(), { error: "not_implemented", job: name });
+});
+
+Deno.test("jobs: with the bearer each known job runs through runJob and answers its outcome as JSON", async () => {
+  const jobsBearer = "jobs-bearer-0123456789";
+  const ran: string[] = [];
+  const { routes } = fakeRoutes();
+  const run = createHandler({
+    ...routes,
+    runJob: (name) => {
+      ran.push(name);
+      return Promise.resolve({ job: name, period_key: "p1", skipped: false, result: { done: 1 } });
+    },
+  });
+  const { deps, logs } = makeDeps({ JOBS_BEARER: jobsBearer }, untouchableStore);
+  for (const name of ["sla", "digest", "reaper", "outbox"]) {
+    const res = await run(post({ job: name }, { path: `/jobs/${name}`, auth: `Bearer ${jobsBearer}` }), deps);
+    assertEquals(res.status, 200, name);
+    assertEquals(res.headers.get("content-type"), "application/json");
+    assertEquals(await res.json(), { job: name, period_key: "p1", skipped: false, result: { done: 1 } });
   }
+  assertEquals(ran, ["sla", "digest", "reaper", "outbox"]);
+  assertEquals(logs.map((l) => [l.type, l.tool, l.status]), [
+    ["job", "sla", 200],
+    ["job", "digest", 200],
+    ["job", "reaper", 200],
+    ["job", "outbox", 200],
+  ]);
+
+  // without the bearer the job never runs
+  const res = await run(post({ job: "sla" }, { path: "/jobs/sla", auth: null }), deps);
+  assertEquals(res.status, 404);
+  await res.body?.cancel();
+  assertEquals(ran.length, 4);
+});
+
+Deno.test("jobs: a job that throws is a 500 job_failed with the redacted reason in the log line", async () => {
+  const jobsBearer = "jobs-bearer-0123456789";
+  const run = createHandler({
+    ...fakeRoutes().routes,
+    runJob: () => Promise.reject(new Error("store.claimJobRun: 57014 canceling statement for +16025550101")),
+  });
+  const { deps, logs } = makeDeps({ JOBS_BEARER: jobsBearer }, untouchableStore);
+  const res = await run(post({ job: "digest" }, { path: "/jobs/digest", auth: `Bearer ${jobsBearer}` }), deps);
+  assertEquals(res.status, 500);
+  assertEquals(res.headers.get("content-type"), "application/json");
+  assertEquals(await res.json(), { error: "job_failed" });
+  assertEquals(logs.length, 1);
+  assertEquals([logs[0].type, logs[0].tool, logs[0].status], ["job", "digest", 500]);
+  assertStringIncludes(String(logs[0].error), "claimJobRun");
+  assertFalse(String(logs[0].error).includes("5550101"));
+});
+
+Deno.test("jobs: the real runner over the store records one run per period and skips the re-fire", async () => {
+  const jobsBearer = "jobs-bearer-0123456789";
+  const store = createFakeStore();
+  const { deps } = makeDeps({ JOBS_BEARER: jobsBearer }, store);
+  const req = () => post({ job: "outbox" }, { path: "/jobs/outbox", auth: `Bearer ${jobsBearer}` });
+  const first = await handle(req(), deps);
+  assertEquals(first.status, 200);
+  assertEquals(await first.json(), {
+    job: "outbox",
+    period_key: "2026-10-12T15:00Z",
+    skipped: false,
+    result: { delivered: 0, retried: 0, dead: 0, errors: 0, skipped: "airtable not configured" },
+  });
+  const again = await handle(req(), deps);
+  assertEquals(await again.json(), { job: "outbox", period_key: "2026-10-12T15:00Z", skipped: true });
+  assertEquals(store.tables.job_runs.length, 1);
+  assert(store.tables.job_runs[0].finished_at, "the run is recorded as finished");
 });
 
 // ---------------------------------------------------------------------------------------------

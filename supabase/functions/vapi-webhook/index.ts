@@ -22,6 +22,9 @@ const OPTIONAL_KEYS = [
   "PRIOR_CONTACTS_ENABLED",
   "OWN_NUMBERS",
   "CAPTURE_WEBHOOKS",
+  "AIRTABLE_TOKEN",
+  "AIRTABLE_BASE_ID",
+  "AIRTABLE_TABLE",
 ] as const satisfies readonly (keyof Env)[];
 
 // A secret pasted with a trailing newline would otherwise never match its Bearer token.

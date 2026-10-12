@@ -7,7 +7,17 @@
 // import-map resolution; the function directory has no deno.json of its own.
 // deno-lint-ignore no-import-prefix
 import { createClient } from "npm:@supabase/supabase-js@2.49.4";
+import { type InteractionForMirror, MIRROR_COLUMNS } from "./airtable.ts";
 import type { AlertStatus, Code, EmailKind, EmailStatus } from "./enums.ts";
+import {
+  type DigestCallRow,
+  digestFromRows,
+  JOB_LIST_LIMIT,
+  OUTBOX_MAX_ATTEMPTS,
+  outboxClaimable,
+  outboxErrorText,
+  outboxGap,
+} from "./store_rules.ts";
 import type {
   AttemptRow,
   Claim,
@@ -15,9 +25,13 @@ import type {
   EmailRow,
   EscalationRow,
   InteractionRow,
+  OutboxRef,
+  OutboxRow,
   PriorInteraction,
   Session,
+  StaleEscalation,
   Store,
+  StuckInteraction,
   TranscriptLine,
 } from "./types.ts";
 
@@ -30,6 +44,8 @@ export const CAPTURE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export interface StoreExtras {
   // call_interactions.analysis_status for the call, or null when there is no row yet
   storedAnalysisStatus(callKey: string): Promise<string | null>;
+  // true when the call's row exists and has ended_at
+  interactionEnded(callKey: string): Promise<boolean>;
 }
 
 // date_of_birth is deliberately absent: no tool needs it, the SQL function compares it in place.
@@ -41,6 +57,19 @@ const ATTEMPT_COLUMNS = "call_key, tool_call_id, tool_name, kind, code, created_
 const ESCALATION_COLUMNS = "id, call_key, kind, reason, details, callback_phone, channel, verified, callback_source, " +
   "alert_status, delivery_error, status, created_at";
 const EMAIL_COLUMNS = "call_key, kind, to_masked, resend_id, status, error";
+const STALE_COLUMNS = "id, call_key, kind, reason, channel, verified, created_at";
+const DIGEST_COLUMNS = "outcome, sentiment, flags, cost, ended_at";
+const OUTBOX_COLUMNS = "id, kind, ref_id, destination, attempts, delivered_at, last_error, external_id, created_at, " +
+  "updated_at";
+// Rows one claim reads from the head of the queue; only the few inside a lease are passed over.
+const OUTBOX_CANDIDATES = 50;
+// PostgREST answers at most this many rows per request (the Supabase default max-rows), so the
+// digest and the call-log sweep read in pages of it.
+const PAGE = 1000;
+// Bounds one digest or sweep: 50 pages is 50k rows, far beyond two days of calls.
+const MAX_PAGES = 50;
+// Call keys per in() filter: keeps the request line far below proxy limits.
+const KEYS_PER_FILTER = 100;
 
 interface DbError {
   message?: string;
@@ -67,6 +96,27 @@ function signal(): AbortSignal {
   return AbortSignal.timeout(TIMEOUT_MS);
 }
 
+function chunks<T>(list: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+}
+
+function toOutboxRow(row: any): OutboxRow {
+  return {
+    id: row.id,
+    kind: row.kind,
+    ref_id: row.ref_id,
+    destination: row.destination,
+    attempts: Number(row.attempts),
+    delivered_at: row.delivered_at ?? null,
+    last_error: row.last_error ?? null,
+    external_id: row.external_id ?? null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
 function toClaim(row: any): Claim {
   return {
     ...row,
@@ -83,6 +133,20 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
   const db = createClient(supabaseUrl, serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+
+  // Every page of a filtered read, in a stable order, up to MAX_PAGES. build() starts a fresh query
+  // per page because a supabase-js builder runs once.
+  async function readPages<T>(op: string, build: () => any): Promise<T[]> {
+    const out: T[] = [];
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const { data, error } = await build().range(page * PAGE, page * PAGE + PAGE - 1).abortSignal(signal());
+      if (error) fail(op, error);
+      const got = rows<T>(data);
+      out.push(...got);
+      if (got.length < PAGE) break;
+    }
+    return out;
+  }
 
   const store: Store & StoreExtras = {
     async lookupCustomerAttempt(p) {
@@ -294,6 +358,13 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
       return (data as { analysis_status: string } | null)?.analysis_status ?? null;
     },
 
+    async interactionEnded(callKey) {
+      const { data, error } = await db.from("call_interactions").select("ended_at").eq("vapi_call_id", callKey)
+        .abortSignal(signal()).maybeSingle();
+      if (error) fail("interactionEnded", error);
+      return typeof (data as { ended_at: string | null } | null)?.ended_at === "string";
+    },
+
     async insertTranscriptLine(line: TranscriptLine) {
       const { error } = await db.from("transcript_lines")
         .upsert(
@@ -330,6 +401,191 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
         .lt("received_at", new Date(Date.now() - CAPTURE_RETENTION_MS).toISOString())
         .abortSignal(signal());
       if (pruned.error) fail("captureWebhook.prune", pruned.error);
+    },
+
+    async enqueueOutbox(kind, refId, destination = "airtable") {
+      const { error } = await db.rpc("enqueue_outbox", { p_kind: kind, p_ref_id: refId, p_destination: destination })
+        .abortSignal(signal());
+      if (error) fail("enqueueOutbox", error);
+    },
+
+    async claimOutbox(limit: number, ref?: OutboxRef) {
+      // Not claim_outbox (0005): its row locks end with its own statement, so a row in flight could
+      // be claimed again at once. Here the head of the queue is read, the rows inside a lease are
+      // passed over, and each claim is a compare-and-set on attempts and updated_at, which
+      // touch_updated_at moves on every write: of two runners only one can take a row.
+      if (!Number.isInteger(limit)) throw new Error("store.claimOutbox: 22P02 limit must be an integer");
+      let query = db.from("outbox_events").select(OUTBOX_COLUMNS).is("delivered_at", null)
+        .lt("attempts", OUTBOX_MAX_ATTEMPTS);
+      if (ref) query = query.eq("kind", ref.kind).eq("ref_id", ref.refId).eq("destination", ref.destination);
+      const { data, error } = await query.order("created_at", { ascending: true }).order("id", { ascending: true })
+        .limit(OUTBOX_CANDIDATES).abortSignal(signal());
+      if (error) fail("claimOutbox", error);
+      const nowMs = Date.now();
+      const due = rows<any>(data).map(toOutboxRow).filter((r) => outboxClaimable(r, nowMs));
+      const claimed: OutboxRow[] = [];
+      for (const c of due) {
+        if (claimed.length >= Math.max(limit, 1)) break;
+        const res = await db.from("outbox_events").update({ attempts: c.attempts + 1 })
+          .eq("id", c.id).eq("attempts", c.attempts).eq("updated_at", c.updated_at).is("delivered_at", null)
+          .select(OUTBOX_COLUMNS).abortSignal(signal());
+        if (res.error) fail("claimOutbox", res.error);
+        const row = rows<any>(res.data)[0];
+        if (row) claimed.push(toOutboxRow(row));
+      }
+      return claimed;
+    },
+
+    async finishOutbox(id, result) {
+      const patch: Record<string, unknown> = result.delivered
+        ? { delivered_at: new Date().toISOString(), last_error: null }
+        : { last_error: outboxErrorText(result.error) };
+      // A delivery without a record id keeps the one an earlier delivery stored.
+      if (result.delivered && result.externalId) patch.external_id = result.externalId;
+      if (!result.delivered && result.dead) patch.attempts = OUTBOX_MAX_ATTEMPTS;
+      else if (!result.delivered && result.refund && typeof result.attempt === "number") {
+        patch.attempts = Math.max(result.attempt - 1, 0);
+      }
+      let query = db.from("outbox_events").update(patch).eq("id", id);
+      if (typeof result.attempt === "number") query = query.eq("attempts", result.attempt);
+      if (typeof result.claimedAt === "string") query = query.eq("updated_at", result.claimedAt);
+      const { data, error } = await query.select("id").abortSignal(signal());
+      if (error) fail("finishOutbox", error);
+      return rows(data).length > 0;
+    },
+
+    async getInteractionForMirror(vapiCallId) {
+      const { data, error } = await db.from("call_interactions").select(MIRROR_COLUMNS.join(", "))
+        .eq("vapi_call_id", vapiCallId).abortSignal(signal()).maybeSingle();
+      if (error) fail("getInteractionForMirror", error);
+      return (data as InteractionForMirror | null) ?? null;
+    },
+
+    async listOutboxGaps(fromIso, toIso) {
+      // PostgREST has no anti-join: the window's ended calls, then their outbox rows by key.
+      const ended = await readPages<{ vapi_call_id: string; updated_at: string }>("listOutboxGaps", () =>
+        db.from("call_interactions").select("vapi_call_id, updated_at").gte("ended_at", fromIso).lt("ended_at", toIso)
+          .order("ended_at", { ascending: true }).order("id", { ascending: true }));
+      const queued = new Map<string, { delivered_at: string | null }>();
+      for (const part of chunks(ended.map((r) => r.vapi_call_id), KEYS_PER_FILTER)) {
+        const { data, error } = await db.from("outbox_events").select("ref_id, delivered_at")
+          .eq("kind", "interaction.completed").eq("destination", "airtable").in("ref_id", part).abortSignal(signal());
+        if (error) fail("listOutboxGaps", error);
+        for (const r of rows<{ ref_id: string; delivered_at: string | null }>(data)) queued.set(r.ref_id, r);
+      }
+      return ended.filter((r) => outboxGap(r.updated_at, queued.get(r.vapi_call_id))).map((r) => r.vapi_call_id)
+        .slice(0, JOB_LIST_LIMIT);
+    },
+
+    async claimJobRun(job, periodKey) {
+      // Same claim as attempts and emails: an empty return from insert ... on conflict do nothing
+      // means this period already has its run.
+      const { data, error } = await db.from("job_runs")
+        .upsert({ job, period_key: periodKey }, { onConflict: "job,period_key", ignoreDuplicates: true })
+        .select("job")
+        .abortSignal(signal());
+      if (error) fail("claimJobRun", error);
+      return rows(data).length > 0;
+    },
+
+    async finishJobRun(job, periodKey, result) {
+      const { error } = await db.from("job_runs").update({ finished_at: new Date().toISOString(), result })
+        .eq("job", job).eq("period_key", periodKey).abortSignal(signal());
+      if (error) fail("finishJobRun", error);
+    },
+
+    async releaseJobRun(job, periodKey) {
+      const { error } = await db.from("job_runs").delete().eq("job", job).eq("period_key", periodKey)
+        .is("finished_at", null).abortSignal(signal());
+      if (error) fail("releaseJobRun", error);
+    },
+
+    async listStaleEscalations(cutoffIso) {
+      // A chat escalation never paged anyone (escalate skips the alert for a chat), so it is never
+      // re-paged either; left in the list it would also crowd out real rows under the cap.
+      const { data, error } = await db.from("escalations").select(STALE_COLUMNS)
+        .eq("status", "open")
+        .lt("created_at", cutoffIso)
+        .is("realerted_at", null)
+        .neq("channel", "chat")
+        .order("created_at", { ascending: true })
+        .limit(JOB_LIST_LIMIT)
+        .abortSignal(signal());
+      if (error) fail("listStaleEscalations", error);
+      return rows<StaleEscalation>(data);
+    },
+
+    async markRealerted(id) {
+      // The re-alert's claim: only an open row never re-alerted, so a row staff claimed meanwhile,
+      // or one another run already marked, is never paged.
+      const { data, error } = await db.from("escalations").update({ realerted_at: new Date().toISOString() })
+        .eq("id", id).is("realerted_at", null).eq("status", "open").select("id").abortSignal(signal());
+      if (error) fail("markRealerted", error);
+      return rows(data).length > 0;
+    },
+
+    async digestStats(fromIso, toIso) {
+      const calls = readPages<DigestCallRow>("digestStats", () =>
+        db.from("call_interactions").select(DIGEST_COLUMNS).gte("created_at", fromIso).lt("created_at", toIso)
+          .order("id", { ascending: true }));
+      const escalations = readPages<{ status: string }>("digestStats", () =>
+        db.from("escalations").select("status").gte("created_at", fromIso).lt("created_at", toIso)
+          .order("id", { ascending: true }));
+      const emails = db.from("emails").select("id", { count: "exact", head: true }).eq("status", "sent")
+        .gte("created_at", fromIso).lt("created_at", toIso).abortSignal(signal());
+      const [callRows, escalationRows, sent] = await Promise.all([calls, escalations, emails]);
+      if (sent.error) fail("digestStats", sent.error);
+      return digestFromRows(callRows, escalationRows.map((e) => e.status), sent.count ?? 0);
+    },
+
+    async listStuckInteractions(cutoffIso) {
+      const { data, error } = await db.from("call_interactions").select("vapi_call_id, created_at")
+        .is("ended_at", null)
+        .lt("created_at", cutoffIso)
+        .order("created_at", { ascending: true })
+        .limit(JOB_LIST_LIMIT)
+        .abortSignal(signal());
+      if (error) fail("listStuckInteractions", error);
+      return rows<StuckInteraction>(data);
+    },
+
+    async reapInteraction(vapiCallId) {
+      // coalesce(ended_reason, 'reaped') without a SQL function: one guarded update for each case.
+      // Both require ended_at is null, so a report that lands first is never touched, and after the
+      // first update matches the second cannot.
+      const closed = { outcome: "abandoned", analysis_status: "missing", ended_at: new Date().toISOString() };
+      const first = await db.from("call_interactions").update({ ...closed, ended_reason: "reaped" })
+        .eq("vapi_call_id", vapiCallId).is("ended_at", null).is("ended_reason", null)
+        .select("vapi_call_id").abortSignal(signal());
+      if (first.error) fail("reapInteraction", first.error);
+      if (rows(first.data).length > 0) return true;
+      const second = await db.from("call_interactions").update(closed)
+        .eq("vapi_call_id", vapiCallId).is("ended_at", null)
+        .select("vapi_call_id").abortSignal(signal());
+      if (second.error) fail("reapInteraction", second.error);
+      return rows(second.data).length > 0;
+    },
+
+    async deleteOldTranscriptLines(cutoffIso) {
+      const { count, error } = await db.from("transcript_lines").delete({ count: "exact" })
+        .lt("created_at", cutoffIso).abortSignal(signal());
+      if (error) fail("deleteOldTranscriptLines", error);
+      return count ?? 0;
+    },
+
+    async pruneWebhookCaptures(cutoffIso) {
+      const { count, error } = await db.from("webhook_captures").delete({ count: "exact" })
+        .lt("received_at", cutoffIso).abortSignal(signal());
+      if (error) fail("pruneWebhookCaptures", error);
+      return count ?? 0;
+    },
+
+    async pruneJobRuns(jobs, cutoffIso) {
+      if (jobs.length === 0) return 0;
+      const { count, error } = await db.from("job_runs").delete({ count: "exact" }).in("job", jobs)
+        .lt("started_at", cutoffIso).abortSignal(signal());
+      if (error) fail("pruneJobRuns", error);
+      return count ?? 0;
     },
   };
   return store;

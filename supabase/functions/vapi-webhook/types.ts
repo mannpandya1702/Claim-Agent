@@ -1,6 +1,7 @@
 // Shared types and the injected dependencies. Every module takes what it needs from Deps, so the
 // unit tests run against fakes (fake_store.ts, a recording fetch, a fixed clock) with no network.
 
+import type { InteractionForMirror } from "./airtable.ts";
 import type {
   AlertStatus,
   AttemptKind,
@@ -14,7 +15,10 @@ import type {
   EscalationKind,
   EscalationReason,
   EscalationStatus,
+  JobName,
   Level,
+  OutboxDestination,
+  OutboxKind,
 } from "./enums.ts";
 
 // ---------------------------------------------------------------------------------------------
@@ -169,6 +173,71 @@ export interface TranscriptLine {
   ts_ms: number;
 }
 
+/** One outbox_events row (0005_outbox.sql) as a claim returns it. */
+export interface OutboxRow {
+  id: string;
+  kind: OutboxKind;
+  ref_id: string; // call_interactions.vapi_call_id
+  destination: OutboxDestination;
+  attempts: number; // already bumped by the claim that returned the row
+  delivered_at: string | null;
+  last_error: string | null;
+  external_id: string | null;
+  created_at: string;
+  updated_at: string; // the claim's own write time: unique to this claim
+}
+
+/** The one outbox row of a call, for a claim that must not take any other. */
+export interface OutboxRef {
+  kind: OutboxKind;
+  refId: string;
+  destination: OutboxDestination;
+}
+
+/** How one delivery attempt ended. delivered wins; otherwise error is kept (masked, capped), dead
+ *  also spends the remaining attempts so the row is never claimed again, and refund (a destination
+ *  that refused every request, not this row) gives the claim's attempt back. attempt and claimedAt,
+ *  when given, are the attempts and updated_at the claim returned: the update applies only while
+ *  the row still holds them, so a delivery that started before a re-arm (or a re-claim) cannot
+ *  change the newer state. claimedAt is the exact guard; attempts repeat after a re-arm. */
+export interface OutboxFinish {
+  delivered: boolean;
+  externalId?: string | null;
+  error?: string | null;
+  dead?: boolean;
+  refund?: boolean;
+  attempt?: number;
+  claimedAt?: string;
+}
+
+/** An open escalation past the SLA that has not been re-alerted (ids and enums only). */
+export interface StaleEscalation {
+  id: string;
+  call_key: string;
+  kind: EscalationKind;
+  reason: EscalationReason;
+  channel: string;
+  verified: boolean;
+  created_at: string;
+}
+
+/** The daily digest numbers for one window (rows created in [from, to)). Counts only. */
+export interface DigestStats {
+  calls: number;
+  completed: number; // ended_at set
+  outcomes: Record<string, number>; // "unknown" for a row without one
+  sentiments: Record<string, number>; // "unknown" for a row without one
+  flagged: number;
+  escalations: Record<string, number>; // by status, every status present
+  emails_sent: number;
+  total_cost: number; // USD, 4 places like the column
+}
+
+export interface StuckInteraction {
+  vapi_call_id: string;
+  created_at: string;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Store: the only path to Postgres. store.ts implements it over supabase-js (service role);
 // fake_store.ts implements it in memory with the same state-machine semantics for unit tests.
@@ -232,6 +301,37 @@ export interface Store {
   lastAssistantLine(callKey: string): Promise<string | null>; // newest assistant text by ts_ms
   deleteTranscriptLines(callKey: string): Promise<void>;
   captureWebhook(messageType: string | null, callKey: string | null, body: unknown): Promise<void>;
+
+  // Outbox (0005_outbox.sql): completed calls mirrored to Airtable, capped at-least-once.
+  enqueueOutbox(kind: OutboxKind, refId: string, destination?: OutboxDestination): Promise<void>; // enqueue or re-arm
+  // Bumps attempts with a compare-and-set; oldest first, or only the ref's row; never a delivered or
+  // spent row, nor one written within the lease (store_rules.ts outboxClaimable).
+  claimOutbox(limit: number, ref?: OutboxRef): Promise<OutboxRow[]>;
+  finishOutbox(id: string, result: OutboxFinish): Promise<boolean>; // false when no row matched
+  getInteractionForMirror(vapiCallId: string): Promise<InteractionForMirror | null>;
+  // Ended in [from, to) and missing from the call log (store_rules.ts outboxGap); oldest end first, capped
+  listOutboxGaps(fromIso: string, toIso: string): Promise<string[]>;
+
+  // Scheduled jobs (0004_automation.sql). claimJobRun inserts (job, period_key) once: true for
+  // the first caller of the period, false for any re-fire. releaseJobRun deletes the period's run
+  // while it is unfinished, so a later run of the same period can claim it again.
+  claimJobRun(job: JobName, periodKey: string): Promise<boolean>;
+  finishJobRun(job: JobName, periodKey: string, result: Record<string, unknown>): Promise<void>;
+  releaseJobRun(job: JobName, periodKey: string): Promise<void>;
+  // open, created before the cutoff, never re-alerted, not a chat escalation; oldest first, capped
+  listStaleEscalations(cutoffIso: string): Promise<StaleEscalation[]>;
+  // sets realerted_at once, only while the row is still open; true when this call set it
+  markRealerted(id: string): Promise<boolean>;
+  digestStats(fromIso: string, toIso: string): Promise<DigestStats>;
+  // ended_at null and created before the cutoff; oldest first, capped
+  listStuckInteractions(cutoffIso: string): Promise<StuckInteraction[]>;
+  // abandoned / missing / ended now / ended_reason kept or 'reaped', only while ended_at is null;
+  // true when it closed the row
+  reapInteraction(vapiCallId: string): Promise<boolean>;
+  // every live line older than the cutoff, whatever became of its call; the count deleted
+  deleteOldTranscriptLines(cutoffIso: string): Promise<number>;
+  pruneWebhookCaptures(cutoffIso: string): Promise<number>; // received before the cutoff; the count deleted
+  pruneJobRuns(jobs: JobName[], cutoffIso: string): Promise<number>; // runs started before the cutoff; the count deleted
 }
 
 // ---------------------------------------------------------------------------------------------

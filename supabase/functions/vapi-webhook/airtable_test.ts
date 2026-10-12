@@ -1,5 +1,12 @@
 import { assert, assertEquals, assertFalse } from "@std/assert";
-import { interactionToFields, type InteractionForMirror, MERGE_FIELD, upsertCallRecord } from "./airtable.ts";
+import {
+  airtableConfigured,
+  interactionToFields,
+  type InteractionForMirror,
+  MERGE_FIELD,
+  MIRROR_COLUMNS,
+  upsertCallRecord,
+} from "./airtable.ts";
 import type { Deps, Env } from "./types.ts";
 
 const row: InteractionForMirror = {
@@ -45,6 +52,32 @@ Deno.test("interactionToFields: slim, redacted mapping with the merge key and a 
   assertFalse("Transcript" in f);
 });
 
+Deno.test("interactionToFields: the dashboard link goes through the alerts' guard (no credentials, http(s) only)", () => {
+  const at = new Date("2026-10-12T15:03:00Z");
+  for (
+    const bad of [
+      "https://user:secret@preview.example.com/",
+      "https://token@preview.example.com/",
+      "javascript:alert(1)//",
+      "ftp://files.example.com/",
+      "not a url",
+      "https://example.com/a b",
+      "",
+    ]
+  ) {
+    const f = interactionToFields(row, at, bad);
+    assertFalse("Dashboard" in f, bad);
+    assertFalse(JSON.stringify(f).includes("secret"), bad);
+  }
+  // a fragment already on the base is dropped, as in the alerts and emails
+  assertEquals(
+    interactionToFields(row, at, " https://staff.example.com/app/#/old ")["Dashboard"],
+    "https://staff.example.com/app/#/calls/call-abc-123",
+  );
+  // a call id that is not id-shaped gives no link rather than a mangled one
+  assertFalse("Dashboard" in interactionToFields({ ...row, vapi_call_id: "x y<z>" }, at, "https://staff.example.com/"));
+});
+
 Deno.test("interactionToFields: nulls are omitted so Airtable keeps the cell instead of rejecting the type", () => {
   const f = interactionToFields(
     { ...row, caller_name: null, caller_phone: null, sentiment: null, cost: null, started_at: null },
@@ -87,12 +120,23 @@ Deno.test("upsertCallRecord: a second delivery of the same call reports an updat
 Deno.test("upsertCallRecord: failures are classified so the outbox retries only what a retry can fix", async () => {
   const respond = (status: number, body: unknown) =>
     (() => Promise.resolve(new Response(JSON.stringify(body), { status }))) as unknown as typeof fetch;
-  const cases: [number, boolean][] = [[429, true], [503, true], [401, false], [403, false], [404, false], [422, false]];
-  for (const [status, retryable] of cases) {
+  // [status, retryable, config]: config is a setting every row shares (token, scope, base, table)
+  const cases: [number, boolean, boolean][] = [
+    [429, true, false],
+    [500, true, false],
+    [503, true, false],
+    [401, false, true],
+    [403, false, true],
+    [404, false, true],
+    [422, false, false],
+    [400, false, false],
+  ];
+  for (const [status, retryable, config] of cases) {
     const r = await upsertCallRecord(deps(configured, respond(status, { error: { type: "X", message: "m" } })), {});
     assert(!r.ok);
-    assertEquals(r.retryable, retryable, `status ${status}`);
+    assertEquals([r.retryable, r.config === true], [retryable, config], `status ${status}`);
     assertEquals(r.status, status);
+    assertEquals(r.error, `airtable ${status}: m`);
   }
   const throwing = (() => Promise.reject(new DOMException("t", "TimeoutError"))) as unknown as typeof fetch;
   const t = await upsertCallRecord(deps(configured, throwing), {});
@@ -106,6 +150,22 @@ Deno.test("upsertCallRecord: unconfigured is a non-retryable failure and never c
     return Promise.resolve(new Response("{}"));
   }) as unknown as typeof fetch;
   const r = await upsertCallRecord(deps({}, fetchImpl), {});
-  assert(!r.ok && !r.retryable);
+  assert(!r.ok && !r.retryable && r.config === true);
   assertFalse(called);
+});
+
+Deno.test("MIRROR_COLUMNS is exactly the InteractionForMirror shape the mapping reads", () => {
+  assertEquals([...MIRROR_COLUMNS].sort(), Object.keys(row).sort());
+  assertEquals(new Set(MIRROR_COLUMNS).size, MIRROR_COLUMNS.length);
+  // never the transcript, the messages or anything else the mirror must not carry
+  for (const c of ["transcript", "messages", "analysis_raw", "recording_url", "customer_id"]) {
+    assertFalse((MIRROR_COLUMNS as readonly string[]).includes(c), c);
+  }
+});
+
+Deno.test("airtableConfigured: both the token and the base id, ignoring blanks", () => {
+  assert(airtableConfigured(configured));
+  assertFalse(airtableConfigured({ AIRTABLE_TOKEN: "pat123" }));
+  assertFalse(airtableConfigured({ AIRTABLE_BASE_ID: "appBASE" }));
+  assertFalse(airtableConfigured({ AIRTABLE_TOKEN: " ", AIRTABLE_BASE_ID: "appBASE" }));
 });

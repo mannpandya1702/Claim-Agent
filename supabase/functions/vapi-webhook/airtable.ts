@@ -9,6 +9,7 @@
 // Only already-redacted, slim fields cross the boundary: no transcript, no messages, no DOB, and
 // the caller's number as its last four digits only.
 
+import { dashboardLink } from "./alert.ts";
 import type { Deps } from "./types.ts";
 
 export const DEFAULT_TABLE = "Call Log";
@@ -33,9 +34,39 @@ export interface InteractionForMirror {
   analysis_status: string | null;
 }
 
+/** Exactly the InteractionForMirror columns, in the select list store.ts sends. */
+export const MIRROR_COLUMNS = [
+  "vapi_call_id",
+  "channel",
+  "caller_name",
+  "caller_phone",
+  "summary",
+  "sentiment",
+  "outcome",
+  "escalated",
+  "emergency",
+  "flags",
+  "started_at",
+  "ended_at",
+  "duration_seconds",
+  "cost",
+  "analysis_status",
+] as const satisfies readonly (keyof InteractionForMirror)[];
+// A column added to the interface but not to the list fails the type check here.
+const _everyMirrorColumn: Exclude<keyof InteractionForMirror, typeof MIRROR_COLUMNS[number]> extends never ? true
+  : never = true;
+void _everyMirrorColumn;
+
+/** Both values the upsert needs; without them the mirror is off, not failing. */
+export function airtableConfigured(env: { AIRTABLE_TOKEN?: string; AIRTABLE_BASE_ID?: string }): boolean {
+  return !!env?.AIRTABLE_TOKEN?.trim() && !!env?.AIRTABLE_BASE_ID?.trim();
+}
+
+// config: the destination refused the request whatever the record held (token, scope, base or table),
+// so no row is to blame and every row would fail the same way until the setting is fixed.
 export type AirtableResult =
   | { ok: true; recordId: string; created: boolean }
-  | { ok: false; status?: number; error: string; retryable: boolean };
+  | { ok: false; status?: number; error: string; retryable: boolean; config?: boolean };
 
 function phoneEnding(phone: string | null): string | null {
   if (!phone) return null;
@@ -69,16 +100,19 @@ export function interactionToFields(row: InteractionForMirror, syncedAt: Date, d
     "Analysis Status": row.analysis_status,
     "Synced At": syncedAt.toISOString(),
   };
-  if (dashboardUrl) fields["Dashboard"] = `${dashboardUrl.replace(/\/+$/, "")}/#/calls/${encodeURIComponent(row.vapi_call_id)}`;
+  // The alerts' link builder: a URL with credentials, another scheme or a malformed id gives no link.
+  const link = dashboardLink(dashboardUrl, row.vapi_call_id);
+  if (link) fields["Dashboard"] = link;
   // Airtable rejects explicit nulls on some field types; an absent key leaves the cell as is.
   for (const k of Object.keys(fields)) if (fields[k] === null || fields[k] === undefined) delete fields[k];
   return fields;
 }
 
-/** Upsert one record, merged on "Call ID". Never throws; classifies failures as retryable or not. */
+/** Upsert one record, merged on "Call ID". Never throws; classifies each failure as retryable, a
+ *  configuration error, or neither. */
 export async function upsertCallRecord(deps: Deps, fields: Record<string, unknown>, timeoutMs = 5000): Promise<AirtableResult> {
   const { AIRTABLE_TOKEN: token, AIRTABLE_BASE_ID: baseId } = deps.env;
-  if (!token || !baseId) return { ok: false, error: "airtable not configured", retryable: false };
+  if (!token || !baseId) return { ok: false, error: "airtable not configured", retryable: false, config: true };
   const table = deps.env.AIRTABLE_TABLE || DEFAULT_TABLE;
   const url = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(table)}`;
   let res: Response;
@@ -104,8 +138,12 @@ export async function upsertCallRecord(deps: Deps, fields: Record<string, unknow
     return { ok: true, recordId: rec.id, created: Array.isArray(body?.createdRecords) && body.createdRecords.includes(rec.id) };
   }
   const message = body?.error?.message ?? body?.error?.type ?? body?.error ?? res.statusText;
-  // 429 (5 req/s per base) and 5xx are transient; 401/403/404/422 are configuration or schema
-  // problems that a retry cannot fix, so they stop the outbox row instead of burning attempts.
-  const retryable = res.status === 429 || res.status >= 500;
-  return { ok: false, status: res.status, error: `airtable ${res.status}: ${String(message).slice(0, 200)}`, retryable };
+  const error = `airtable ${res.status}: ${String(message).slice(0, 200)}`;
+  // 401/403/404 are the token, its scopes, or the base or table: a setting, not this record, so the
+  // outbox pauses with the row's attempt given back. 429 (5 req/s per base) and 5xx are transient.
+  // Anything else (422: a value this record holds) a retry cannot fix, so that row stops.
+  if (res.status === 401 || res.status === 403 || res.status === 404) {
+    return { ok: false, status: res.status, error, retryable: false, config: true };
+  }
+  return { ok: false, status: res.status, error, retryable: res.status === 429 || res.status >= 500 };
 }

@@ -154,6 +154,17 @@ export type Channel = typeof CHANNELS[number];
 export const ALERT_SINKS = ["telegram", "email"] as const;
 export type AlertSink = typeof ALERT_SINKS[number];
 
+// Scheduled jobs: invoke_job in 0004_automation.sql POSTs <fn>/jobs/<name> for exactly these.
+export const JOB_NAMES = ["sla", "digest", "reaper", "outbox"] as const;
+export type JobName = typeof JOB_NAMES[number];
+
+// outbox_events CHECK lists (0005_outbox.sql).
+export const OUTBOX_KINDS = ["interaction.completed"] as const;
+export type OutboxKind = typeof OUTBOX_KINDS[number];
+
+export const OUTBOX_DESTINATIONS = ["airtable"] as const;
+export type OutboxDestination = typeof OUTBOX_DESTINATIONS[number];
+
 export const MAIN_LINE_SPOKEN = "1-800-555-0142";
 export const CLAIMS_URL_SPOKEN = "observeinsurance dot com slash claims";
 export const TIMEZONE = "America/New_York";

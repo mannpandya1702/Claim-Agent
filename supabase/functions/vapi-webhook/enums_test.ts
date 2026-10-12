@@ -18,8 +18,11 @@ import {
   ESCALATION_REASONS,
   ESCALATION_STATUSES,
   INFO_EMAIL_TOPICS,
+  JOB_NAMES,
   LEVELS,
   MODEL_ESCALATION_REASONS,
+  OUTBOX_DESTINATIONS,
+  OUTBOX_KINDS,
   OUTCOMES,
   SENTIMENT_SOURCES,
   SENTIMENTS,
@@ -28,18 +31,21 @@ import {
 
 const SQL = await Deno.readTextFile(new URL("../../migrations/0001_init.sql", import.meta.url));
 
-function tableBody(table: string): string {
-  const start = SQL.indexOf(`create table ${table} (`);
-  assert(start >= 0, `table ${table} not found in 0001_init.sql`);
-  const end = SQL.indexOf("\n);", start);
+const OUTBOX_SQL = await Deno.readTextFile(new URL("../../migrations/0005_outbox.sql", import.meta.url));
+const AUTOMATION_SQL = await Deno.readTextFile(new URL("../../migrations/0004_automation.sql", import.meta.url));
+
+function tableBody(table: string, sql = SQL): string {
+  const start = sql.indexOf(`create table ${table} (`);
+  assert(start >= 0, `table ${table} not found`);
+  const end = sql.indexOf("\n);", start);
   assert(end > start, `table ${table} has no closing parenthesis`);
-  return SQL.slice(start, end);
+  return sql.slice(start, end);
 }
 
 /** The quoted values of `<column> text ... check (<column> in (...))` inside one table. */
-function checkList(table: string, column: string): string[] {
+function checkList(table: string, column: string, sql = SQL): string[] {
   const re = new RegExp(String.raw`^\s*${column}\s+text\b[^\n]*?check\s*\(\s*${column}\s+in\s*\(([^)]*)\)`, "m");
-  const match = re.exec(tableBody(table));
+  const match = re.exec(tableBody(table, sql));
   assert(match, `no CHECK list for ${table}.${column}`);
   return [...match[1].matchAll(/'([^']*)'/g)].map((m) => m[1]);
 }
@@ -66,6 +72,19 @@ Deno.test("every enums.ts list equals its CHECK constraint in 0001_init.sql, in 
   for (const [table, column, values] of PAIRS) {
     assertEquals(checkList(table, column), [...values], `${table}.${column}`);
   }
+});
+
+Deno.test("the outbox lists equal the CHECK constraints in 0005_outbox.sql", () => {
+  assertEquals(checkList("outbox_events", "kind", OUTBOX_SQL), [...OUTBOX_KINDS]);
+  assertEquals(checkList("outbox_events", "destination", OUTBOX_SQL), [...OUTBOX_DESTINATIONS]);
+});
+
+Deno.test("JOB_NAMES are exactly the jobs invoke_job accepts and pg_cron schedules (0004_automation.sql)", () => {
+  const accepted = /if p_name not in \(([^)]*)\)/.exec(AUTOMATION_SQL);
+  assert(accepted, "invoke_job's name list was found");
+  assertEquals([...accepted[1].matchAll(/'([^']*)'/g)].map((m) => m[1]), [...JOB_NAMES]);
+  const scheduled = [...AUTOMATION_SQL.matchAll(/public\.invoke_job\('([a-z]+)'\)/g)].map((m) => m[1]);
+  assertEquals(scheduled, [...JOB_NAMES]);
 });
 
 Deno.test("transcript_lines.role accepts exactly the two roles TranscriptLine allows", () => {

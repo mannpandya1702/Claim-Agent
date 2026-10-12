@@ -6,6 +6,7 @@
 
 import { type Channel, CHANNELS, type Code, CODES } from "./enums.ts";
 import { callerIdNumber } from "./identity.ts";
+import { isJobName, runJob } from "./jobs.ts";
 import { callKeyOf, parseCalls } from "./parse_tool_request.ts";
 import { onEndOfCallReport, onStatusUpdate, onTranscript } from "./post_call.ts";
 import { redactDeep, redactPII } from "./redact.ts";
@@ -43,6 +44,7 @@ export interface Routes {
   onStatusUpdate: typeof onStatusUpdate;
   onTranscript: typeof onTranscript;
   onEndOfCallReport: typeof onEndOfCallReport;
+  runJob: typeof runJob;
 }
 
 export interface HandlerOptions {
@@ -60,7 +62,6 @@ export interface ToolCallResponse {
 
 type Obj = Record<string, unknown>;
 
-const JOB_NAMES = new Set(["sla", "digest", "reaper"]);
 const TRANSCRIPT_TYPES = new Set(["transcript", 'transcript[transcriptType="final"]']);
 const JOB_PATH_RE = /\/jobs\/([A-Za-z0-9_-]{1,64})$/;
 const BEARER_RE = /^Bearer[ \t]+(\S+)[ \t]*$/i;
@@ -268,7 +269,14 @@ export function createHandler(
   overrides: Partial<Routes> = {},
   options: HandlerOptions = {},
 ): (req: Request, deps: Deps) => Promise<Response> {
-  const routes: Routes = { runTool: runToolBudgeted, onStatusUpdate, onTranscript, onEndOfCallReport, ...overrides };
+  const routes: Routes = {
+    runTool: runToolBudgeted,
+    onStatusUpdate,
+    onTranscript,
+    onEndOfCallReport,
+    runJob,
+    ...overrides,
+  };
   const backstopMs = options.backstopMs ?? TOOL_BACKSTOP_MS;
   const batchMs = options.batchMs ?? BATCH_BUDGET_MS;
 
@@ -365,13 +373,20 @@ export function createHandler(
     const job = JOB_PATH_RE.exec(path);
     if (job) {
       line.type = "job";
-      // The route does not exist for anyone without the jobs bearer; with it, the job runner
-      // (jobs.ts) is not deployed yet, so a known job name is reported as not implemented.
-      if (!bearerMatches(req, deps.env.JOBS_BEARER) || !JOB_NAMES.has(job[1])) {
+      // The route does not exist for anyone without the jobs bearer, and an unknown name looks the same.
+      const name = job[1];
+      if (!bearerMatches(req, deps.env.JOBS_BEARER) || !isJobName(name)) {
         return json(404, { error: "not_found" });
       }
-      line.tool = job[1];
-      return json(501, { error: "not_implemented", job: job[1] });
+      line.tool = name;
+      try {
+        // A period already run answers {skipped: true} at 200: pg_net and the operator both read it.
+        return json(200, await routes.runJob(name, deps));
+      } catch (e) {
+        // pg_cron does not retry; the next period runs, and the log line carries the reason.
+        line.error = errorText(e);
+        return json(500, { error: "job_failed" });
+      }
     }
 
     if (!bearerMatches(req, deps.env.VAPI_WEBHOOK_SECRET)) {

@@ -13,6 +13,8 @@
 import { assert, assertEquals, assertFalse, assertRejects } from "@std/assert";
 import { loadEnv } from "./lib/env.ts";
 import { lit, sqlClient } from "./lib/sql.ts";
+import { MIRROR_COLUMNS } from "../supabase/functions/vapi-webhook/airtable.ts";
+import type { JobName } from "../supabase/functions/vapi-webhook/enums.ts";
 import { createStore, type StoreExtras } from "../supabase/functions/vapi-webhook/store.ts";
 
 const env = loadEnv();
@@ -32,12 +34,14 @@ const sql = sqlClient(env);
 const run = crypto.randomUUID().slice(0, 8);
 const DOB = [1986, 3, 14] as const;
 
-// Grants the dashboard migration (0003) gives to authenticated. Anything outside this list is a
-// failure; before 0003 is applied authenticated must hold nothing at all.
+// Grants the dashboard migration (0003) and the outbox migration (0005, the staff read of
+// outbox_events) give to authenticated. Anything outside this list is a failure; before 0003 is
+// applied authenticated must hold nothing at all.
 const AUTHENTICATED_ALLOWLIST = [
   ...["staff", "call_interactions", "attempts", "call_sessions", "escalations", "emails", "job_runs"]
     .map((t) => `table:${t}:SELECT`),
   "table:transcript_lines:SELECT",
+  "table:outbox_events:SELECT",
   "table:ops_health:SELECT",
   "column:call_interactions.staff_notes:UPDATE",
   ...[
@@ -57,6 +61,8 @@ const SERVER_FUNCTIONS = [
   "verify_dob_attempt(text,integer,integer,integer,text)",
   "upsert_escalation(text,text,text,text,text,text,text,boolean)",
   "upsert_interaction(jsonb)",
+  "enqueue_outbox(text,text,text)",
+  "claim_outbox(integer)",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -565,6 +571,16 @@ await test("runtime: anon and authenticated are denied the customer data and the
   exception when insufficient_privilege then null;
   end;
   begin
+    perform public.enqueue_outbox('interaction.completed', 'dbtest-denied');
+    assert false, '${role} can call enqueue_outbox';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform public.claim_outbox(1);
+    assert false, '${role} can call claim_outbox';
+  exception when insufficient_privilege then null;
+  end;
+  begin
     insert into public.escalations (call_key, kind, reason, channel) values ('dbtest-denied', 'emergency', 'emergency', 'x');
     assert false, '${role} can insert escalations';
   exception when insufficient_privilege then null;
@@ -580,6 +596,49 @@ await test("runtime: anon and authenticated are denied the customer data and the
   // anon is denied every table; authenticated may read the dashboard tables once 0003 is applied
   await sql(denied("anon", true));
   await sql(denied("authenticated", false));
+});
+
+await test("outbox: enqueue_outbox inserts once and re-arms; claim_outbox bumps attempts and stops at five", async () => {
+  const k = lit(`dbtest-outbox-${run}`);
+  await sql(tx(doBlock(
+    `
+  perform enqueue_outbox('interaction.completed', ${k});
+  perform enqueue_outbox('interaction.completed', ${k}, 'airtable');
+  assert (select count(*) from outbox_events where ref_id = ${k}) = 1, 'one row per (kind, ref_id, destination)';
+  select id into v_id from outbox_events where ref_id = ${k};
+  -- the oldest pending row, so a claim of one takes it whatever else is queued
+  update outbox_events set created_at = '2001-01-01T00:00:00Z' where id = v_id;
+
+  select * into r from claim_outbox(1);
+  assert r.id = v_id and r.attempts = 1 and r.delivered_at is null, format('first claim: %s/%s', r.id, r.attempts);
+  select * into r from claim_outbox(1);
+  assert r.id = v_id and r.attempts = 2, format('second claim: %s/%s', r.id, r.attempts);
+
+  update outbox_events set delivered_at = now(), last_error = 'old', external_id = 'recDB' where id = v_id;
+  assert not exists (select 1 from claim_outbox(1000) c where c.id = v_id), 'a delivered row was claimed';
+
+  perform enqueue_outbox('interaction.completed', ${k});
+  select * into r from outbox_events where id = v_id;
+  assert r.delivered_at is null and r.attempts = 0 and r.last_error is null and r.external_id = 'recDB'
+    and r.created_at = '2001-01-01T00:00:00Z', 're-arm must reset delivery and budget, keep the record id and position';
+
+  update outbox_events set attempts = 4 where id = v_id;
+  select * into r from claim_outbox(1);
+  assert r.id = v_id and r.attempts = 5, format('last claim: %s/%s', r.id, r.attempts);
+  assert not exists (select 1 from claim_outbox(1000) c where c.id = v_id), 'a row at five attempts was claimed';
+
+  begin
+    perform enqueue_outbox('escalation.created', ${k});
+    assert false, 'an unknown kind was accepted';
+  exception when check_violation then null;
+  end;
+  begin
+    perform enqueue_outbox('interaction.completed', ${k}, 'sheets');
+    assert false, 'an unknown destination was accepted';
+  exception when check_violation then null;
+  end;`,
+    "r record; v_id uuid;",
+  )));
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -817,6 +876,222 @@ await test("store.ts round trip through PostgREST maps every method onto the sch
       delete from webhook_captures where call_key = ${kk};
       delete from claims where customer_id = ${lit(f.customerId)};
       delete from customers where id = ${lit(f.customerId)};
+      commit;`);
+  }
+});
+
+await test("store.ts round trip: the outbox, job runs and the scheduled jobs' reads and writes", async () => {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return "skip";
+  // Every row sits in 2001 (or carries this run's prefix), so the windowed reads below can only
+  // see what this case wrote, and the cleanup can only delete it.
+  const k = `dbtest-jobs-${run}`;
+  const ended = `${k}-ended`;
+  const unqueued = `${k}-unqueued`;
+  const stuck = `${k}-stuck`;
+  const open = `${k}-open`;
+  const chat = `${k}-chat`;
+  const claimed = `${k}-claimed`;
+  const job = `dbtest-${run}` as JobName; // job_runs.job has no CHECK; ops_health never reads it
+  const day = { from: "2001-01-01T00:00:00Z", to: "2001-01-02T00:00:00Z" };
+  const store = createStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY) as
+    & ReturnType<typeof createStore>
+    & StoreExtras;
+  const like = lit(`${k}%`);
+  const ref = { kind: "interaction.completed", refId: ended, destination: "airtable" } as const;
+  try {
+    // outbox: the claim's compare-and-set, the lease and the guarded finish. An insert does not
+    // fire the touch trigger, so the row heads the queue (2001) and reads as never written since
+    // (both timestamps equal): the one untargeted claim below takes it and no real row. Every
+    // later claim names the row.
+    await sql(`insert into outbox_events (kind, ref_id, destination, created_at, updated_at)
+      values ('interaction.completed', ${lit(ended)}, 'airtable', '2001-01-01T00:00:00Z', '2001-01-01T00:00:00Z')`);
+    const [c] = await store.claimOutbox(1);
+    assertEquals(
+      [c?.ref_id, c?.attempts, c?.kind, c?.destination, c?.delivered_at, c?.external_id],
+      [ended, 1, "interaction.completed", "airtable", null, null],
+    );
+    assert(Date.parse(c.updated_at) > Date.parse(day.to), "the claim returns its own write time");
+    assertEquals(await store.claimOutbox(1, ref), [], "a claimed row is held for the lease");
+    // eight runners after one fresh row at once: the compare-and-set lets exactly one take it
+    const race = `${k}-race`;
+    await sql(`insert into outbox_events (kind, ref_id, destination, created_at, updated_at)
+      values ('interaction.completed', ${lit(race)}, 'airtable', '2001-01-01T00:00:01Z', '2001-01-01T00:00:01Z')`);
+    const raceRef = { ...ref, refId: race };
+    const won = (await Promise.all(Array.from({ length: 8 }, () => store.claimOutbox(1, raceRef)))).flat();
+    assertEquals(won.map((r) => [r.ref_id, r.attempts]), [[race, 1]]);
+    assertEquals(await sql(`select attempts from outbox_events where ref_id = ${lit(race)}`), [{ attempts: 1 }]);
+    const outboxRow = async () =>
+      (await sql<{ attempts: number; delivered: boolean; last_error: string | null; external_id: string | null }>(
+        `select attempts, delivered_at is not null delivered, last_error, external_id from outbox_events
+         where ref_id = ${lit(ended)}`,
+      ))[0];
+    assert(
+      await store.finishOutbox(c.id, {
+        delivered: false,
+        error: "airtable 429: account 98765432101",
+        attempt: 1,
+        claimedAt: c.updated_at,
+      }),
+    );
+    assertEquals(await outboxRow(), {
+      attempts: 1,
+      delivered: false,
+      last_error: "airtable 429: account [digits]",
+      external_id: null,
+    });
+    assertFalse(await store.finishOutbox(c.id, { delivered: true, externalId: "recX", attempt: 7 }), "attempt guard");
+    assertFalse(
+      await store.finishOutbox(c.id, { delivered: true, externalId: "recX", attempt: 1, claimedAt: c.updated_at }),
+      "write-time guard: the row was written after this claim",
+    );
+    assert(await store.finishOutbox(c.id, { delivered: true, externalId: "recDB", attempt: 1 }));
+    assertEquals(await outboxRow(), { attempts: 1, delivered: true, last_error: null, external_id: "recDB" });
+    assert(await store.finishOutbox(c.id, { delivered: false, error: "airtable 401: bad token", refund: true, attempt: 1 }));
+    assertEquals((await outboxRow()).attempts, 0, "a refund gives the attempt back");
+    assert(await store.finishOutbox(c.id, { delivered: false, error: "airtable 422: bad value", dead: true }));
+    assertEquals((await outboxRow()).attempts, 5);
+    assertFalse(await store.finishOutbox(crypto.randomUUID(), { delivered: true }));
+    await store.enqueueOutbox("interaction.completed", ended);
+    assertEquals((await outboxRow()).attempts, 0);
+    assertEquals(await store.claimOutbox(1, ref), [], "a re-armed row waits out the lease too");
+
+    await sql(`begin;
+      insert into call_interactions (vapi_call_id, channel, caller_name, caller_phone, summary, sentiment, outcome,
+        flags, started_at, ended_at, duration_seconds, ended_reason, cost, transcript, analysis_status, created_at)
+      values (${lit(ended)}, 'webCall', 'Dbtest Customer', '+19990000000', 'Round trip.', 'positive', 'resolved',
+              '{tool_markup_spoken}', '2001-01-01T10:00:00Z', '2001-01-01T10:02:00Z', 120, 'customer-ended-call',
+              0.1234, 'AI: not mirrored', 'ok', '2001-01-01T10:00:00Z'),
+             (${lit(unqueued)}, 'webCall', 'Dbtest Customer', null, 'Unqueued.', 'neutral', 'resolved', '{}',
+              '2001-01-01T10:03:00Z', '2001-01-01T10:05:00Z', 120, 'customer-ended-call', 0.01, null, 'ok',
+              '2001-01-01T10:03:00Z'),
+             (${lit(stuck)}, 'webCall', null, null, null, null, 'in_progress', '{}', '2001-01-01T09:00:00Z', null,
+              null, null, null, null, 'pending', '2001-01-01T09:00:00Z');
+      insert into call_interactions (vapi_call_id, outcome) values (${lit(open)}, 'in_progress');
+      insert into escalations (call_key, kind, reason, channel, status, created_at)
+      values (${lit(ended)}, 'representative', 'representative_requested', 'webCall', 'open', '2001-01-01T10:01:00Z'),
+             (${lit(chat)}, 'representative', 'representative_requested', 'chat', 'open', '2001-01-01T10:01:00Z'),
+             (${lit(claimed)}, 'emergency', 'emergency', 'webCall', 'claimed', '2001-01-01T10:01:00Z');
+      insert into emails (call_key, kind, to_masked, status, created_at)
+      values (${lit(ended)}, 'claim_summary', 'd***@example.com', 'sent', '2001-01-01T11:00:00Z');
+      insert into transcript_lines (call_key, role, text, ts_ms, created_at)
+      values (${lit(`${k}-orphan`)}, 'user', '[answer withheld]', 1, '2001-01-01T09:01:00Z'),
+             (${lit(open)}, 'assistant', 'Hello.', 1, '2001-01-01T09:01:00Z'),
+             (${lit(ended)}, 'assistant', 'Hello.', 1, '2001-01-01T10:00:01Z');
+      insert into webhook_captures (message_type, call_key, body, received_at)
+      values ('status-update', ${lit(ended)}, '{}', '2001-01-01T10:00:00Z');
+      insert into job_runs (job, period_key, started_at) values (${lit(job)}, 'old', '2001-01-01T10:00:00Z');
+      commit;`);
+
+    const mirror = await store.getInteractionForMirror(ended);
+    assert(mirror);
+    assertEquals(Object.keys(mirror).sort(), [...MIRROR_COLUMNS].sort());
+    assertEquals([mirror.caller_name, mirror.flags, Number(mirror.cost), mirror.duration_seconds], [
+      "Dbtest Customer",
+      ["tool_markup_spoken"],
+      0.1234,
+      120,
+    ]);
+    assertEquals(await store.getInteractionForMirror(`${k}-none`), null);
+    assertEquals(
+      [await store.interactionEnded(ended), await store.interactionEnded(open), await store.interactionEnded(`${k}-none`)],
+      [true, false, false],
+    );
+
+    // the call-log sweep: the ended row whose outbox row was delivered before the record last
+    // changed, and the one with no outbox row at all, oldest end first; a pending row is no gap
+    await sql(`update outbox_events set delivered_at = '2001-01-01T10:30:00Z' where ref_id = ${lit(ended)}`);
+    assertEquals(await store.listOutboxGaps(day.from, day.to), [ended, unqueued]);
+    await sql(`update outbox_events set delivered_at = null where ref_id = ${lit(ended)}`);
+    assertEquals(await store.listOutboxGaps(day.from, day.to), [unqueued]);
+    await sql(`update outbox_events set delivered_at = now() where ref_id = ${lit(ended)}`);
+    assertEquals(await store.listOutboxGaps(day.from, day.to), [unqueued], "delivered after its last change");
+
+    assert(await store.claimJobRun(job, "p1"));
+    assertFalse(await store.claimJobRun(job, "p1"));
+    assert(await store.claimJobRun(job, "p2"));
+    await store.finishJobRun(job, "p1", { delivered: 2, skipped: "x" });
+    // a release gives back only the unfinished run, and the period can be claimed again
+    await store.releaseJobRun(job, "p1");
+    await store.releaseJobRun(job, "p2");
+    assertEquals(
+      (await sql<{ period_key: string }>(`select period_key from job_runs where job = ${lit(job)} order by 1`))
+        .map((r) => r.period_key),
+      ["old", "p1"],
+    );
+    assertFalse(await store.claimJobRun(job, "p1"));
+    assert(await store.claimJobRun(job, "p2"));
+    assertEquals(
+      await sql(`select period_key, result, finished_at is not null finished from job_runs where job = ${lit(job)}
+                 and period_key in ('p1', 'p2') order by period_key`),
+      [
+        { period_key: "p1", result: { delivered: 2, skipped: "x" }, finished: true },
+        { period_key: "p2", result: null, finished: false },
+      ],
+    );
+
+    const stale = await store.listStaleEscalations(day.to);
+    assertEquals(stale.map((e) => [e.call_key, e.kind, e.reason, e.channel, e.verified]), [
+      [ended, "representative", "representative_requested", "webCall", false],
+    ]);
+    assert(await store.markRealerted(stale[0].id));
+    const [{ at: first }] = await sql<{ at: string }>(`select realerted_at at from escalations where call_key = ${lit(ended)}`);
+    assert(first, "realerted_at set");
+    assertFalse(await store.markRealerted(stale[0].id));
+    const [{ at: second }] = await sql<{ at: string }>(`select realerted_at at from escalations where call_key = ${lit(ended)}`);
+    assertEquals(second, first, "set once");
+    assertEquals(await store.listStaleEscalations(day.to), []);
+    // a row staff claimed is never marked, so it is never paged
+    const [{ id: claimedId }] = await sql<{ id: string }>(`select id from escalations where call_key = ${lit(claimed)}`);
+    assertFalse(await store.markRealerted(claimedId));
+    assertEquals(
+      await sql(`select realerted_at from escalations where call_key = ${lit(claimed)}`),
+      [{ realerted_at: null }],
+    );
+
+    assertEquals(await store.digestStats(day.from, day.to), {
+      calls: 3,
+      completed: 2,
+      outcomes: { resolved: 2, in_progress: 1 },
+      sentiments: { positive: 1, neutral: 1, unknown: 1 },
+      flagged: 1,
+      escalations: { open: 2, claimed: 1, done: 0 },
+      emails_sent: 1,
+      total_cost: 0.1334,
+    });
+
+    assertEquals((await store.listStuckInteractions(day.to)).map((r) => r.vapi_call_id), [stuck]);
+    assert(await store.reapInteraction(stuck));
+    assertFalse(await store.reapInteraction(stuck), "a second reap finds nothing to close");
+    assertFalse(await store.reapInteraction(ended), "a completed row is never touched");
+    assertEquals(
+      await sql(`select vapi_call_id, outcome, analysis_status, ended_reason, ended_at is not null ended
+                 from call_interactions where vapi_call_id in (${lit(stuck)}, ${lit(ended)}) order by vapi_call_id`),
+      [
+        { vapi_call_id: ended, outcome: "resolved", analysis_status: "ok", ended_reason: "customer-ended-call", ended: true },
+        { vapi_call_id: stuck, outcome: "abandoned", analysis_status: "missing", ended_reason: "reaped", ended: true },
+      ],
+    );
+    assertEquals(await store.listStuckInteractions(day.to), []);
+
+    // every old line goes, the ended call's too
+    assertEquals(await store.deleteOldTranscriptLines(day.to), 3);
+    assertEquals(await sql(`select call_key from transcript_lines where call_key like ${like} order by call_key`), []);
+    assertEquals(await store.pruneWebhookCaptures(day.to), 1);
+    assertEquals(await store.pruneJobRuns([job], day.to), 1);
+    assertEquals(
+      (await sql<{ period_key: string }>(`select period_key from job_runs where job = ${lit(job)} order by 1`))
+        .map((r) => r.period_key),
+      ["p1", "p2"],
+    );
+  } finally {
+    await sql(`begin;
+      delete from outbox_events where ref_id like ${like};
+      delete from job_runs where job = ${lit(job)};
+      delete from transcript_lines where call_key like ${like};
+      delete from webhook_captures where call_key like ${like};
+      delete from emails where call_key like ${like};
+      delete from escalations where call_key like ${like};
+      delete from call_interactions where vapi_call_id like ${like};
       commit;`);
   }
 });

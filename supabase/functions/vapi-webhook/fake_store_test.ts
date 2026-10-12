@@ -3,7 +3,8 @@
 
 import { assert, assertEquals, assertFalse, assertRejects } from "@std/assert";
 import { createFakeStore, demoSeed } from "./fake_store.ts";
-import type { InteractionRow } from "./types.ts";
+import { OUTBOX_LEASE_MS } from "./store_rules.ts";
+import type { InteractionRow, OutboxRef } from "./types.ts";
 
 const TOBIAS = "6b0d6f0e-1c11-4c7a-9a01-000000000101";
 const TOBIAS_PHONE = "+16025550101";
@@ -631,4 +632,485 @@ Deno.test("demoSeed mirrors 0002_seed.sql row for row", () => {
   // Ines has no claims (no_claims branch) and nobody owns the not-found number
   assertFalse(seed.claims.some((k) => k.customer_id.endsWith("105")));
   assertFalse(seed.customers.some((c) => c.phone_e164 === NOBODY_PHONE));
+});
+
+// ---------------------------------------------------------------------------------------------
+// Outbox (0005_outbox.sql), job runs and the scheduled jobs' reads (0001, 0004). The same
+// sequences run against the live database in scripts/db_test.ts.
+// ---------------------------------------------------------------------------------------------
+const DAY = 24 * 60 * 60 * 1000;
+const isoAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+/** A fake store on a clock the test moves, as the outbox lease is measured in time. */
+function clockedStore(start = "2026-10-12T15:00:00.000Z") {
+  let t = Date.parse(start);
+  const store = createFakeStore(undefined, { now: () => new Date(t) });
+  return {
+    store,
+    advance: (ms: number) => {
+      t += ms;
+    },
+    at: (iso: string) => {
+      t = Date.parse(iso);
+    },
+  };
+}
+
+Deno.test("outbox: one row per (kind, ref_id, destination); enqueue again re-arms it with a fresh budget", async () => {
+  const { store, advance } = clockedStore();
+  await store.enqueueOutbox("interaction.completed", "c1");
+  await store.enqueueOutbox("interaction.completed", "c1", "airtable");
+  assertEquals(store.tables.outbox_events.length, 1);
+  const row = store.tables.outbox_events[0];
+  assertEquals(
+    [row.kind, row.destination, row.attempts, row.delivered_at, row.last_error, row.external_id],
+    ["interaction.completed", "airtable", 0, null, null, null],
+  );
+  advance(OUTBOX_LEASE_MS + 1000); // the second enqueue was a write: the row sits out the lease first
+  const [claimed] = await store.claimOutbox(1);
+  assert(await store.finishOutbox(claimed.id, { delivered: true, externalId: "rec1" }));
+  const createdAt = row.created_at;
+  await store.enqueueOutbox("interaction.completed", "c1");
+  assertEquals([row.delivered_at, row.attempts, row.last_error], [null, 0, null]);
+  assertEquals([row.external_id, row.created_at], ["rec1", createdAt], "the record id and queue position stay");
+  await assertRejects(() => store.enqueueOutbox("escalation.created" as never, "c1"), Error, "23514");
+  await assertRejects(() => store.enqueueOutbox("interaction.completed", "c1", "sheets" as never), Error, "23514");
+});
+
+Deno.test("outbox: a claim takes the oldest due rows, bumps attempts, and never a delivered or spent row", async () => {
+  const { store, advance } = clockedStore();
+  // inserted in reverse, a second apart, so the queue order is created_at and not insertion order
+  for (const k of ["c4", "c3", "c2", "c1"]) {
+    await store.enqueueOutbox("interaction.completed", k);
+    advance(-1000);
+  }
+  advance(4000);
+  const [c4, c3, c2, c1] = store.tables.outbox_events;
+  assert(c1.created_at < c2.created_at && c2.created_at < c3.created_at && c3.created_at < c4.created_at);
+  c1.delivered_at = isoAgo(500);
+  c2.attempts = 5;
+  const first = await store.claimOutbox(1);
+  assertEquals(first.map((r) => [r.ref_id, r.attempts]), [["c3", 1]]);
+  assertEquals(
+    (await store.claimOutbox(0)).map((r) => [r.ref_id, r.attempts]),
+    [["c4", 1]],
+    "limit is at least one, and the row just claimed is passed over",
+  );
+  assertEquals(await store.claimOutbox(20), [], "every due row is inside its lease");
+  advance(OUTBOX_LEASE_MS + 1000);
+  assertEquals((await store.claimOutbox(20)).map((r) => [r.ref_id, r.attempts]), [["c3", 2], ["c4", 2]]);
+  c3.attempts = 4;
+  advance(OUTBOX_LEASE_MS + 1000);
+  assertEquals((await store.claimOutbox(20)).map((r) => [r.ref_id, r.attempts]), [["c3", 5], ["c4", 3]]);
+  advance(OUTBOX_LEASE_MS + 1000);
+  assertEquals((await store.claimOutbox(20)).map((r) => r.ref_id), ["c4"], "a row at five attempts is never claimed");
+  await assertRejects(() => store.claimOutbox(1.5), Error, "22P02");
+});
+
+Deno.test("outbox lease: a fresh row is claimable at once; any write (claim, failure, re-arm) holds it for the lease", async () => {
+  const { store, advance, at } = clockedStore();
+  await store.enqueueOutbox("interaction.completed", "c1");
+  const row = store.tables.outbox_events[0];
+  assertEquals(row.created_at, row.updated_at, "never written since its insert");
+
+  const [claimed] = await store.claimOutbox(1);
+  assertEquals([claimed.attempts, claimed.updated_at], [1, row.updated_at], "the claim returns its own write time");
+  assert(claimed.updated_at > claimed.created_at);
+  at(new Date(Date.parse(claimed.updated_at) + OUTBOX_LEASE_MS).toISOString());
+  assertEquals(await store.claimOutbox(1), [], "in flight for the whole lease: nobody else may take it");
+  advance(1);
+  const [again] = await store.claimOutbox(1);
+  assertEquals(again.attempts, 2, "a delivery that never finished is retried once the lease is over");
+
+  // a failed delivery backs off for the lease
+  assert(await store.finishOutbox(again.id, { delivered: false, error: "airtable 503", attempt: 2, claimedAt: again.updated_at }));
+  assertEquals(await store.claimOutbox(1), []);
+  advance(OUTBOX_LEASE_MS + 1000);
+  const [third] = await store.claimOutbox(1);
+  assertEquals(third.attempts, 3);
+
+  // a re-arm while that delivery is in flight holds the row too: the stale request finishes first
+  await store.enqueueOutbox("interaction.completed", "c1");
+  assertEquals(row.attempts, 0);
+  assertEquals(await store.claimOutbox(1), []);
+  advance(OUTBOX_LEASE_MS + 1000);
+  assertEquals((await store.claimOutbox(1)).map((r) => r.attempts), [1]);
+});
+
+Deno.test("outbox: a claim for one call's row takes only that row", async () => {
+  const { store, advance } = clockedStore();
+  await store.enqueueOutbox("interaction.completed", "backlog");
+  advance(1000);
+  await store.enqueueOutbox("interaction.completed", "c2");
+  const ref: OutboxRef = { kind: "interaction.completed", refId: "c2", destination: "airtable" };
+  assertEquals((await store.claimOutbox(5, ref)).map((r) => [r.ref_id, r.attempts]), [["c2", 1]]);
+  assertEquals(await store.claimOutbox(5, ref), [], "its own row inside the lease is not taken again");
+  assertEquals(await store.claimOutbox(5, { ...ref, refId: "no-such-call" }), []);
+  assertEquals(store.tables.outbox_events.map((o) => [o.ref_id, o.attempts]), [["backlog", 0], ["c2", 1]]);
+});
+
+Deno.test("outbox: finishing records delivery, or a masked capped error; dead spends the budget; the attempt guards", async () => {
+  const { store, advance } = clockedStore();
+  await store.enqueueOutbox("interaction.completed", "c1");
+  const row = store.tables.outbox_events[0];
+  let [claimed] = await store.claimOutbox(1);
+
+  const long = `airtable 422: Cannot parse value for account 98765432101 near +1 602 555 0101 ${"x".repeat(400)}`;
+  assert(await store.finishOutbox(claimed.id, { delivered: false, error: long }));
+  assertEquals([row.attempts, row.delivered_at], [1, null]);
+  assertEquals(row.last_error.length, 300);
+  assert(row.last_error.startsWith("airtable 422: Cannot parse value for account [digits] near [phone ending 0101]"));
+  await store.finishOutbox(claimed.id, { delivered: false });
+  assertEquals(row.last_error, "delivery failed");
+
+  // a delivery that started before a re-arm cannot mark the newer version done
+  await store.enqueueOutbox("interaction.completed", "c1");
+  assertFalse(await store.finishOutbox(claimed.id, { delivered: true, externalId: "rec1", attempt: claimed.attempts }));
+  assertEquals([row.delivered_at, row.attempts], [null, 0]);
+  // not even once a new claim has brought attempts back to the value it saw: the write time differs
+  const stale = claimed;
+  advance(OUTBOX_LEASE_MS + 1000);
+  [claimed] = await store.claimOutbox(1);
+  assertEquals(claimed.attempts, stale.attempts, "attempts repeat after a re-arm");
+  const staleFinish = { delivered: true, externalId: "rec0", attempt: stale.attempts, claimedAt: stale.updated_at };
+  assertFalse(await store.finishOutbox(stale.id, staleFinish));
+  assertEquals([row.delivered_at, row.external_id], [null, null]);
+  assert(
+    await store.finishOutbox(claimed.id, {
+      delivered: true,
+      externalId: "rec1",
+      attempt: claimed.attempts,
+      claimedAt: claimed.updated_at,
+    }),
+  );
+  assertEquals([row.external_id, row.last_error], ["rec1", null]);
+  assert(row.delivered_at);
+  await store.finishOutbox(claimed.id, { delivered: true });
+  assertEquals(row.external_id, "rec1", "a delivery without a record id keeps the stored one");
+
+  // a refund (the destination refused every request) gives the claim's attempt back
+  await store.enqueueOutbox("interaction.completed", "c1");
+  advance(OUTBOX_LEASE_MS + 1000);
+  [claimed] = await store.claimOutbox(1);
+  assertEquals(row.attempts, 1);
+  const refund = { delivered: false, error: "airtable 401: bad token", refund: true, attempt: 1 };
+  assert(await store.finishOutbox(claimed.id, { ...refund, claimedAt: claimed.updated_at }));
+  assertEquals([row.attempts, row.last_error, row.delivered_at], [0, "airtable 401: bad token", null]);
+  assertFalse(await store.finishOutbox(claimed.id, { ...refund, claimedAt: claimed.updated_at }), "once per claim");
+  assertEquals(row.attempts, 0);
+
+  await store.enqueueOutbox("interaction.completed", "c1");
+  advance(OUTBOX_LEASE_MS + 1000);
+  [claimed] = await store.claimOutbox(1);
+  await store.finishOutbox(claimed.id, { delivered: false, error: "airtable 401: bad token", dead: true });
+  assertEquals([row.attempts, row.last_error, row.delivered_at], [5, "airtable 401: bad token", null]);
+  assertEquals(await store.claimOutbox(1), []);
+
+  assertFalse(await store.finishOutbox(crypto.randomUUID(), { delivered: true }));
+  await assertRejects(() => store.finishOutbox("not-a-uuid", { delivered: true }), Error, "22P02");
+});
+
+Deno.test("getInteractionForMirror: exactly the mirror columns, or null", async () => {
+  const store = createFakeStore();
+  assertEquals(await store.getInteractionForMirror("c1"), null);
+  await store.upsertInteraction({
+    vapi_call_id: "c1",
+    caller_phone: "+16025550101",
+    summary: "s",
+    ended_at: "2026-10-12T15:02:00Z",
+    transcript: "AI: hi",
+    flags: ["tool_markup_spoken"],
+    cost: 0.25,
+  });
+  const row = await store.getInteractionForMirror("c1");
+  assert(row);
+  assertEquals(Object.keys(row).sort(), [
+    "analysis_status",
+    "caller_name",
+    "caller_phone",
+    "channel",
+    "cost",
+    "duration_seconds",
+    "emergency",
+    "ended_at",
+    "escalated",
+    "flags",
+    "outcome",
+    "sentiment",
+    "started_at",
+    "summary",
+    "vapi_call_id",
+  ]);
+  assertEquals([row.flags, row.cost, row.ended_at], [["tool_markup_spoken"], 0.25, "2026-10-12T15:02:00Z"]);
+  row.flags!.push("x");
+  assertEquals(store.tables.call_interactions[0].flags, ["tool_markup_spoken"], "a copy, not the stored array");
+});
+
+Deno.test("listOutboxGaps: ended in [from, to), with no outbox row or one delivered before the record changed", async () => {
+  const store = createFakeStore();
+  const call = async (key: string, endedAt: string | null, updatedAt: string) => {
+    await store.ensureInteraction({ vapi_call_id: key, outcome: "in_progress" });
+    Object.assign(store.tables.call_interactions.at(-1)!, { ended_at: endedAt, updated_at: updatedAt });
+  };
+  const from = "2026-10-10T12:00:00.000Z";
+  const to = "2026-10-12T12:00:00.000Z";
+  await call("never-queued", "2026-10-11T10:00:00.000Z", "2026-10-11T10:01:00.000Z");
+  await call("changed-after", "2026-10-11T09:00:00.000Z", "2026-10-11T11:00:00.000Z");
+  await call("current", "2026-10-11T08:00:00.000Z", "2026-10-11T08:01:00.000Z");
+  await call("pending", "2026-10-11T07:00:00.000Z", "2026-10-11T07:01:00.000Z");
+  await call("open", null, "2026-10-11T07:00:00.000Z");
+  await call("early", "2026-10-10T11:59:59.000Z", "2026-10-10T11:59:59.000Z");
+  await call("late", to, to); // to is exclusive
+  for (const k of ["changed-after", "current", "pending", "early", "late"]) {
+    await store.enqueueOutbox("interaction.completed", k);
+  }
+  const queued = (k: string) => store.tables.outbox_events.find((o) => o.ref_id === k)!;
+  queued("changed-after").delivered_at = "2026-10-11T10:30:00.000Z";
+  queued("current").delivered_at = "2026-10-11T08:30:00.000Z";
+  assertEquals(await store.listOutboxGaps(from, to), ["changed-after", "never-queued"], "oldest end first");
+  await assertRejects(() => store.listOutboxGaps("yesterday", to), Error, "22007");
+});
+
+Deno.test("interactionEnded: true only for a row with ended_at", async () => {
+  const store = createFakeStore();
+  await store.ensureInteraction({ vapi_call_id: "open", outcome: "in_progress" });
+  await store.upsertInteraction({ vapi_call_id: "ended", ended_at: "2026-10-12T15:02:00Z", outcome: "resolved" });
+  assertEquals(
+    [await store.interactionEnded("open"), await store.interactionEnded("ended"), await store.interactionEnded("none")],
+    [false, true, false],
+  );
+});
+
+Deno.test("job runs: claimed once per (job, period); finishing records the result", async () => {
+  const store = createFakeStore();
+  assert(await store.claimJobRun("digest", "2026-10-12"));
+  assertFalse(await store.claimJobRun("digest", "2026-10-12"));
+  assert(await store.claimJobRun("digest", "2026-10-13"));
+  assert(await store.claimJobRun("sla", "2026-10-12"));
+  const result = { calls: 3 };
+  await store.finishJobRun("digest", "2026-10-12", result);
+  result.calls = 4;
+  const run = store.tables.job_runs[0];
+  assertEquals([run.result, typeof run.finished_at], [{ calls: 3 }, "string"]);
+  assertEquals(store.tables.job_runs[1].finished_at, null);
+
+  // a release gives back only an unfinished run of that period
+  await store.releaseJobRun("digest", "2026-10-12");
+  await store.releaseJobRun("digest", "2026-10-13");
+  assertEquals(store.tables.job_runs.map((r) => [r.job, r.period_key]), [["digest", "2026-10-12"], [
+    "sla",
+    "2026-10-12",
+  ]]);
+  assert(await store.claimJobRun("digest", "2026-10-13"), "a released period can be claimed again");
+  assertFalse(await store.claimJobRun("digest", "2026-10-12"), "a finished one cannot");
+});
+
+Deno.test("stale escalations: open, before the cutoff, never re-alerted, not chat; oldest first; marked once", async () => {
+  const store = createFakeStore();
+  const add = async (callKey: string, minutesAgo: number, extra: Record<string, unknown> = {}) => {
+    await store.upsertEscalation({
+      callKey,
+      kind: "representative",
+      reason: "representative_requested",
+      details: null,
+      callbackPhone: null,
+      callbackSource: "none",
+      channel: (extra.channel as string) ?? "webCall",
+      verified: false,
+    });
+    const row = store.tables.escalations.at(-1)!;
+    Object.assign(row, { created_at: isoAgo(minutesAgo * 60_000), ...extra });
+    return row;
+  };
+  await add("newer", 40);
+  await add("older", 50);
+  await add("fresh", 10);
+  await add("claimed", 50, { status: "claimed" });
+  await add("done", 50, { status: "done" });
+  await add("chat", 50, { channel: "chat" });
+  const marked = await add("marked", 50, { realerted_at: isoAgo(60_000) });
+  const cutoff = isoAgo(30 * 60_000);
+  const stale = await store.listStaleEscalations(cutoff);
+  assertEquals(stale.map((s) => s.call_key), ["older", "newer"]);
+  assertEquals(Object.keys(stale[0]).sort(), ["call_key", "channel", "created_at", "id", "kind", "reason", "verified"]);
+
+  assert(await store.markRealerted(stale[0].id));
+  const first = store.tables.escalations.find((e) => e.call_key === "older")!.realerted_at;
+  assert(first);
+  assertFalse(await store.markRealerted(stale[0].id));
+  assertEquals(store.tables.escalations.find((e) => e.call_key === "older")!.realerted_at, first, "set once");
+  const markedAt = marked.realerted_at;
+  assertFalse(await store.markRealerted(marked.id));
+  assertEquals(marked.realerted_at, markedAt);
+  // a row staff claimed after the list is not marked, so it is never paged
+  const claimedRow = store.tables.escalations.find((e) => e.call_key === "claimed")!;
+  assertFalse(await store.markRealerted(claimedRow.id));
+  assertEquals(claimedRow.realerted_at, null);
+  assertEquals((await store.listStaleEscalations(cutoff)).map((s) => s.call_key), ["newer"]);
+  await assertRejects(() => store.listStaleEscalations("yesterday"), Error, "22007");
+  await assertRejects(() => store.markRealerted("not-a-uuid"), Error, "22P02");
+});
+
+Deno.test("stale escalations and stuck calls: one run takes at most 50, oldest first", async () => {
+  const store = createFakeStore();
+  for (let i = 0; i < 55; i++) {
+    await store.upsertEscalation({
+      callKey: `k${i}`,
+      kind: "emergency",
+      reason: "emergency",
+      details: null,
+      callbackPhone: null,
+      callbackSource: "none",
+      channel: "webCall",
+      verified: false,
+    });
+    store.tables.escalations[i].created_at = isoAgo((100 + i) * 60_000);
+    await store.ensureInteraction({ vapi_call_id: `k${i}`, outcome: "in_progress" });
+    store.tables.call_interactions[i].created_at = isoAgo((200 + i) * 60_000);
+  }
+  const stale = await store.listStaleEscalations(isoAgo(30 * 60_000));
+  assertEquals([stale.length, stale[0].call_key], [50, "k54"]);
+  const stuck = await store.listStuckInteractions(isoAgo(2 * 60 * 60_000));
+  assertEquals([stuck.length, stuck[0].vapi_call_id], [50, "k54"]);
+});
+
+Deno.test("digestStats: rows created in [from, to); outcomes and sentiments in enum order; every escalation status", async () => {
+  const store = createFakeStore();
+  const from = "2026-10-11T12:00:00.000Z";
+  const to = "2026-10-12T12:00:00.000Z";
+  const call = async (key: string, created: string, p: Record<string, unknown>) => {
+    await store.ensureInteraction({ vapi_call_id: key, outcome: "in_progress" });
+    Object.assign(store.tables.call_interactions.at(-1)!, { created_at: created, ...p });
+  };
+  await call("c1", from, { outcome: "resolved", sentiment: "positive", cost: 0.1234, ended_at: to });
+  await call("c2", "2026-10-11T20:00:00Z", {
+    outcome: "escalated",
+    sentiment: "negative",
+    cost: "0.5000",
+    ended_at: to,
+    flags: ["promised_callback_without_escalation"],
+  });
+  await call("c3", "2026-10-12T11:59:59Z", { outcome: "resolved", sentiment: null, cost: null });
+  await call("c4", "2026-10-11T18:00:00Z", { outcome: null, sentiment: "neutral", cost: 0.0001, ended_at: to });
+  await call("late", to, { outcome: "abandoned" }); // to is exclusive
+  await call("early", "2026-10-11T11:59:59Z", { outcome: "abandoned" });
+  await store.upsertEscalation({
+    callKey: "c2",
+    kind: "representative",
+    reason: "representative_requested",
+    details: null,
+    callbackPhone: null,
+    callbackSource: "none",
+    channel: "webCall",
+    verified: false,
+  });
+  Object.assign(store.tables.escalations[0], { created_at: "2026-10-11T20:01:00Z", status: "done" });
+  store.tables.emails.push(
+    { call_key: "c1", kind: "claim_summary", status: "sent", created_at: "2026-10-11T13:00:00Z" },
+    { call_key: "c2", kind: "callback_request", status: "failed", created_at: "2026-10-11T20:01:00Z" },
+    { call_key: "early", kind: "claim_summary", status: "sent", created_at: "2026-10-11T11:00:00Z" },
+  );
+  const stats = await store.digestStats(from, to);
+  assertEquals(stats, {
+    calls: 4,
+    completed: 3,
+    outcomes: { resolved: 2, escalated: 1, unknown: 1 },
+    sentiments: { positive: 1, neutral: 1, negative: 1, unknown: 1 },
+    flagged: 1,
+    escalations: { open: 0, claimed: 0, done: 1 },
+    emails_sent: 1,
+    total_cost: 0.6235,
+  });
+  assertEquals(Object.keys(stats.outcomes), ["resolved", "escalated", "unknown"]);
+  assertEquals(await store.digestStats("2001-01-01T00:00:00Z", "2001-01-02T00:00:00Z"), {
+    calls: 0,
+    completed: 0,
+    outcomes: {},
+    sentiments: {},
+    flagged: 0,
+    escalations: { open: 0, claimed: 0, done: 0 },
+    emails_sent: 0,
+    total_cost: 0,
+  });
+  await assertRejects(() => store.digestStats("not a time", to), Error, "22007");
+});
+
+Deno.test("reapInteraction: closes only a row that never ended; keeps an ended_reason already there", async () => {
+  const store = createFakeStore();
+  await store.ensureInteraction({ vapi_call_id: "stub", channel: "webCall", outcome: "in_progress" });
+  await store.ensureInteraction({ vapi_call_id: "errored", outcome: "in_progress", ended_reason: "pipeline-error" });
+  await store.upsertInteraction({
+    vapi_call_id: "done",
+    caller_name: "A",
+    summary: "s",
+    sentiment: "neutral",
+    started_at: "2026-10-12T15:00:00Z",
+    ended_at: "2026-10-12T15:02:00Z",
+    outcome: "resolved",
+    analysis_status: "ok",
+  });
+  for (const r of store.tables.call_interactions) r.created_at = isoAgo(3 * 60 * 60_000);
+  assertEquals(
+    (await store.listStuckInteractions(isoAgo(2 * 60 * 60_000))).map((r) => r.vapi_call_id),
+    ["stub", "errored"],
+  );
+  const done = structuredClone(store.tables.call_interactions[2]);
+
+  assert(await store.reapInteraction("stub"));
+  assert(await store.reapInteraction("errored"));
+  assertFalse(await store.reapInteraction("done"));
+  assertFalse(await store.reapInteraction("stub"), "a second reap finds nothing to close");
+  assertFalse(await store.reapInteraction("no-such-call"));
+
+  const [stub, errored, after] = store.tables.call_interactions;
+  assertEquals([stub.outcome, stub.analysis_status, stub.ended_reason, stub.status], [
+    "abandoned",
+    "missing",
+    "reaped",
+    "incomplete",
+  ]);
+  assert(stub.ended_at);
+  assertEquals(errored.ended_reason, "pipeline-error");
+  assertEquals(after, done, "a completed row is never touched");
+  assertEquals(await store.listStuckInteractions(isoAgo(2 * 60 * 60_000)), []);
+});
+
+Deno.test("retention: every live line older than the cutoff, whatever became of its call, and old captures, are deleted", async () => {
+  const store = createFakeStore();
+  await store.ensureInteraction({ vapi_call_id: "open", outcome: "in_progress" });
+  await store.upsertInteraction({ vapi_call_id: "ended", ended_at: "2026-10-01T15:02:00Z", outcome: "resolved" });
+  let id = 0;
+  const line = (call_key: string, ageMs: number) =>
+    store.tables.transcript_lines.push({
+      id: ++id,
+      call_key,
+      role: "assistant",
+      text: "Hello.",
+      ts_ms: id,
+      created_at: isoAgo(ageMs),
+    });
+  line("orphan", 8 * DAY);
+  line("open", 8 * DAY);
+  line("ended", 8 * DAY); // a line VAPI delivered after the report, or one a failed clear left
+  line("orphan", 6 * DAY);
+  line("open", 1000);
+  const cutoff = isoAgo(7 * DAY);
+  assertEquals(await store.deleteOldTranscriptLines(cutoff), 3);
+  assertEquals(store.tables.transcript_lines.map((t) => t.id), [4, 5]);
+  assertEquals(await store.deleteOldTranscriptLines(cutoff), 0);
+
+  store.tables.webhook_captures.push(
+    { id: 1, message_type: null, call_key: null, body: {}, received_at: isoAgo(8 * DAY) },
+    { id: 2, message_type: null, call_key: null, body: {}, received_at: isoAgo(6 * DAY) },
+  );
+  assertEquals(await store.pruneWebhookCaptures(cutoff), 1);
+  assertEquals(store.tables.webhook_captures.map((c) => c.id), [2]);
+  await assertRejects(() => store.pruneWebhookCaptures(""), Error, "22007");
+
+  for (const [job, age] of [["outbox", 8], ["sla", 8], ["outbox", 6], ["digest", 30]] as const) {
+    store.tables.job_runs.push({ job, period_key: `${job}-${age}`, started_at: isoAgo(age * DAY), result: null });
+  }
+  assertEquals(await store.pruneJobRuns(["sla", "outbox"], cutoff), 2);
+  assertEquals(store.tables.job_runs.map((r) => r.period_key), ["outbox-6", "digest-30"]);
+  assertEquals(await store.pruneJobRuns([], cutoff), 0);
 });
