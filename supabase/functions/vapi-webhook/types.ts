@@ -36,6 +36,9 @@ export interface Env {
   PRIOR_CONTACTS_ENABLED?: string; // "true" enables the welcome-back clause
   OWN_NUMBERS?: string; // comma list of E.164 numbers we own (never a callback number)
   CAPTURE_WEBHOOKS?: string; // "true" stores raw bodies in webhook_captures
+  AIRTABLE_TOKEN?: string; // personal access token: data.records:read/write on the call-log base
+  AIRTABLE_BASE_ID?: string; // appXXXXXXXXXXXXXX
+  AIRTABLE_TABLE?: string; // default "Call Log"
 }
 
 export interface Logger {

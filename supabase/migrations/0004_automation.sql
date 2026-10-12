@@ -19,7 +19,7 @@ declare
   v_bearer text;
   v_request bigint;
 begin
-  if p_name not in ('sla', 'digest', 'reaper') then
+  if p_name not in ('sla', 'digest', 'reaper', 'outbox') then
     raise exception 'unknown job %', p_name;
   end if;
   select decrypted_secret into v_bearer from vault.decrypted_secrets where name = 'jobs_bearer';
@@ -45,3 +45,5 @@ select cron.schedule('claims-sla', '*/10 * * * *', $$select public.invoke_job('s
 select cron.schedule('claims-digest', '0 12 * * *', $$select public.invoke_job('digest')$$);
 -- reaper: stale in-progress calls get backfilled or closed as abandoned; old live lines pruned.
 select cron.schedule('claims-reaper', '7 * * * *', $$select public.invoke_job('reaper')$$);
+-- outbox: deliver undelivered post-call events to Airtable (capped at 5 attempts per event).
+select cron.schedule('claims-outbox', '* * * * *', $$select public.invoke_job('outbox')$$);
