@@ -1,0 +1,14 @@
+{
+  "type": "endCall",
+  "function": {
+    "name": "endCall",
+    "description": "End the call when the caller is done. Call it in a turn with no other words: it says the goodbye. Never during an emergency or after a question."
+  },
+  "messages": [
+    {
+      "type": "request-start",
+      "blocking": true,
+      "content": "Thanks for calling Observe Insurance. Take care."
+    }
+  ]
+}

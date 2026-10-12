@@ -1,0 +1,340 @@
+{
+  "message": {
+    "timestamp": 1791819643217,
+    "type": "end-of-call-report",
+    "analysis": {
+      "summary": "Mara asked about office hours and how to start a new claim. The assistant gave the hours and the three ways to start a claim.",
+      "successEvaluation": "true"
+    },
+    "artifact": {
+      "messages": [
+        {
+          "role": "system",
+          "message": "You are the Observe Insurance claims assistant. You help callers check the status of their own claims, answer general questions about how claims work, and connect them with a claims representative. Verify identity with lookup_customer and verify_identity before any claim detail. Never read a date of birth or a full phone number aloud. Speak the tool result message exactly once.",
+          "time": 1791819602004,
+          "secondsFromStart": 0
+        },
+        {
+          "role": "bot",
+          "message": "Thanks for calling Observe Insurance claims. How can I help you today?",
+          "time": 1791819602504,
+          "endTime": 1791819606404,
+          "secondsFromStart": 0.5,
+          "duration": 3900,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "Hi, this is Mara. What are your office hours?",
+          "time": 1791819606804,
+          "endTime": 1791819609004,
+          "secondsFromStart": 4.8,
+          "duration": 2200
+        },
+        {
+          "role": "tool_calls",
+          "toolCalls": [
+            {
+              "id": "call_faq_51d0aa",
+              "type": "function",
+              "function": {
+                "name": "faq_search",
+                "arguments": {
+                  "query": "office hours"
+                }
+              }
+            }
+          ],
+          "message": "",
+          "time": 1791819609404,
+          "secondsFromStart": 7.4
+        },
+        {
+          "role": "bot",
+          "message": "Let me check that for you.",
+          "time": 1791819609504,
+          "endTime": 1791819610504,
+          "secondsFromStart": 7.5,
+          "duration": 1000,
+          "source": ""
+        },
+        {
+          "role": "tool_call_result",
+          "toolCallId": "call_faq_51d0aa",
+          "name": "faq_search",
+          "result": "Office hours: Claims representatives are available Monday through Friday, 8 AM to 6 PM Eastern time.",
+          "time": 1791819610604,
+          "secondsFromStart": 8.6
+        },
+        {
+          "role": "bot",
+          "message": "Claims representatives are available Monday through Friday, 8 AM to 6 PM Eastern time, at 1-800-555-0142.",
+          "time": 1791819610704,
+          "endTime": 1791819616304,
+          "secondsFromStart": 8.7,
+          "duration": 5600,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "And how would I start a new claim?",
+          "time": 1791819617004,
+          "endTime": 1791819618604,
+          "secondsFromStart": 15,
+          "duration": 1600
+        },
+        {
+          "role": "bot",
+          "message": "You can start a claim online at observeinsurance dot com slash claims, in the Observe Insurance mobile app, or by calling 1-800-555-0142. Have your policy number and the date of the loss ready.",
+          "time": 1791819619104,
+          "endTime": 1791819628904,
+          "secondsFromStart": 17.1,
+          "duration": 9800,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "Great, that's all I needed.",
+          "time": 1791819629604,
+          "endTime": 1791819630904,
+          "secondsFromStart": 27.6,
+          "duration": 1300
+        },
+        {
+          "role": "bot",
+          "message": "Thanks for calling Observe Insurance. Take care.",
+          "time": 1791819631404,
+          "endTime": 1791819633404,
+          "secondsFromStart": 29.4,
+          "duration": 2000,
+          "source": ""
+        }
+      ],
+      "transcript": "AI: Thanks for calling Observe Insurance claims. How can I help you today?\nUser: Hi, this is Mara. What are your office hours?\nAI: Let me check that for you.\nAI: Claims representatives are available Monday through Friday, 8 AM to 6 PM Eastern time, at 1-800-555-0142.\nUser: And how would I start a new claim?\nAI: You can start a claim online at observeinsurance dot com slash claims, in the Observe Insurance mobile app, or by calling 1-800-555-0142. Have your policy number and the date of the loss ready.\nUser: Great, that's all I needed.\nAI: Thanks for calling Observe Insurance. Take care.\n",
+      "recordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b03-1791819641377-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+      "stereoRecordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b03-1791819641377-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+      "recording": {
+        "stereoUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b03-1791819641377-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+        "mono": {
+          "combinedUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b03-1791819641377-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+          "assistantUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b03-1791819641377-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-assistant-mono.wav",
+          "customerUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b03-1791819641377-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-customer-mono.wav"
+        }
+      },
+      "performanceMetrics": {
+        "turnLatencies": [
+          {
+            "modelLatency": 437,
+            "voiceLatency": 242,
+            "transcriberLatency": 230,
+            "endpointingLatency": 242,
+            "turnLatency": 1150
+          },
+          {
+            "modelLatency": 479,
+            "voiceLatency": 265,
+            "transcriberLatency": 252,
+            "endpointingLatency": 265,
+            "turnLatency": 1260
+          },
+          {
+            "modelLatency": 452,
+            "voiceLatency": 250,
+            "transcriberLatency": 238,
+            "endpointingLatency": 250,
+            "turnLatency": 1190
+          }
+        ],
+        "modelLatencyAverage": 456,
+        "voiceLatencyAverage": 252.333,
+        "transcriberLatencyAverage": 240,
+        "endpointingLatencyAverage": 252.333,
+        "turnLatencyAverage": 1200,
+        "fromTransportLatencyAverage": 21.4,
+        "toTransportLatencyAverage": 18.9,
+        "numUserInterrupted": 0,
+        "numAssistantInterrupted": 0
+      },
+      "nodes": [],
+      "variableValues": {},
+      "transfers": [],
+      "structuredOutputs": {
+        "5e0c7d1a-2b3c-4d5e-8f60-718293a4b5c6": {
+          "name": "claims_call",
+          "result": {
+            "caller_name": "Mara",
+            "sentiment": "neutral",
+            "outcome": "resolved",
+            "escalated": false,
+            "emergency": false
+          }
+        }
+      }
+    },
+    "startedAt": "2026-10-12T15:40:02.004Z",
+    "endedAt": "2026-10-12T15:40:41.377Z",
+    "endedReason": "customer-ended-call",
+    "cost": 0.0731,
+    "costBreakdown": {
+      "stt": 0.0066,
+      "llm": 0.0098,
+      "tts": 0.0201,
+      "vapi": 0.0328,
+      "transport": 0,
+      "chat": 0,
+      "total": 0.0731,
+      "llmPromptTokens": 15680,
+      "llmCompletionTokens": 186,
+      "llmCachedPromptTokens": 0,
+      "ttsCharacters": 1045,
+      "voicemailDetectionCost": 0,
+      "knowledgeBaseCost": 0,
+      "analysisCostBreakdown": {
+        "summary": 0.0011,
+        "summaryPromptTokens": 1412,
+        "summaryCompletionTokens": 64,
+        "summaryCachedPromptTokens": 0,
+        "structuredData": 0.0009,
+        "structuredDataPromptTokens": 1390,
+        "structuredDataCompletionTokens": 31,
+        "structuredDataCachedPromptTokens": 0,
+        "successEvaluation": 0.0007,
+        "successEvaluationPromptTokens": 1501,
+        "successEvaluationCompletionTokens": 1,
+        "successEvaluationCachedPromptTokens": 0,
+        "structuredOutput": 0.0011,
+        "structuredOutputPromptTokens": 1450,
+        "structuredOutputCompletionTokens": 33,
+        "structuredOutputCachedPromptTokens": 0
+      }
+    },
+    "durationMs": 39373,
+    "durationSeconds": 39.373,
+    "durationMinutes": 0.6562,
+    "summary": "Mara asked about office hours and how to start a new claim. The assistant gave the hours and the three ways to start a claim.",
+    "transcript": "AI: Thanks for calling Observe Insurance claims. How can I help you today?\nUser: Hi, this is Mara. What are your office hours?\nAI: Let me check that for you.\nAI: Claims representatives are available Monday through Friday, 8 AM to 6 PM Eastern time, at 1-800-555-0142.\nUser: And how would I start a new claim?\nAI: You can start a claim online at observeinsurance dot com slash claims, in the Observe Insurance mobile app, or by calling 1-800-555-0142. Have your policy number and the date of the loss ready.\nUser: Great, that's all I needed.\nAI: Thanks for calling Observe Insurance. Take care.\n",
+    "messages": [
+      {
+        "role": "system",
+        "message": "You are the Observe Insurance claims assistant. You help callers check the status of their own claims, answer general questions about how claims work, and connect them with a claims representative. Verify identity with lookup_customer and verify_identity before any claim detail. Never read a date of birth or a full phone number aloud. Speak the tool result message exactly once.",
+        "time": 1791819602004,
+        "secondsFromStart": 0
+      },
+      {
+        "role": "bot",
+        "message": "Thanks for calling Observe Insurance claims. How can I help you today?",
+        "time": 1791819602504,
+        "endTime": 1791819606404,
+        "secondsFromStart": 0.5,
+        "duration": 3900,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "Hi, this is Mara. What are your office hours?",
+        "time": 1791819606804,
+        "endTime": 1791819609004,
+        "secondsFromStart": 4.8,
+        "duration": 2200
+      },
+      {
+        "role": "tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_faq_51d0aa",
+            "type": "function",
+            "function": {
+              "name": "faq_search",
+              "arguments": {
+                "query": "office hours"
+              }
+            }
+          }
+        ],
+        "message": "",
+        "time": 1791819609404,
+        "secondsFromStart": 7.4
+      },
+      {
+        "role": "bot",
+        "message": "Let me check that for you.",
+        "time": 1791819609504,
+        "endTime": 1791819610504,
+        "secondsFromStart": 7.5,
+        "duration": 1000,
+        "source": ""
+      },
+      {
+        "role": "tool_call_result",
+        "toolCallId": "call_faq_51d0aa",
+        "name": "faq_search",
+        "result": "Office hours: Claims representatives are available Monday through Friday, 8 AM to 6 PM Eastern time.",
+        "time": 1791819610604,
+        "secondsFromStart": 8.6
+      },
+      {
+        "role": "bot",
+        "message": "Claims representatives are available Monday through Friday, 8 AM to 6 PM Eastern time, at 1-800-555-0142.",
+        "time": 1791819610704,
+        "endTime": 1791819616304,
+        "secondsFromStart": 8.7,
+        "duration": 5600,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "And how would I start a new claim?",
+        "time": 1791819617004,
+        "endTime": 1791819618604,
+        "secondsFromStart": 15,
+        "duration": 1600
+      },
+      {
+        "role": "bot",
+        "message": "You can start a claim online at observeinsurance dot com slash claims, in the Observe Insurance mobile app, or by calling 1-800-555-0142. Have your policy number and the date of the loss ready.",
+        "time": 1791819619104,
+        "endTime": 1791819628904,
+        "secondsFromStart": 17.1,
+        "duration": 9800,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "Great, that's all I needed.",
+        "time": 1791819629604,
+        "endTime": 1791819630904,
+        "secondsFromStart": 27.6,
+        "duration": 1300
+      },
+      {
+        "role": "bot",
+        "message": "Thanks for calling Observe Insurance. Take care.",
+        "time": 1791819631404,
+        "endTime": 1791819633404,
+        "secondsFromStart": 29.4,
+        "duration": 2000,
+        "source": ""
+      }
+    ],
+    "recordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b03-1791819641377-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+    "stereoRecordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b03-1791819641377-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+    "call": {
+      "id": "3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b03",
+      "orgId": "4f1c2d3e-0000-4000-8000-00000000a0a0",
+      "type": "webCall",
+      "createdAt": "2026-10-12T15:40:01.410Z",
+      "updatedAt": "2026-10-12T15:40:01.410Z",
+      "assistantId": "a7e2c9d0-5b1f-4c3e-8d2a-0f9e8d7c6b01",
+      "webCallUrl": "https://vapi.daily.co/3f6c1a2e",
+      "transport": {
+        "provider": "daily",
+        "assistantVideoEnabled": false
+      }
+    },
+    "assistant": {
+      "id": "a7e2c9d0-5b1f-4c3e-8d2a-0f9e8d7c6b01",
+      "orgId": "4f1c2d3e-0000-4000-8000-00000000a0a0",
+      "name": "Observe Claims Web"
+    }
+  }
+}

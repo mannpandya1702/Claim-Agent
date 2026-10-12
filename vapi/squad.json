@@ -1,0 +1,5 @@
+{
+  "comment": "The web squad. Concierge answers first; member names are the handoff targets. No membersOverrides: every member carries its own server and analysis settings.",
+  "name": "observe-claims-web",
+  "members": [{ "assistantId": "<<ASSISTANT_ID:concierge>>" }, { "assistantId": "<<ASSISTANT_ID:knowledge>>" }]
+}

@@ -12,5 +12,6 @@ supabase/.branches/
 node_modules/
 dist/
 dashboard/dist/
+dashboard/test-results/
 *.log
 .DS_Store

@@ -1,0 +1,29 @@
+{
+  "comment": "Graded tools, FAQ in the prompt, no knowledge base. The frozen demo fallback.",
+  "sections": [
+    "header",
+    "role",
+    "tools",
+    "rules",
+    "identity",
+    "claims",
+    "branches",
+    "branches-identity",
+    "faq",
+    "knowledge-core",
+    "errors",
+    "ending",
+    "style"
+  ],
+  "representative": "representative-web",
+  "tools": [
+    "lookup_customer",
+    "verify_identity",
+    "get_claim_status",
+    "escalate",
+    "report_emergency",
+    "send_info_email",
+    "endCall"
+  ],
+  "assistant": { "name": "Observe Claims Core" }
+}

@@ -1,0 +1,30 @@
+{
+  "comment": "First squad member. Owns every graded tool, so the graded flows never depend on a handoff; general long-tail questions go to Knowledge.",
+  "sections": [
+    "header",
+    "role",
+    "tools",
+    "rules",
+    "identity",
+    "claims",
+    "branches",
+    "branches-identity",
+    "faq",
+    "knowledge-handoff",
+    "errors",
+    "ending",
+    "style"
+  ],
+  "representative": "representative-web",
+  "tools": [
+    "lookup_customer",
+    "verify_identity",
+    "get_claim_status",
+    "escalate",
+    "report_emergency",
+    "send_info_email",
+    "handoff_to_knowledge",
+    "endCall"
+  ],
+  "assistant": { "name": "Concierge" }
+}

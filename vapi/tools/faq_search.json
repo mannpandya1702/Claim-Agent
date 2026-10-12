@@ -1,0 +1,31 @@
+{
+  "type": "query",
+  "function": {
+    "name": "faq_search"
+  },
+  "messages": [
+    {
+      "type": "request-start",
+      "blocking": false,
+      "content": "Let me check that for you."
+    },
+    {
+      "type": "request-response-delayed",
+      "timingMilliseconds": 3000,
+      "content": "Still checking, one moment."
+    },
+    {
+      "type": "request-failed",
+      "content": "I don't have that detail in front of me. I can have a claims representative call you back about it. Would you like that?"
+    }
+  ],
+  "knowledgeBases": [
+    {
+      "name": "observe_claims_faq",
+      "provider": "google",
+      "model": "gemini-2.5-flash",
+      "description": "Use whenever the caller asks about document checklists and formats, timelines, appeals, payments, glossary terms or how the claims process works in detail. Not for the status of a specific claim.",
+      "fileIds": ["<<KB_FILE_ID>>"]
+    }
+  ]
+}

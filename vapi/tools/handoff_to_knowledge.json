@@ -1,0 +1,21 @@
+{
+  "type": "handoff",
+  "function": {
+    "name": "handoff_to_knowledge"
+  },
+  "messages": [],
+  "destinations": [
+    {
+      "type": "assistant",
+      "assistantName": "Knowledge",
+      "description": "A general question about how claims work, appeals, timelines, documents in general or terms; not the caller's own claim, not what they still need to send, not a request for a person.",
+      "contextEngineeringPlan": {
+        "type": "all"
+      },
+      "assistantOverrides": {
+        "firstMessage": "",
+        "firstMessageMode": "assistant-speaks-first-with-model-generated-message"
+      }
+    }
+  ]
+}

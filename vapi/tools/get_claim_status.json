@@ -1,0 +1,35 @@
+{
+  "type": "function",
+  "async": false,
+  "function": {
+    "name": "get_claim_status",
+    "strict": false,
+    "description": "Read every claim on the verified caller's account. Call it when a verified caller asks about their claims. Takes no input: the account comes from the verified call, never from the caller. Its result is a sentence that has already been spoken to the caller.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  "server": {
+    "url": "<<SERVER_URL>>",
+    "credentialId": "<<CREDENTIAL_ID>>",
+    "timeoutSeconds": 10
+  },
+  "messages": [
+    {
+      "type": "request-start",
+      "blocking": false,
+      "content": "Pulling up your claims now."
+    },
+    {
+      "type": "request-response-delayed",
+      "timingMilliseconds": 3000,
+      "content": "Still pulling that up, thanks for waiting."
+    },
+    {
+      "type": "request-failed",
+      "content": "I'm having trouble pulling up your claims right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?"
+    }
+  ]
+}

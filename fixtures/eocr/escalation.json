@@ -1,0 +1,265 @@
+{
+  "message": {
+    "timestamp": 1791825087955,
+    "type": "end-of-call-report",
+    "analysis": {
+      "summary": "Teague asked to speak with a person, and the assistant transferred the call to a claims representative.",
+      "structuredData": {
+        "caller_name": "Teague",
+        "sentiment": "neutral",
+        "outcome": "escalated",
+        "escalated": true,
+        "emergency": false
+      },
+      "successEvaluation": "true"
+    },
+    "artifact": {
+      "messages": [
+        {
+          "role": "system",
+          "message": "You are the Observe Insurance claims assistant. You help callers check the status of their own claims, answer general questions about how claims work, and connect them with a claims representative. Verify identity with lookup_customer and verify_identity before any claim detail. Never read a date of birth or a full phone number aloud. Speak the tool result message exactly once.",
+          "time": 1791825064640,
+          "secondsFromStart": 0
+        },
+        {
+          "role": "bot",
+          "message": "Thanks for calling Observe Insurance claims. How can I help you today?",
+          "time": 1791825065240,
+          "endTime": 1791825069140,
+          "secondsFromStart": 0.6,
+          "duration": 3900,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "This is Teague. I just want to talk to a person, please.",
+          "time": 1791825069540,
+          "endTime": 1791825072040,
+          "secondsFromStart": 4.9,
+          "duration": 2500
+        },
+        {
+          "role": "tool_calls",
+          "toolCalls": [
+            {
+              "id": "call_xfer_8d2c4a",
+              "type": "function",
+              "function": {
+                "name": "transferCall",
+                "arguments": {
+                  "destination": "+18005550142"
+                }
+              }
+            }
+          ],
+          "message": "",
+          "time": 1791825072440,
+          "secondsFromStart": 7.8
+        },
+        {
+          "role": "bot",
+          "message": "Please hold while I connect you to a claims representative.",
+          "time": 1791825072540,
+          "endTime": 1791825075640,
+          "secondsFromStart": 7.9,
+          "duration": 3100,
+          "source": ""
+        },
+        {
+          "role": "tool_call_result",
+          "toolCallId": "call_xfer_8d2c4a",
+          "name": "transferCall",
+          "result": "Transfer initiated.",
+          "time": 1791825075840,
+          "secondsFromStart": 11.2
+        }
+      ],
+      "transcript": "AI: Thanks for calling Observe Insurance claims. How can I help you today?\nUser: This is Teague. I just want to talk to a person, please.\nAI: Please hold while I connect you to a claims representative.\n",
+      "recordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b05-1791825086115-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+      "stereoRecordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b05-1791825086115-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+      "recording": {
+        "stereoUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b05-1791825086115-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+        "mono": {
+          "combinedUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b05-1791825086115-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+          "assistantUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b05-1791825086115-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-assistant-mono.wav",
+          "customerUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b05-1791825086115-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-customer-mono.wav"
+        }
+      },
+      "performanceMetrics": {
+        "turnLatencies": [
+          {
+            "modelLatency": 490,
+            "voiceLatency": 271,
+            "transcriberLatency": 258,
+            "endpointingLatency": 271,
+            "turnLatency": 1290
+          }
+        ],
+        "modelLatencyAverage": 490,
+        "voiceLatencyAverage": 271,
+        "transcriberLatencyAverage": 258,
+        "endpointingLatencyAverage": 271,
+        "turnLatencyAverage": 1290,
+        "fromTransportLatencyAverage": 21.4,
+        "toTransportLatencyAverage": 18.9,
+        "numUserInterrupted": 0,
+        "numAssistantInterrupted": 0
+      },
+      "nodes": [],
+      "variableValues": {},
+      "transfers": [
+        {
+          "destination": {
+            "type": "number",
+            "number": "+18005550142",
+            "message": "Please hold while I connect you to a claims representative."
+          },
+          "mode": "blind-transfer",
+          "status": "completed"
+        }
+      ],
+      "structuredOutputs": {
+        "5e0c7d1a-2b3c-4d5e-8f60-718293a4b5c6": {
+          "name": "claims_call",
+          "result": {
+            "caller_name": "Teague",
+            "sentiment": "neutral",
+            "outcome": "escalated",
+            "escalated": true,
+            "emergency": false
+          }
+        }
+      }
+    },
+    "startedAt": "2026-10-12T17:11:04.640Z",
+    "endedAt": "2026-10-12T17:11:26.115Z",
+    "endedReason": "assistant-forwarded-call",
+    "cost": 0.0425,
+    "costBreakdown": {
+      "stt": 0.0036,
+      "llm": 0.0041,
+      "tts": 0.0088,
+      "vapi": 0.0179,
+      "transport": 0.0043,
+      "chat": 0,
+      "total": 0.0425,
+      "llmPromptTokens": 6560,
+      "llmCompletionTokens": 78,
+      "llmCachedPromptTokens": 0,
+      "ttsCharacters": 458,
+      "voicemailDetectionCost": 0,
+      "knowledgeBaseCost": 0,
+      "analysisCostBreakdown": {
+        "summary": 0.0011,
+        "summaryPromptTokens": 1412,
+        "summaryCompletionTokens": 64,
+        "summaryCachedPromptTokens": 0,
+        "structuredData": 0.0009,
+        "structuredDataPromptTokens": 1390,
+        "structuredDataCompletionTokens": 31,
+        "structuredDataCachedPromptTokens": 0,
+        "successEvaluation": 0.0007,
+        "successEvaluationPromptTokens": 1501,
+        "successEvaluationCompletionTokens": 1,
+        "successEvaluationCachedPromptTokens": 0,
+        "structuredOutput": 0.0011,
+        "structuredOutputPromptTokens": 1450,
+        "structuredOutputCompletionTokens": 33,
+        "structuredOutputCachedPromptTokens": 0
+      }
+    },
+    "durationMs": 21475,
+    "durationSeconds": 21.475,
+    "durationMinutes": 0.3579,
+    "summary": "Teague asked to speak with a person, and the assistant transferred the call to a claims representative.",
+    "transcript": "AI: Thanks for calling Observe Insurance claims. How can I help you today?\nUser: This is Teague. I just want to talk to a person, please.\nAI: Please hold while I connect you to a claims representative.\n",
+    "messages": [
+      {
+        "role": "system",
+        "message": "You are the Observe Insurance claims assistant. You help callers check the status of their own claims, answer general questions about how claims work, and connect them with a claims representative. Verify identity with lookup_customer and verify_identity before any claim detail. Never read a date of birth or a full phone number aloud. Speak the tool result message exactly once.",
+        "time": 1791825064640,
+        "secondsFromStart": 0
+      },
+      {
+        "role": "bot",
+        "message": "Thanks for calling Observe Insurance claims. How can I help you today?",
+        "time": 1791825065240,
+        "endTime": 1791825069140,
+        "secondsFromStart": 0.6,
+        "duration": 3900,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "This is Teague. I just want to talk to a person, please.",
+        "time": 1791825069540,
+        "endTime": 1791825072040,
+        "secondsFromStart": 4.9,
+        "duration": 2500
+      },
+      {
+        "role": "tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_xfer_8d2c4a",
+            "type": "function",
+            "function": {
+              "name": "transferCall",
+              "arguments": {
+                "destination": "+18005550142"
+              }
+            }
+          }
+        ],
+        "message": "",
+        "time": 1791825072440,
+        "secondsFromStart": 7.8
+      },
+      {
+        "role": "bot",
+        "message": "Please hold while I connect you to a claims representative.",
+        "time": 1791825072540,
+        "endTime": 1791825075640,
+        "secondsFromStart": 7.9,
+        "duration": 3100,
+        "source": ""
+      },
+      {
+        "role": "tool_call_result",
+        "toolCallId": "call_xfer_8d2c4a",
+        "name": "transferCall",
+        "result": "Transfer initiated.",
+        "time": 1791825075840,
+        "secondsFromStart": 11.2
+      }
+    ],
+    "recordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b05-1791825086115-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+    "stereoRecordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b05-1791825086115-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+    "call": {
+      "id": "3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b05",
+      "orgId": "4f1c2d3e-0000-4000-8000-00000000a0a0",
+      "type": "inboundPhoneCall",
+      "createdAt": "2026-10-12T17:11:03.982Z",
+      "updatedAt": "2026-10-12T17:11:03.982Z",
+      "assistantId": "a7e2c9d0-5b1f-4c3e-8d2a-0f9e8d7c6b02",
+      "phoneNumberId": "b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e",
+      "customer": {
+        "number": "+16025550104"
+      },
+      "phoneCallProvider": "vapi",
+      "phoneCallTransport": "sip"
+    },
+    "assistant": {
+      "id": "a7e2c9d0-5b1f-4c3e-8d2a-0f9e8d7c6b02",
+      "orgId": "4f1c2d3e-0000-4000-8000-00000000a0a0",
+      "name": "Observe Claims Phone"
+    },
+    "customer": {
+      "number": "+16025550104"
+    },
+    "destination": {
+      "type": "number",
+      "number": "+18005550142"
+    }
+  }
+}

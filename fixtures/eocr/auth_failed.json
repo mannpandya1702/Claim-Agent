@@ -1,0 +1,563 @@
+{
+  "message": {
+    "timestamp": 1791826267742,
+    "type": "end-of-call-report",
+    "analysis": {
+      "summary": "The caller asked for a claim status. The phone number matched an account, but the date of birth did not match twice, so identity could not be verified and no claim details were shared.",
+      "structuredData": {
+        "caller_name": "Sloane Marchetti",
+        "sentiment": "negative",
+        "outcome": "auth_failed",
+        "escalated": false,
+        "emergency": false
+      },
+      "successEvaluation": "false"
+    },
+    "artifact": {
+      "messages": [
+        {
+          "role": "system",
+          "message": "You are the Observe Insurance claims assistant. You help callers check the status of their own claims, answer general questions about how claims work, and connect them with a claims representative. Verify identity with lookup_customer and verify_identity before any claim detail. Never read a date of birth or a full phone number aloud. Speak the tool result message exactly once.",
+          "time": 1791826212330,
+          "secondsFromStart": 0
+        },
+        {
+          "role": "bot",
+          "message": "Thanks for calling Observe Insurance claims. How can I help you today?",
+          "time": 1791826212830,
+          "endTime": 1791826216730,
+          "secondsFromStart": 0.5,
+          "duration": 3900,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "Hi, this is Sloane Marchetti. I need my claim status.",
+          "time": 1791826216930,
+          "endTime": 1791826219530,
+          "secondsFromStart": 4.6,
+          "duration": 2600
+        },
+        {
+          "role": "bot",
+          "message": "I can help with that. What's the phone number on your account?",
+          "time": 1791826219930,
+          "endTime": 1791826222830,
+          "secondsFromStart": 7.6,
+          "duration": 2900,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "six oh two, five five five, oh one oh three",
+          "time": 1791826223230,
+          "endTime": 1791826225930,
+          "secondsFromStart": 10.9,
+          "duration": 2700
+        },
+        {
+          "role": "tool_calls",
+          "toolCalls": [
+            {
+              "id": "call_lookup_c41e7f",
+              "type": "function",
+              "function": {
+                "name": "lookup_customer",
+                "arguments": {
+                  "phone": "6025550103"
+                }
+              }
+            }
+          ],
+          "message": "",
+          "time": 1791826226330,
+          "secondsFromStart": 14
+        },
+        {
+          "role": "bot",
+          "message": "One moment while I look that up.",
+          "time": 1791826226430,
+          "endTime": 1791826227930,
+          "secondsFromStart": 14.1,
+          "duration": 1500,
+          "source": ""
+        },
+        {
+          "role": "tool_call_result",
+          "toolCallId": "call_lookup_c41e7f",
+          "name": "lookup_customer",
+          "result": "{\"code\":\"needs_dob\",\"message\":\"Thanks. For security, what's the date of birth on the account?\"}",
+          "time": 1791826227130,
+          "secondsFromStart": 14.8
+        },
+        {
+          "role": "bot",
+          "message": "Thanks. For security, what's the date of birth on the account?",
+          "time": 1791826227230,
+          "endTime": 1791826229930,
+          "secondsFromStart": 14.9,
+          "duration": 2700,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "May ninth, nineteen ninety.",
+          "time": 1791826230330,
+          "endTime": 1791826232130,
+          "secondsFromStart": 18,
+          "duration": 1800
+        },
+        {
+          "role": "tool_calls",
+          "toolCalls": [
+            {
+              "id": "call_verify_0d93b5",
+              "type": "function",
+              "function": {
+                "name": "verify_identity",
+                "arguments": {
+                  "dob_month": 5,
+                  "dob_day": 9,
+                  "dob_year": 1990
+                }
+              }
+            }
+          ],
+          "message": "",
+          "time": 1791826232530,
+          "secondsFromStart": 20.2
+        },
+        {
+          "role": "bot",
+          "message": "Let me verify that.",
+          "time": 1791826232630,
+          "endTime": 1791826233530,
+          "secondsFromStart": 20.3,
+          "duration": 900,
+          "source": ""
+        },
+        {
+          "role": "tool_call_result",
+          "toolCallId": "call_verify_0d93b5",
+          "name": "verify_identity",
+          "result": "{\"code\":\"auth_failed\",\"message\":\"I'm sorry, that doesn't match what we have on file. Could you give me your date of birth one more time?\"}",
+          "time": 1791826233230,
+          "secondsFromStart": 20.9
+        },
+        {
+          "role": "bot",
+          "message": "I'm sorry, that doesn't match what we have on file. Could you give me your date of birth one more time?",
+          "time": 1791826233330,
+          "endTime": 1791826237630,
+          "secondsFromStart": 21,
+          "duration": 4300,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "Um, 11 2 1979.",
+          "time": 1791826238130,
+          "endTime": 1791826239830,
+          "secondsFromStart": 25.8,
+          "duration": 1700
+        },
+        {
+          "role": "tool_calls",
+          "toolCalls": [
+            {
+              "id": "call_verify_e5a812",
+              "type": "function",
+              "function": {
+                "name": "verify_identity",
+                "arguments": {
+                  "dob_month": 11,
+                  "dob_day": 2,
+                  "dob_year": 1979
+                }
+              }
+            }
+          ],
+          "message": "",
+          "time": 1791826240230,
+          "secondsFromStart": 27.9
+        },
+        {
+          "role": "bot",
+          "message": "Let me verify that.",
+          "time": 1791826240330,
+          "endTime": 1791826241230,
+          "secondsFromStart": 28,
+          "duration": 900,
+          "source": ""
+        },
+        {
+          "role": "tool_call_result",
+          "toolCallId": "call_verify_e5a812",
+          "name": "verify_identity",
+          "result": "{\"code\":\"locked\",\"message\":\"I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?\"}",
+          "time": 1791826240930,
+          "secondsFromStart": 28.6
+        },
+        {
+          "role": "bot",
+          "message": "I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?",
+          "time": 1791826241030,
+          "endTime": 1791826249230,
+          "secondsFromStart": 28.7,
+          "duration": 8200,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "No, forget it.",
+          "time": 1791826249730,
+          "endTime": 1791826250630,
+          "secondsFromStart": 37.4,
+          "duration": 900
+        },
+        {
+          "role": "bot",
+          "message": "Thanks for calling Observe Insurance. Take care.",
+          "time": 1791826251230,
+          "endTime": 1791826253230,
+          "secondsFromStart": 38.9,
+          "duration": 2000,
+          "source": ""
+        }
+      ],
+      "transcript": "AI: Thanks for calling Observe Insurance claims. How can I help you today?\nUser: Hi, this is Sloane Marchetti. I need my claim status.\nAI: I can help with that. What's the phone number on your account?\nUser: six oh two, five five five, oh one oh three\nAI: One moment while I look that up.\nAI: Thanks. For security, what's the date of birth on the account?\nUser: May ninth, nineteen ninety.\nAI: Let me verify that.\nAI: I'm sorry, that doesn't match what we have on file. Could you give me your date of birth one more time?\nUser: Um, 11 2 1979.\nAI: Let me verify that.\nAI: I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?\nUser: No, forget it.\nAI: Thanks for calling Observe Insurance. Take care.\n",
+      "recordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b06-1791826265902-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+      "stereoRecordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b06-1791826265902-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+      "recording": {
+        "stereoUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b06-1791826265902-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+        "mono": {
+          "combinedUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b06-1791826265902-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+          "assistantUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b06-1791826265902-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-assistant-mono.wav",
+          "customerUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b06-1791826265902-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-customer-mono.wav"
+        }
+      },
+      "performanceMetrics": {
+        "turnLatencies": [
+          {
+            "modelLatency": 509,
+            "voiceLatency": 281,
+            "transcriberLatency": 268,
+            "endpointingLatency": 281,
+            "turnLatency": 1340
+          },
+          {
+            "modelLatency": 540,
+            "voiceLatency": 298,
+            "transcriberLatency": 284,
+            "endpointingLatency": 298,
+            "turnLatency": 1420
+          },
+          {
+            "modelLatency": 612,
+            "voiceLatency": 338,
+            "transcriberLatency": 322,
+            "endpointingLatency": 338,
+            "turnLatency": 1610
+          }
+        ],
+        "modelLatencyAverage": 553.667,
+        "voiceLatencyAverage": 305.667,
+        "transcriberLatencyAverage": 291.333,
+        "endpointingLatencyAverage": 305.667,
+        "turnLatencyAverage": 1456.667,
+        "fromTransportLatencyAverage": 21.4,
+        "toTransportLatencyAverage": 18.9,
+        "numUserInterrupted": 0,
+        "numAssistantInterrupted": 0
+      },
+      "nodes": [],
+      "variableValues": {},
+      "transfers": [],
+      "structuredOutputs": {
+        "5e0c7d1a-2b3c-4d5e-8f60-718293a4b5c6": {
+          "name": "claims_call",
+          "result": {
+            "caller_name": "Sloane Marchetti",
+            "sentiment": "negative",
+            "outcome": "auth_failed",
+            "escalated": false,
+            "emergency": false
+          }
+        }
+      }
+    },
+    "startedAt": "2026-10-12T17:30:12.330Z",
+    "endedAt": "2026-10-12T17:31:05.902Z",
+    "endedReason": "customer-ended-call",
+    "cost": 0.0987,
+    "costBreakdown": {
+      "stt": 0.0089,
+      "llm": 0.0151,
+      "tts": 0.0262,
+      "vapi": 0.0447,
+      "transport": 0,
+      "chat": 0,
+      "total": 0.0987,
+      "llmPromptTokens": 24160,
+      "llmCompletionTokens": 287,
+      "llmCachedPromptTokens": 0,
+      "ttsCharacters": 1362,
+      "voicemailDetectionCost": 0,
+      "knowledgeBaseCost": 0,
+      "analysisCostBreakdown": {
+        "summary": 0.0011,
+        "summaryPromptTokens": 1412,
+        "summaryCompletionTokens": 64,
+        "summaryCachedPromptTokens": 0,
+        "structuredData": 0.0009,
+        "structuredDataPromptTokens": 1390,
+        "structuredDataCompletionTokens": 31,
+        "structuredDataCachedPromptTokens": 0,
+        "successEvaluation": 0.0007,
+        "successEvaluationPromptTokens": 1501,
+        "successEvaluationCompletionTokens": 1,
+        "successEvaluationCachedPromptTokens": 0,
+        "structuredOutput": 0.0011,
+        "structuredOutputPromptTokens": 1450,
+        "structuredOutputCompletionTokens": 33,
+        "structuredOutputCachedPromptTokens": 0
+      }
+    },
+    "durationMs": 53572,
+    "durationSeconds": 53.572,
+    "durationMinutes": 0.8929,
+    "summary": "The caller asked for a claim status. The phone number matched an account, but the date of birth did not match twice, so identity could not be verified and no claim details were shared.",
+    "transcript": "AI: Thanks for calling Observe Insurance claims. How can I help you today?\nUser: Hi, this is Sloane Marchetti. I need my claim status.\nAI: I can help with that. What's the phone number on your account?\nUser: six oh two, five five five, oh one oh three\nAI: One moment while I look that up.\nAI: Thanks. For security, what's the date of birth on the account?\nUser: May ninth, nineteen ninety.\nAI: Let me verify that.\nAI: I'm sorry, that doesn't match what we have on file. Could you give me your date of birth one more time?\nUser: Um, 11 2 1979.\nAI: Let me verify that.\nAI: I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?\nUser: No, forget it.\nAI: Thanks for calling Observe Insurance. Take care.\n",
+    "messages": [
+      {
+        "role": "system",
+        "message": "You are the Observe Insurance claims assistant. You help callers check the status of their own claims, answer general questions about how claims work, and connect them with a claims representative. Verify identity with lookup_customer and verify_identity before any claim detail. Never read a date of birth or a full phone number aloud. Speak the tool result message exactly once.",
+        "time": 1791826212330,
+        "secondsFromStart": 0
+      },
+      {
+        "role": "bot",
+        "message": "Thanks for calling Observe Insurance claims. How can I help you today?",
+        "time": 1791826212830,
+        "endTime": 1791826216730,
+        "secondsFromStart": 0.5,
+        "duration": 3900,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "Hi, this is Sloane Marchetti. I need my claim status.",
+        "time": 1791826216930,
+        "endTime": 1791826219530,
+        "secondsFromStart": 4.6,
+        "duration": 2600
+      },
+      {
+        "role": "bot",
+        "message": "I can help with that. What's the phone number on your account?",
+        "time": 1791826219930,
+        "endTime": 1791826222830,
+        "secondsFromStart": 7.6,
+        "duration": 2900,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "six oh two, five five five, oh one oh three",
+        "time": 1791826223230,
+        "endTime": 1791826225930,
+        "secondsFromStart": 10.9,
+        "duration": 2700
+      },
+      {
+        "role": "tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_lookup_c41e7f",
+            "type": "function",
+            "function": {
+              "name": "lookup_customer",
+              "arguments": {
+                "phone": "6025550103"
+              }
+            }
+          }
+        ],
+        "message": "",
+        "time": 1791826226330,
+        "secondsFromStart": 14
+      },
+      {
+        "role": "bot",
+        "message": "One moment while I look that up.",
+        "time": 1791826226430,
+        "endTime": 1791826227930,
+        "secondsFromStart": 14.1,
+        "duration": 1500,
+        "source": ""
+      },
+      {
+        "role": "tool_call_result",
+        "toolCallId": "call_lookup_c41e7f",
+        "name": "lookup_customer",
+        "result": "{\"code\":\"needs_dob\",\"message\":\"Thanks. For security, what's the date of birth on the account?\"}",
+        "time": 1791826227130,
+        "secondsFromStart": 14.8
+      },
+      {
+        "role": "bot",
+        "message": "Thanks. For security, what's the date of birth on the account?",
+        "time": 1791826227230,
+        "endTime": 1791826229930,
+        "secondsFromStart": 14.9,
+        "duration": 2700,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "May ninth, nineteen ninety.",
+        "time": 1791826230330,
+        "endTime": 1791826232130,
+        "secondsFromStart": 18,
+        "duration": 1800
+      },
+      {
+        "role": "tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_verify_0d93b5",
+            "type": "function",
+            "function": {
+              "name": "verify_identity",
+              "arguments": {
+                "dob_month": 5,
+                "dob_day": 9,
+                "dob_year": 1990
+              }
+            }
+          }
+        ],
+        "message": "",
+        "time": 1791826232530,
+        "secondsFromStart": 20.2
+      },
+      {
+        "role": "bot",
+        "message": "Let me verify that.",
+        "time": 1791826232630,
+        "endTime": 1791826233530,
+        "secondsFromStart": 20.3,
+        "duration": 900,
+        "source": ""
+      },
+      {
+        "role": "tool_call_result",
+        "toolCallId": "call_verify_0d93b5",
+        "name": "verify_identity",
+        "result": "{\"code\":\"auth_failed\",\"message\":\"I'm sorry, that doesn't match what we have on file. Could you give me your date of birth one more time?\"}",
+        "time": 1791826233230,
+        "secondsFromStart": 20.9
+      },
+      {
+        "role": "bot",
+        "message": "I'm sorry, that doesn't match what we have on file. Could you give me your date of birth one more time?",
+        "time": 1791826233330,
+        "endTime": 1791826237630,
+        "secondsFromStart": 21,
+        "duration": 4300,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "Um, 11 2 1979.",
+        "time": 1791826238130,
+        "endTime": 1791826239830,
+        "secondsFromStart": 25.8,
+        "duration": 1700
+      },
+      {
+        "role": "tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_verify_e5a812",
+            "type": "function",
+            "function": {
+              "name": "verify_identity",
+              "arguments": {
+                "dob_month": 11,
+                "dob_day": 2,
+                "dob_year": 1979
+              }
+            }
+          }
+        ],
+        "message": "",
+        "time": 1791826240230,
+        "secondsFromStart": 27.9
+      },
+      {
+        "role": "bot",
+        "message": "Let me verify that.",
+        "time": 1791826240330,
+        "endTime": 1791826241230,
+        "secondsFromStart": 28,
+        "duration": 900,
+        "source": ""
+      },
+      {
+        "role": "tool_call_result",
+        "toolCallId": "call_verify_e5a812",
+        "name": "verify_identity",
+        "result": "{\"code\":\"locked\",\"message\":\"I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?\"}",
+        "time": 1791826240930,
+        "secondsFromStart": 28.6
+      },
+      {
+        "role": "bot",
+        "message": "I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?",
+        "time": 1791826241030,
+        "endTime": 1791826249230,
+        "secondsFromStart": 28.7,
+        "duration": 8200,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "No, forget it.",
+        "time": 1791826249730,
+        "endTime": 1791826250630,
+        "secondsFromStart": 37.4,
+        "duration": 900
+      },
+      {
+        "role": "bot",
+        "message": "Thanks for calling Observe Insurance. Take care.",
+        "time": 1791826251230,
+        "endTime": 1791826253230,
+        "secondsFromStart": 38.9,
+        "duration": 2000,
+        "source": ""
+      }
+    ],
+    "recordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b06-1791826265902-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+    "stereoRecordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b06-1791826265902-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+    "call": {
+      "id": "3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b06",
+      "orgId": "4f1c2d3e-0000-4000-8000-00000000a0a0",
+      "type": "webCall",
+      "createdAt": "2026-10-12T17:30:11.802Z",
+      "updatedAt": "2026-10-12T17:30:11.802Z",
+      "assistantId": "a7e2c9d0-5b1f-4c3e-8d2a-0f9e8d7c6b01",
+      "webCallUrl": "https://vapi.daily.co/3f6c1a2e",
+      "transport": {
+        "provider": "daily",
+        "assistantVideoEnabled": false
+      }
+    },
+    "assistant": {
+      "id": "a7e2c9d0-5b1f-4c3e-8d2a-0f9e8d7c6b01",
+      "orgId": "4f1c2d3e-0000-4000-8000-00000000a0a0",
+      "name": "Observe Claims Web"
+    }
+  }
+}

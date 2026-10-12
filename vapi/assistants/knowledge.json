@@ -1,0 +1,24 @@
+{
+  "comment": "Second squad member. Knowledge-base questions plus the floor tools; no identity or claim tools, so a policy question can never touch account data. Arrives silently after a handoff.",
+  "sections": [
+    "header",
+    "role-knowledge",
+    "tools",
+    "rules",
+    "flow-knowledge",
+    "return",
+    "branches",
+    "faq",
+    "knowledge-kb",
+    "errors",
+    "ending",
+    "style"
+  ],
+  "representative": "representative-web",
+  "tools": ["faq_search", "handoff_to_concierge", "escalate", "report_emergency", "send_info_email", "endCall"],
+  "assistant": {
+    "name": "Knowledge",
+    "firstMessage": "",
+    "firstMessageMode": "assistant-speaks-first-with-model-generated-message"
+  }
+}

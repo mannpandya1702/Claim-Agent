@@ -1,0 +1,741 @@
+// Smoke test of the deployed webhook before any VAPI traffic: flat VAPI-shaped envelopes with the
+// real Bearer, walking every code path the server owns (auth, org check, the identity ladder with
+// wrong-DOB-twice and smuggled arguments, the chat escalation, and the post-call writers). Each
+// tool answer is checked against the exact speak.ts sentence, so a stale deploy shows up here.
+// Then every row written for a smoke-* call key is deleted again.
+//
+//   deno task smoke                 run every case, verify the rows, clean up
+//   deno task smoke --only a,b      run only the named cases (the post-call cases share one call)
+//   deno task smoke --keep          leave the rows in place for inspection
+//
+// Chat envelopes send no Telegram and no email (alert_status 'skipped'), and no case reaches an
+// alerting or emailing branch, so a smoke run never pages anyone.
+
+import type { Code, Level } from "../supabase/functions/vapi-webhook/enums.ts";
+import { MASKED_ANSWER } from "../supabase/functions/vapi-webhook/redact.ts";
+import { assertSpeakable, sentenceFor } from "../supabase/functions/vapi-webhook/speak.ts";
+import {
+  endOfCallReportEnvelope,
+  type EnvelopeRef,
+  postEnvelope,
+  type PostResult,
+  rekey,
+  statusUpdateEnvelope,
+  toolCallsEnvelope,
+  type ToolCallSpec,
+  toolReplies,
+  type ToolReply,
+  transcriptEnvelope,
+  type WebhookTarget,
+} from "./lib/envelope.ts";
+import { loadEnv, need } from "./lib/env.ts";
+import { lit, sqlClient } from "./lib/sql.ts";
+import { webhookUrl } from "./vapi_sync.ts";
+
+export const SMOKE_PREFIX = "smoke-";
+
+// Seeded fiction (0002_seed.sql). The unknown and callback numbers match nobody on purpose.
+const TOBIAS = {
+  id: "6b0d6f0e-1c11-4c7a-9a01-000000000101",
+  phone: "6025550101",
+  dob: { dob_month: 3, dob_day: 14, dob_year: 1986 },
+};
+const RONAN_PHONE = "6025550102";
+const UNKNOWN_PHONE = "6025550199";
+const CALLBACK_PHONE = "6025550177";
+const FIRST_MESSAGE =
+  "Thanks for calling Observe Insurance claims support. This is Tessa, a virtual assistant, and this call may be recorded. To get started, what's the phone number on your account?";
+const VERIFIED_PREFIX = "Thank you, Tobias, you're verified.";
+const SETTLE_MS = 2000;
+const ROW_WAIT_MS = 3000;
+const ROW_POLL_MS = 250;
+
+/** Read access to the rows a case should have written (SQL live, the fake store in tests). */
+export interface SmokeDb {
+  attempts(callKey: string): Promise<{ tool_name: string; code: string | null }[]>;
+  escalations(callKey: string): Promise<
+    {
+      kind: string;
+      reason: string;
+      alert_status: string;
+      callback_phone: string | null;
+      callback_source: string | null;
+      channel: string;
+    }[]
+  >;
+  interaction(callKey: string): Promise<
+    {
+      outcome: string | null;
+      ended_at: string | null;
+      summary: string | null;
+      sentiment: string | null;
+      analysis_status: string;
+    } | null
+  >;
+  transcriptLines(callKey: string): Promise<{ role: string; text: string }[]>;
+}
+
+export interface SmokeConfig {
+  target: WebhookTarget;
+  orgId: string;
+  runId: string; // makes every call key unique to this run
+  db?: SmokeDb; // row checks are skipped without it
+  eocrFixture?: unknown; // a captured end-of-call-report body; inline report otherwise
+  now?: () => Date;
+  /** Tools write some rows in the background (waitUntil), so a row check re-reads for up to this
+   *  long before it fails. Default 3000 ms; tests pass 0. */
+  rowWaitMs?: number;
+}
+
+export interface CaseResult {
+  name: string;
+  pass: boolean;
+  requests: number;
+  problems: string[];
+}
+
+type Expect = string | RegExp | ((sentence: string) => string | null);
+
+interface ToolStep {
+  name: string;
+  args?: Record<string, unknown> | string;
+  id?: string; // reuse a toolCallId to exercise the replay guard
+  code: Code;
+  sentence?: Expect; // default: the exact sentenceFor(code)
+  check?: (reply: ToolReply) => string | null;
+}
+
+class CaseCtx {
+  problems: string[] = [];
+  requests = 0;
+  private seq = 0;
+
+  constructor(readonly cfg: SmokeConfig, readonly caseName: string) {}
+
+  key(suffix = ""): string {
+    return `${SMOKE_PREFIX}${this.cfg.runId}-${this.caseName}${suffix ? `-${suffix}` : ""}`;
+  }
+
+  ref(suffix = "", channel: EnvelopeRef["channel"] = "webCall"): EnvelopeRef {
+    return { callKey: this.key(suffix), orgId: this.cfg.orgId, channel };
+  }
+
+  fail(message: string): void {
+    this.problems.push(message);
+  }
+
+  /** Reads until problem() returns null or the row wait runs out; returns the last problem. */
+  async rows<T>(read: () => Promise<T>, problem: (rows: T) => string | null): Promise<string | null> {
+    const deadline = Date.now() + (this.cfg.rowWaitMs ?? ROW_WAIT_MS);
+    for (;;) {
+      const found = problem(await read());
+      if (found === null || Date.now() >= deadline) return found;
+      await new Promise((r) => setTimeout(r, ROW_POLL_MS));
+    }
+  }
+
+  async post(body: unknown, opts: Parameters<typeof postEnvelope>[2] = {}): Promise<PostResult> {
+    this.requests++;
+    return await postEnvelope(this.cfg.target, body, opts);
+  }
+
+  expectStatus(label: string, res: PostResult, status: number): boolean {
+    if (res.status === status) return true;
+    this.fail(`${label}: HTTP ${res.status}, expected ${status} (${res.text.slice(0, 160)})`);
+    return false;
+  }
+
+  /** One tool call per request, so each expected code maps to exactly one answer. */
+  async tool(ref: EnvelopeRef, step: ToolStep): Promise<ToolReply | null> {
+    const id = step.id ?? `${ref.callKey}-${++this.seq}`;
+    const call: ToolCallSpec = { id, name: step.name, args: step.args };
+    const label = `${step.name} -> ${step.code}`;
+    const res = await this.post(toolCallsEnvelope(ref, [call]));
+    if (!this.expectStatus(label, res, 200)) return null;
+    const replies = toolReplies(res.json);
+    if (!replies || replies.length !== 1) {
+      this.fail(`${label}: expected one result, got ${res.text.slice(0, 160)}`);
+      return null;
+    }
+    const reply = replies[0];
+    if (reply.toolCallId !== id) this.fail(`${label}: toolCallId ${String(reply.toolCallId)} != ${id}`);
+    if (reply.name !== step.name) this.fail(`${label}: name ${String(reply.name)} != ${step.name}`);
+    if (reply.code !== step.code) {
+      this.fail(`${label}: got code ${String(reply.code)}`);
+      return reply;
+    }
+    const sentence = reply.sentence ?? "";
+    try {
+      assertSpeakable(sentence);
+    } catch (e) {
+      this.fail(`${label}: sentence not speakable (${(e as Error).message})`);
+    }
+    const problem = sentenceProblem(sentence, step.sentence ?? sentenceFor(step.code));
+    if (problem) this.fail(`${label}: ${problem}`);
+    // results[].message is present unless NATIVE_TOOL_MESSAGES=false; when present it must be the
+    // same sentence, or VAPI would speak one thing and the model's history would hold another.
+    if (reply.nativeContent !== null && reply.nativeContent !== sentence) {
+      this.fail(`${label}: results[].message.content differs from result.message`);
+    }
+    const extra = step.check?.(reply);
+    if (extra) this.fail(`${label}: ${extra}`);
+    return reply;
+  }
+}
+
+function sentenceProblem(sentence: string, expect: Expect): string | null {
+  if (typeof expect === "string") return sentence === expect ? null : `sentence was "${sentence}"`;
+  if (expect instanceof RegExp) return expect.test(sentence) ? null : `sentence "${sentence}" !~ ${expect}`;
+  return expect(sentence);
+}
+
+const contains = (...parts: string[]) => (s: string) => {
+  const missing = parts.filter((p) => !s.includes(p));
+  return missing.length ? `sentence lacks ${missing.map((p) => `"${p}"`).join(", ")}` : null;
+};
+
+const notVerified = (level: Level) => sentenceFor("not_verified", { level });
+
+interface SmokeCase {
+  name: string;
+  run(ctx: CaseCtx): Promise<void>;
+}
+
+function inlineReport(ref: EnvelopeRef, now: Date) {
+  const at = (s: number) => new Date(now.getTime() - 90_000 + s * 1000).toISOString();
+  const needsDob = sentenceFor("needs_dob");
+  const verified = sentenceFor("verified", { first_name: "Tobias" });
+  const lines: [string, string][] = [
+    ["AI", FIRST_MESSAGE],
+    ["User", "It's six zero two, five five five, zero one zero one."],
+    ["AI", needsDob],
+    ["User", "March fourteenth, nineteen eighty-six."],
+    ["AI", verified],
+    ["User", "That's all I needed, thanks. Bye."],
+  ];
+  return endOfCallReportEnvelope(ref, {
+    startedAt: at(0),
+    endedAt: at(88),
+    durationSeconds: 88.4,
+    cost: 0.0912,
+    endedReason: "customer-ended-call",
+    summary: "Tobias called about his claims and was verified. He needed nothing else and ended the call.",
+    sentiment: "neutral",
+    outcome: "resolved",
+    callerName: "Tobias",
+    successEvaluation: "true",
+    assistantName: "Observe Claims Core",
+    transcript: lines.map(([who, text]) => `${who}: ${text}`).join("\n"),
+    messages: [
+      { role: "bot", message: FIRST_MESSAGE, secondsFromStart: 0.4 },
+      { role: "user", message: lines[1][1], secondsFromStart: 6.1 },
+      {
+        role: "tool_calls",
+        toolCalls: [{
+          id: "call_smoke_1",
+          type: "function",
+          function: { name: "lookup_customer", arguments: JSON.stringify({ phone: TOBIAS.phone }) },
+        }],
+        secondsFromStart: 6.9,
+      },
+      {
+        role: "tool_call_result",
+        name: "lookup_customer",
+        toolCallId: "call_smoke_1",
+        result: JSON.stringify({ code: "needs_dob", message: needsDob }),
+        secondsFromStart: 7.5,
+      },
+      { role: "bot", message: needsDob, secondsFromStart: 7.6 },
+      { role: "user", message: lines[3][1], secondsFromStart: 12.2 },
+      {
+        role: "tool_calls",
+        toolCalls: [{
+          id: "call_smoke_2",
+          type: "function",
+          function: { name: "verify_identity", arguments: JSON.stringify(TOBIAS.dob) },
+        }],
+        secondsFromStart: 13.0,
+      },
+      {
+        role: "tool_call_result",
+        name: "verify_identity",
+        toolCallId: "call_smoke_2",
+        result: JSON.stringify({ code: "verified", message: verified, data: { first_name: "Tobias" } }),
+        secondsFromStart: 13.6,
+      },
+      { role: "bot", message: verified, secondsFromStart: 13.7 },
+      { role: "user", message: lines[5][1], secondsFromStart: 19.3 },
+    ],
+  });
+}
+
+/** Every case in run order. The three post-call cases share one call key, like one real call. */
+export function smokeCases(): SmokeCase[] {
+  return [
+    {
+      name: "health",
+      async run(c) {
+        for (const method of ["GET", "OPTIONS"]) {
+          const res = await c.post(null, { method, path: "/health", auth: null });
+          if (!c.expectStatus(`${method} /health`, res, 200)) continue;
+          if (JSON.stringify(res.json) !== '{"ok":true}') c.fail(`${method} /health: body ${res.text.slice(0, 80)}`);
+          if (res.headers.get("access-control-allow-origin") !== "*") c.fail(`${method} /health: no CORS header`);
+        }
+      },
+    },
+    {
+      name: "unauthorized",
+      async run(c) {
+        const body = toolCallsEnvelope(c.ref(), [{
+          id: c.key("t1"),
+          name: "lookup_customer",
+          args: { phone: TOBIAS.phone },
+        }]);
+        const none = await c.post(body, { auth: null });
+        if (c.expectStatus("no Bearer", none, 401) && (none.json as any)?.error !== "unauthorized") {
+          c.fail(`no Bearer: body ${none.text.slice(0, 80)}`);
+        }
+        const wrong = await c.post(body, { auth: `wrong-${crypto.randomUUID()}` });
+        c.expectStatus("wrong Bearer", wrong, 401);
+      },
+    },
+    {
+      name: "forbidden-org",
+      async run(c) {
+        const ref = { ...c.ref(), orgId: "00000000-0000-4000-8000-0000000000ff" };
+        const res = await c.post(toolCallsEnvelope(ref, [{ id: c.key("t1"), name: "lookup_customer", args: {} }]));
+        c.expectStatus("foreign orgId", res, 403);
+      },
+    },
+    {
+      name: "malformed",
+      async run(c) {
+        const bad = await c.post(null, { raw: '{"message":' });
+        c.expectStatus("bad JSON", bad, 400);
+        const empty = await c.post({
+          message: { type: "tool-calls", call: { id: c.key(), orgId: c.cfg.orgId }, toolCallList: [] },
+        });
+        if (c.expectStatus("empty toolCallList", empty, 200) && JSON.stringify(empty.json) !== '{"results":[]}') {
+          c.fail(`empty toolCallList: body ${empty.text.slice(0, 80)}`);
+        }
+      },
+    },
+    {
+      name: "happy-path",
+      async run(c) {
+        const ref = c.ref();
+        await c.tool(ref, { name: "lookup_customer", args: { phone: TOBIAS.phone }, code: "needs_dob" });
+        await c.tool(ref, {
+          name: "verify_identity",
+          args: TOBIAS.dob,
+          code: "verified",
+          // with PRIOR_CONTACTS_ENABLED the welcome-back clause may follow
+          sentence: (s) => s.startsWith(VERIFIED_PREFIX) ? null : `sentence was "${s}"`,
+        });
+        const claimsId = `${ref.callKey}-claims`;
+        const first = await c.tool(ref, {
+          name: "get_claim_status",
+          id: claimsId,
+          code: "ok",
+          sentence: contains(
+            "four thousand eight hundred twenty dollars",
+            "contractor estimate",
+            "ending in one one five",
+          ),
+          check: (r) => {
+            const claims = r.data?.claims;
+            if (!Array.isArray(claims) || claims.length !== 2) return "data.claims should list both claims";
+            return /4820|Halvorsen|Fairbanks/.test(JSON.stringify(r.data))
+              ? "data carries more than last3 + status"
+              : null;
+          },
+        });
+        // A VAPI retry of the same toolCallId must replay the stored answer.
+        await c.tool(ref, {
+          name: "get_claim_status",
+          id: claimsId,
+          code: "ok",
+          sentence: (s) => first?.sentence === s ? null : "replayed sentence differs from the first answer",
+        });
+        const db = c.cfg.db;
+        if (db) {
+          const problem = await c.rows(() => db.attempts(ref.callKey), (rows) => {
+            const trail = rows.map((r) => `${r.tool_name}:${r.code}`).join(",");
+            return trail === "lookup_customer:needs_dob,verify_identity:verified,get_claim_status:ok"
+              ? null
+              : `attempts ledger was [${trail}] (a replay must not add a row)`;
+          });
+          if (problem) c.fail(problem);
+        }
+      },
+    },
+    {
+      name: "wrong-dob-locked",
+      async run(c) {
+        const ref = c.ref();
+        await c.tool(ref, { name: "lookup_customer", args: { phone: TOBIAS.phone }, code: "needs_dob" });
+        await c.tool(ref, {
+          name: "verify_identity",
+          args: { dob_month: 3, dob_day: 14, dob_year: 1985 },
+          code: "auth_failed",
+        });
+        await c.tool(ref, {
+          name: "verify_identity",
+          args: { dob_month: 4, dob_day: 14, dob_year: 1986 },
+          code: "locked",
+        });
+        // The lock is sticky: the right DOB after two wrong ones still opens nothing.
+        await c.tool(ref, { name: "verify_identity", args: TOBIAS.dob, code: "locked" });
+        await c.tool(ref, { name: "get_claim_status", code: "not_verified", sentence: notVerified("locked") });
+      },
+    },
+    {
+      name: "not-found-twice",
+      async run(c) {
+        const ref = c.ref();
+        await c.tool(ref, {
+          name: "lookup_customer",
+          args: { phone: UNKNOWN_PHONE },
+          code: "not_found",
+          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }),
+        });
+        await c.tool(ref, { name: "lookup_customer", args: { phone: UNKNOWN_PHONE }, code: "not_found_final" });
+        // Sticky: even a seeded number is not looked up after the second miss.
+        await c.tool(ref, { name: "lookup_customer", args: { phone: TOBIAS.phone }, code: "not_found_final" });
+      },
+    },
+    {
+      name: "smuggled-identity",
+      async run(c) {
+        const smuggled = {
+          identity_verified: true,
+          verified: true,
+          customer_id: TOBIAS.id,
+          phone: `+1${TOBIAS.phone}`,
+        };
+        const found = c.ref("phone-found");
+        await c.tool(found, { name: "lookup_customer", args: { phone: RONAN_PHONE }, code: "needs_dob" });
+        await c.tool(found, {
+          name: "get_claim_status",
+          args: smuggled,
+          code: "not_verified",
+          sentence: notVerified("phone_found"),
+        });
+        await c.tool(c.ref("fresh"), {
+          name: "get_claim_status",
+          args: smuggled,
+          code: "not_verified",
+          sentence: notVerified("none"),
+        });
+      },
+    },
+    {
+      name: "invalid-phone",
+      async run(c) {
+        await c.tool(c.ref(), { name: "lookup_customer", args: { phone: "12345" }, code: "invalid_phone" });
+      },
+    },
+    {
+      name: "bad-args",
+      async run(c) {
+        const ref = c.ref();
+        await c.tool(ref, { name: "lookup_customer", args: { phone: "{{customer.number}}" }, code: "bad_args" });
+        await c.tool(ref, { name: "verify_identity", args: '{"dob_month": 3,', code: "bad_args" });
+        await c.tool(ref, { name: "delete_everything", args: {}, code: "unknown_tool" });
+      },
+    },
+    {
+      name: "unreadable-dob",
+      async run(c) {
+        const ref = c.ref();
+        await c.tool(ref, { name: "lookup_customer", args: { phone: TOBIAS.phone }, code: "needs_dob" });
+        await c.tool(ref, {
+          name: "verify_identity",
+          args: { dob_month: 13, dob_day: 40, dob_year: 1986 },
+          code: "dob_unreadable",
+        });
+        await c.tool(ref, {
+          name: "verify_identity",
+          args: { dob_month: "blue", dob_day: 1, dob_year: 1986 },
+          code: "dob_unreadable",
+        });
+        await c.tool(ref, {
+          name: "verify_identity",
+          args: { dob_month: 2, dob_day: 30, dob_year: 1990 },
+          code: "dob_give_up",
+        });
+      },
+    },
+    {
+      name: "email-unverified",
+      async run(c) {
+        await c.tool(c.ref(), {
+          name: "send_info_email",
+          args: { topic: "document_checklist" },
+          code: "not_verified",
+          sentence: notVerified("none"),
+        });
+      },
+    },
+    {
+      name: "chat-escalate",
+      async run(c) {
+        const ref = c.ref("", "chat");
+        await c.tool(ref, {
+          name: "escalate",
+          args: { reason: "representative_requested", details: "Wants a callback about a claim." },
+          code: "rep_queued_no_number",
+        });
+        await c.tool(ref, {
+          name: "escalate",
+          args: { reason: "representative_requested", callback_phone: CALLBACK_PHONE },
+          code: "callback_updated",
+          sentence: sentenceFor("callback_updated", { digits: CALLBACK_PHONE }),
+        });
+        const db = c.cfg.db;
+        if (db) {
+          const want: Record<string, unknown> = {
+            kind: "representative",
+            alert_status: "skipped",
+            callback_phone: `+1${CALLBACK_PHONE}`,
+            callback_source: "argument",
+            channel: "chat",
+          };
+          const problem = await c.rows(() => db.escalations(ref.callKey), (rows) => {
+            if (rows.length !== 1) return `expected one escalation row, found ${rows.length}`;
+            const row = rows[0] as Record<string, unknown>;
+            const wrong = Object.entries(want).filter(([k, v]) => row[k] !== v);
+            return wrong.length === 0
+              ? null
+              : wrong.map(([k, v]) => `escalation.${k} was ${JSON.stringify(row[k])}, expected ${JSON.stringify(v)}`)
+                .join("; ");
+          });
+          if (problem) c.fail(problem);
+        }
+      },
+    },
+    {
+      name: "status-update",
+      async run(c) {
+        const ref = { ...c.ref(), callKey: lifecycleKey(c) };
+        const res = await c.post(statusUpdateEnvelope(ref, "in-progress"));
+        c.expectStatus("status-update in-progress", res, 200);
+        const db = c.cfg.db;
+        if (db) {
+          const problem = await c.rows(() => db.interaction(ref.callKey), (row) => {
+            if (!row) return "no call_interactions stub row";
+            return row.outcome === "in_progress" && row.ended_at === null
+              ? null
+              : `stub row outcome ${row.outcome}, ended_at ${row.ended_at}`;
+          });
+          if (problem) c.fail(problem);
+        }
+      },
+    },
+    {
+      name: "transcript",
+      async run(c) {
+        const ref = { ...c.ref(), callKey: lifecycleKey(c) };
+        const t0 = (c.cfg.now?.() ?? new Date()).getTime();
+        const asked = "To get started, what's the phone number on your account?";
+        for (
+          const line of [
+            { role: "assistant" as const, text: asked, timestamp: t0 },
+            {
+              role: "user" as const,
+              text: "It's six zero two five five five zero one zero one.",
+              timestamp: t0 + 4000,
+            },
+          ]
+        ) {
+          const res = await c.post(transcriptEnvelope(ref, line));
+          c.expectStatus(`transcript ${line.role}`, res, 200);
+        }
+        const db = c.cfg.db;
+        if (db) {
+          const want = JSON.stringify([`assistant:${asked}`, `user:${MASKED_ANSWER}`]);
+          const problem = await c.rows(() => db.transcriptLines(ref.callKey), (lines) => {
+            const got = JSON.stringify(lines.map((l) => `${l.role}:${l.text}`));
+            return got === want
+              ? null
+              : `transcript_lines were ${got}, expected the answer to the phone question masked`;
+          });
+          if (problem) c.fail(problem);
+        }
+      },
+    },
+    {
+      name: "end-of-call-report",
+      async run(c) {
+        const ref = { ...c.ref(), callKey: lifecycleKey(c) };
+        const body = c.cfg.eocrFixture ? rekey(c.cfg.eocrFixture, ref) : inlineReport(ref, c.cfg.now?.() ?? new Date());
+        const res = await c.post(body);
+        c.expectStatus("end-of-call-report", res, 200);
+        const db = c.cfg.db;
+        if (db) {
+          const rowProblem = await c.rows(() => db.interaction(ref.callKey), (row) => {
+            if (!row) return "no call_interactions row after the report";
+            const problems = [
+              row.ended_at ? "" : "row has no ended_at",
+              row.summary ? "" : "row has no summary",
+              row.analysis_status === "ok" ? "" : `analysis_status ${row.analysis_status}, expected ok`,
+              row.outcome && row.outcome !== "in_progress" ? "" : `outcome ${row.outcome}`,
+            ].filter(Boolean);
+            return problems.length ? problems.join("; ") : null;
+          });
+          if (rowProblem) c.fail(rowProblem);
+          const linesProblem = await c.rows(
+            () => db.transcriptLines(ref.callKey),
+            (left) => left.length === 0 ? null : `${left.length} live transcript lines left after the report`,
+          );
+          if (linesProblem) c.fail(linesProblem);
+        }
+      },
+    },
+  ];
+}
+
+function lifecycleKey(c: CaseCtx): string {
+  return `${SMOKE_PREFIX}${c.cfg.runId}-lifecycle`;
+}
+
+/** Runs the cases in order; a case that throws is a failure, never an abort of the run. */
+export async function runSmoke(cfg: SmokeConfig, only?: string[]): Promise<CaseResult[]> {
+  const out: CaseResult[] = [];
+  for (const sc of smokeCases()) {
+    if (only && !only.includes(sc.name)) continue;
+    const ctx = new CaseCtx(cfg, sc.name);
+    try {
+      await sc.run(ctx);
+    } catch (e) {
+      ctx.fail(`threw ${(e as Error).name}: ${(e as Error).message}`);
+    }
+    out.push({ name: sc.name, pass: ctx.problems.length === 0, requests: ctx.requests, problems: ctx.problems });
+  }
+  return out;
+}
+
+export function sqlDb(sql: ReturnType<typeof sqlClient>): SmokeDb {
+  return {
+    attempts: (k) =>
+      sql(`select tool_name, code from attempts where call_key = ${lit(k)} order by created_at, tool_call_id`),
+    escalations: (k) =>
+      sql(
+        `select kind, reason, alert_status, callback_phone, callback_source, channel from escalations where call_key = ${
+          lit(k)
+        }`,
+      ),
+    interaction: async (k) =>
+      (await sql<any>(
+        `select outcome, ended_at, summary, sentiment, analysis_status from call_interactions where vapi_call_id = ${
+          lit(k)
+        }`,
+      ))[0] ?? null,
+    transcriptLines: (k) => sql(`select role, text from transcript_lines where call_key = ${lit(k)} order by ts_ms`),
+  };
+}
+
+/** Deletes every row any smoke run wrote (this run's and any interrupted earlier run's). */
+export function cleanupSql(prefix = SMOKE_PREFIX): string {
+  if (!/^[a-z]+-$/.test(prefix)) throw new Error("cleanup prefix must be a plain word and a dash");
+  const like = lit(`${prefix}%`);
+  return `with
+  d_attempts as (delete from attempts where call_key like ${like} returning 1),
+  d_sessions as (delete from call_sessions where call_key like ${like} returning 1),
+  d_escalations as (delete from escalations where call_key like ${like} returning 1),
+  d_emails as (delete from emails where call_key like ${like} returning 1),
+  d_lines as (delete from transcript_lines where call_key like ${like} returning 1),
+  d_interactions as (delete from call_interactions where vapi_call_id like ${like} returning 1),
+  d_captures as (delete from webhook_captures where call_key like ${like} returning 1)
+select
+  (select count(*) from d_attempts)::int as attempts,
+  (select count(*) from d_sessions)::int as call_sessions,
+  (select count(*) from d_escalations)::int as escalations,
+  (select count(*) from d_emails)::int as emails,
+  (select count(*) from d_lines)::int as transcript_lines,
+  (select count(*) from d_interactions)::int as call_interactions,
+  (select count(*) from d_captures)::int as webhook_captures`;
+}
+
+/** A captured report from fixtures/eocr/full.json, if it is one that needs no backfill (a backfill
+ *  would write the row again after the cleanup). */
+export function loadEocrFixture(path = new URL("../fixtures/eocr/full.json", import.meta.url)): unknown {
+  try {
+    const body = JSON.parse(Deno.readTextFileSync(path));
+    const m = body?.message;
+    const sentiment = m?.analysis?.structuredData?.sentiment;
+    if (m?.type === "end-of-call-report" && typeof m?.analysis?.summary === "string" && sentiment) return body;
+    console.log("fixtures/eocr/full.json lacks summary or sentiment; using the inline report");
+  } catch {
+    // no fixture: the inline report is built from the same OpenAPI shape
+  }
+  return undefined;
+}
+
+function runIdNow(d = new Date()): string {
+  return d.toISOString().replace(/[-:T]/g, "").slice(0, 14);
+}
+
+function parseArgs(argv: string[]): { only?: string[]; keep: boolean } {
+  const args = argv.filter((a) => a !== "--");
+  let only: string[] | undefined;
+  let keep = false;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--keep") keep = true;
+    else if (args[i] === "--only" && args[i + 1]) only = args[++i].split(",").map((s) => s.trim()).filter(Boolean);
+    else {
+      console.error(`unknown argument ${args[i]}\nusage: deno task smoke [--only case,case] [--keep]`);
+      Deno.exit(2);
+    }
+  }
+  const known = smokeCases().map((c) => c.name);
+  const unknown = (only ?? []).filter((n) => !known.includes(n));
+  if (unknown.length) {
+    console.error(`unknown case ${unknown.join(", ")}; cases: ${known.join(", ")}`);
+    Deno.exit(2);
+  }
+  return { only, keep };
+}
+
+async function main(): Promise<number> {
+  const { only, keep } = parseArgs(Deno.args);
+  const env = loadEnv();
+  const [supabaseUrl, secret, orgId] = need(env, "SUPABASE_URL", "VAPI_WEBHOOK_SECRET", "VAPI_ORG_ID");
+  const sql = sqlClient(env);
+  const runId = runIdNow();
+  const url = webhookUrl(supabaseUrl);
+  const eocrFixture = loadEocrFixture();
+  console.log(`smoke run ${runId} against ${url}${eocrFixture ? " (end-of-call-report from fixtures/eocr)" : ""}`);
+
+  let results: CaseResult[] = [];
+  try {
+    results = await runSmoke({ target: { url, secret }, orgId, runId, db: sqlDb(sql), eocrFixture }, only);
+  } finally {
+    if (keep) {
+      console.log(`--keep: rows for ${SMOKE_PREFIX}${runId}-* left in place`);
+    } else {
+      // Background writes (waitUntil) land within a moment; deleting earlier could race them.
+      await new Promise((r) => setTimeout(r, SETTLE_MS));
+      try {
+        const [counts] = await sql<Record<string, number>>(cleanupSql());
+        const parts = Object.entries(counts ?? {}).map(([k, v]) => `${k} ${v}`).join(", ");
+        console.log(`cleanup: deleted ${parts}`);
+      } catch (e) {
+        console.error(`cleanup FAILED: ${(e as Error).message}`);
+        results.push({ name: "cleanup", pass: false, requests: 0, problems: [(e as Error).message] });
+      }
+    }
+  }
+
+  for (const r of results) {
+    console.log(`${r.pass ? "PASS" : "FAIL"}  ${r.name} (${r.requests} request${r.requests === 1 ? "" : "s"})`);
+    for (const p of r.problems) console.log(`      ${p}`);
+  }
+  const failed = results.filter((r) => !r.pass).length;
+  console.log(`${results.length - failed}/${results.length} cases passed`);
+  return failed === 0 ? 0 : 1;
+}
+
+if (import.meta.main) {
+  Deno.exit(await main());
+}

@@ -1,0 +1,340 @@
+{
+  "message": {
+    "timestamp": 1791821164741,
+    "type": "end-of-call-report",
+    "analysis": {
+      "summary": "The caller reported smoke and a smell of gas in their kitchen. The assistant gave the 911 safety line and logged an emergency report; the caller said they were outside and safe.",
+      "structuredData": {
+        "caller_name": "unknown",
+        "sentiment": "negative",
+        "outcome": "emergency",
+        "escalated": false,
+        "emergency": true
+      },
+      "successEvaluation": "true"
+    },
+    "artifact": {
+      "messages": [
+        {
+          "role": "system",
+          "message": "You are the Observe Insurance claims assistant. You help callers check the status of their own claims, answer general questions about how claims work, and connect them with a claims representative. Verify identity with lookup_customer and verify_identity before any claim detail. Never read a date of birth or a full phone number aloud. Speak the tool result message exactly once.",
+          "time": 1791821130250,
+          "secondsFromStart": 0
+        },
+        {
+          "role": "bot",
+          "message": "Thanks for calling Observe Insurance claims. How can I help you today?",
+          "time": 1791821130750,
+          "endTime": 1791821134650,
+          "secondsFromStart": 0.5,
+          "duration": 3900,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "There's smoke coming out of my kitchen right now and I can smell gas.",
+          "time": 1791821134950,
+          "endTime": 1791821138250,
+          "secondsFromStart": 4.7,
+          "duration": 3300
+        },
+        {
+          "role": "tool_calls",
+          "toolCalls": [
+            {
+              "id": "call_emerg_3b9e0f",
+              "type": "function",
+              "function": {
+                "name": "report_emergency",
+                "arguments": {
+                  "note": "smoke in the kitchen and a smell of gas, happening now"
+                }
+              }
+            }
+          ],
+          "message": "",
+          "time": 1791821138650,
+          "secondsFromStart": 8.4
+        },
+        {
+          "role": "bot",
+          "message": "If anyone is hurt or in immediate danger, please hang up and call 911 right now. If you are thinking about harming yourself, call or text 988.",
+          "time": 1791821138750,
+          "endTime": 1791821146350,
+          "secondsFromStart": 8.5,
+          "duration": 7600,
+          "source": ""
+        },
+        {
+          "role": "tool_call_result",
+          "toolCallId": "call_emerg_3b9e0f",
+          "name": "report_emergency",
+          "result": "{\"code\":\"emergency_logged\",\"message\":\"Our team has been told. Are you safe right now?\"}",
+          "time": 1791821146550,
+          "secondsFromStart": 16.3
+        },
+        {
+          "role": "bot",
+          "message": "Our team has been told. Are you safe right now?",
+          "time": 1791821146650,
+          "endTime": 1791821148750,
+          "secondsFromStart": 16.4,
+          "duration": 2100,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "Yes, I'm outside now. The fire department is on the way.",
+          "time": 1791821149350,
+          "endTime": 1791821151950,
+          "secondsFromStart": 19.1,
+          "duration": 2600
+        },
+        {
+          "role": "bot",
+          "message": "I'm glad you're safe. Our team has your report, and once things are calm you can call back to start a claim.",
+          "time": 1791821152550,
+          "endTime": 1791821158950,
+          "secondsFromStart": 22.3,
+          "duration": 6400,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "Okay, thank you.",
+          "time": 1791821159650,
+          "endTime": 1791821160550,
+          "secondsFromStart": 29.4,
+          "duration": 900
+        },
+        {
+          "role": "bot",
+          "message": "Thanks for calling Observe Insurance. Take care.",
+          "time": 1791821160850,
+          "endTime": 1791821162750,
+          "secondsFromStart": 30.6,
+          "duration": 1900,
+          "source": ""
+        }
+      ],
+      "transcript": "AI: Thanks for calling Observe Insurance claims. How can I help you today?\nUser: There's smoke coming out of my kitchen right now and I can smell gas.\nAI: If anyone is hurt or in immediate danger, please hang up and call 911 right now. If you are thinking about harming yourself, call or text 988.\nAI: Our team has been told. Are you safe right now?\nUser: Yes, I'm outside now. The fire department is on the way.\nAI: I'm glad you're safe. Our team has your report, and once things are calm you can call back to start a claim.\nUser: Okay, thank you.\nAI: Thanks for calling Observe Insurance. Take care.\n",
+      "recordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b04-1791821162901-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+      "stereoRecordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b04-1791821162901-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+      "recording": {
+        "stereoUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b04-1791821162901-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+        "mono": {
+          "combinedUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b04-1791821162901-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+          "assistantUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b04-1791821162901-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-assistant-mono.wav",
+          "customerUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b04-1791821162901-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-customer-mono.wav"
+        }
+      },
+      "performanceMetrics": {
+        "turnLatencies": [
+          {
+            "modelLatency": 502,
+            "voiceLatency": 277,
+            "transcriberLatency": 264,
+            "endpointingLatency": 277,
+            "turnLatency": 1320
+          },
+          {
+            "modelLatency": 562,
+            "voiceLatency": 311,
+            "transcriberLatency": 296,
+            "endpointingLatency": 311,
+            "turnLatency": 1480
+          }
+        ],
+        "modelLatencyAverage": 532,
+        "voiceLatencyAverage": 294,
+        "transcriberLatencyAverage": 280,
+        "endpointingLatencyAverage": 294,
+        "turnLatencyAverage": 1400,
+        "fromTransportLatencyAverage": 21.4,
+        "toTransportLatencyAverage": 18.9,
+        "numUserInterrupted": 0,
+        "numAssistantInterrupted": 0
+      },
+      "nodes": [],
+      "variableValues": {},
+      "transfers": [],
+      "structuredOutputs": {
+        "5e0c7d1a-2b3c-4d5e-8f60-718293a4b5c6": {
+          "name": "claims_call",
+          "result": {
+            "caller_name": "unknown",
+            "sentiment": "negative",
+            "outcome": "emergency",
+            "escalated": false,
+            "emergency": true
+          }
+        }
+      }
+    },
+    "startedAt": "2026-10-12T16:05:30.250Z",
+    "endedAt": "2026-10-12T16:06:02.901Z",
+    "endedReason": "customer-ended-call",
+    "cost": 0.064,
+    "costBreakdown": {
+      "stt": 0.0054,
+      "llm": 0.0087,
+      "tts": 0.0189,
+      "vapi": 0.0272,
+      "transport": 0,
+      "chat": 0,
+      "total": 0.064,
+      "llmPromptTokens": 13920,
+      "llmCompletionTokens": 165,
+      "llmCachedPromptTokens": 0,
+      "ttsCharacters": 983,
+      "voicemailDetectionCost": 0,
+      "knowledgeBaseCost": 0,
+      "analysisCostBreakdown": {
+        "summary": 0.0011,
+        "summaryPromptTokens": 1412,
+        "summaryCompletionTokens": 64,
+        "summaryCachedPromptTokens": 0,
+        "structuredData": 0.0009,
+        "structuredDataPromptTokens": 1390,
+        "structuredDataCompletionTokens": 31,
+        "structuredDataCachedPromptTokens": 0,
+        "successEvaluation": 0.0007,
+        "successEvaluationPromptTokens": 1501,
+        "successEvaluationCompletionTokens": 1,
+        "successEvaluationCachedPromptTokens": 0,
+        "structuredOutput": 0.0011,
+        "structuredOutputPromptTokens": 1450,
+        "structuredOutputCompletionTokens": 33,
+        "structuredOutputCachedPromptTokens": 0
+      }
+    },
+    "durationMs": 32651,
+    "durationSeconds": 32.651,
+    "durationMinutes": 0.5442,
+    "summary": "The caller reported smoke and a smell of gas in their kitchen. The assistant gave the 911 safety line and logged an emergency report; the caller said they were outside and safe.",
+    "transcript": "AI: Thanks for calling Observe Insurance claims. How can I help you today?\nUser: There's smoke coming out of my kitchen right now and I can smell gas.\nAI: If anyone is hurt or in immediate danger, please hang up and call 911 right now. If you are thinking about harming yourself, call or text 988.\nAI: Our team has been told. Are you safe right now?\nUser: Yes, I'm outside now. The fire department is on the way.\nAI: I'm glad you're safe. Our team has your report, and once things are calm you can call back to start a claim.\nUser: Okay, thank you.\nAI: Thanks for calling Observe Insurance. Take care.\n",
+    "messages": [
+      {
+        "role": "system",
+        "message": "You are the Observe Insurance claims assistant. You help callers check the status of their own claims, answer general questions about how claims work, and connect them with a claims representative. Verify identity with lookup_customer and verify_identity before any claim detail. Never read a date of birth or a full phone number aloud. Speak the tool result message exactly once.",
+        "time": 1791821130250,
+        "secondsFromStart": 0
+      },
+      {
+        "role": "bot",
+        "message": "Thanks for calling Observe Insurance claims. How can I help you today?",
+        "time": 1791821130750,
+        "endTime": 1791821134650,
+        "secondsFromStart": 0.5,
+        "duration": 3900,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "There's smoke coming out of my kitchen right now and I can smell gas.",
+        "time": 1791821134950,
+        "endTime": 1791821138250,
+        "secondsFromStart": 4.7,
+        "duration": 3300
+      },
+      {
+        "role": "tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_emerg_3b9e0f",
+            "type": "function",
+            "function": {
+              "name": "report_emergency",
+              "arguments": {
+                "note": "smoke in the kitchen and a smell of gas, happening now"
+              }
+            }
+          }
+        ],
+        "message": "",
+        "time": 1791821138650,
+        "secondsFromStart": 8.4
+      },
+      {
+        "role": "bot",
+        "message": "If anyone is hurt or in immediate danger, please hang up and call 911 right now. If you are thinking about harming yourself, call or text 988.",
+        "time": 1791821138750,
+        "endTime": 1791821146350,
+        "secondsFromStart": 8.5,
+        "duration": 7600,
+        "source": ""
+      },
+      {
+        "role": "tool_call_result",
+        "toolCallId": "call_emerg_3b9e0f",
+        "name": "report_emergency",
+        "result": "{\"code\":\"emergency_logged\",\"message\":\"Our team has been told. Are you safe right now?\"}",
+        "time": 1791821146550,
+        "secondsFromStart": 16.3
+      },
+      {
+        "role": "bot",
+        "message": "Our team has been told. Are you safe right now?",
+        "time": 1791821146650,
+        "endTime": 1791821148750,
+        "secondsFromStart": 16.4,
+        "duration": 2100,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "Yes, I'm outside now. The fire department is on the way.",
+        "time": 1791821149350,
+        "endTime": 1791821151950,
+        "secondsFromStart": 19.1,
+        "duration": 2600
+      },
+      {
+        "role": "bot",
+        "message": "I'm glad you're safe. Our team has your report, and once things are calm you can call back to start a claim.",
+        "time": 1791821152550,
+        "endTime": 1791821158950,
+        "secondsFromStart": 22.3,
+        "duration": 6400,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "Okay, thank you.",
+        "time": 1791821159650,
+        "endTime": 1791821160550,
+        "secondsFromStart": 29.4,
+        "duration": 900
+      },
+      {
+        "role": "bot",
+        "message": "Thanks for calling Observe Insurance. Take care.",
+        "time": 1791821160850,
+        "endTime": 1791821162750,
+        "secondsFromStart": 30.6,
+        "duration": 1900,
+        "source": ""
+      }
+    ],
+    "recordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b04-1791821162901-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+    "stereoRecordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b04-1791821162901-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+    "call": {
+      "id": "3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b04",
+      "orgId": "4f1c2d3e-0000-4000-8000-00000000a0a0",
+      "type": "webCall",
+      "createdAt": "2026-10-12T16:05:29.700Z",
+      "updatedAt": "2026-10-12T16:05:29.700Z",
+      "assistantId": "a7e2c9d0-5b1f-4c3e-8d2a-0f9e8d7c6b01",
+      "webCallUrl": "https://vapi.daily.co/3f6c1a2e",
+      "transport": {
+        "provider": "daily",
+        "assistantVideoEnabled": false
+      }
+    },
+    "assistant": {
+      "id": "a7e2c9d0-5b1f-4c3e-8d2a-0f9e8d7c6b01",
+      "orgId": "4f1c2d3e-0000-4000-8000-00000000a0a0",
+      "name": "Observe Claims Web"
+    }
+  }
+}

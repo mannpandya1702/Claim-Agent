@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.local
+coverage/
+# The root .gitignore ignores .env.*; these two hold only public browser values and are committed.
+!.env.production
+!.env.development

@@ -1,0 +1,42 @@
+{
+  "type": "function",
+  "async": false,
+  "function": {
+    "name": "send_info_email",
+    "strict": false,
+    "description": "Email information to the address already on the verified caller's account. Call it after the caller said yes to having it emailed. Never takes an address. Its result is a sentence that has already been spoken to the caller.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string",
+          "enum": ["document_checklist", "claim_summary", "how_to_start_claim"],
+          "description": "document_checklist for the documents a claim still needs and how to send them; claim_summary for the status of every claim; how_to_start_claim for the steps to start a new claim."
+        }
+      },
+      "required": ["topic"],
+      "additionalProperties": false
+    }
+  },
+  "server": {
+    "url": "<<SERVER_URL>>",
+    "credentialId": "<<CREDENTIAL_ID>>",
+    "timeoutSeconds": 10
+  },
+  "messages": [
+    {
+      "type": "request-start",
+      "blocking": false,
+      "content": "Let me send that over."
+    },
+    {
+      "type": "request-response-delayed",
+      "timingMilliseconds": 3000,
+      "content": "Still sending, one moment."
+    },
+    {
+      "type": "request-failed",
+      "content": "I wasn't able to send that email just now. You can find the same information at observeinsurance dot com slash claims, or I can have a representative send it. Which would you prefer?"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      battery:
+        description: "Run the mocked /chat battery against VAPI (spends VAPI credit)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CI: "true"
+
+jobs:
+  check:
+    name: Deno check, test, lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Type check
+        run: deno task check
+
+      - name: Unit tests
+        run: deno task test
+
+      - name: Recording link function tests
+        run: deno test --allow-env supabase/functions/recording-url/
+
+      - name: Lint
+        run: deno lint supabase/functions scripts
+
+      - name: Clean-room guard
+        run: deno task clean-room
+
+  battery:
+    name: Chat battery (manual)
+    # Manual only: it calls the live VAPI API with the private key and costs credit.
+    if: github.event_name == 'workflow_dispatch' && inputs.battery
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Run battery (3 runs per scenario)
+        env:
+          VAPI_PRIVATE_KEY: ${{ secrets.VAPI_PRIVATE_KEY }}
+        run: deno task battery -- --n 3

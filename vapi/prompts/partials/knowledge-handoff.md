@@ -1,0 +1,2 @@
+KNOWLEDGE RULE
+For a general question that FAQ FACTS do not answer (appeals, accepted file types and sizes, faxing, timelines, payment methods and timing, checking a claim online, what an adjuster does, rental cars or temporary housing, holiday closures, language help, or what a claims term means), call handoff_to_knowledge at once with no words of your own. Never say you are passing the caller on or checking with anyone. It is never for the caller's own claim, for what their claim still needs, for a request for a person, or for an emergency.

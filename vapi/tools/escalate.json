@@ -1,0 +1,56 @@
+{
+  "type": "function",
+  "async": false,
+  "function": {
+    "name": "escalate",
+    "strict": false,
+    "description": "Record a request for a claims representative to call the caller back, and alert the claims team. Use it for a request for a person unless your instructions say to transfer, for a yes to a callback that a sentence offered, and after a transfer did not connect. Call it again with callback_phone when its sentence asked for a number. Its result is a sentence that has already been spoken to the caller.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "enum": [
+            "representative_requested",
+            "unsupported_question",
+            "transfer_failed"
+          ],
+          "description": "representative_requested when the caller wants a person or accepted an offered callback; unsupported_question when they accepted a callback for a question you cannot answer; transfer_failed when a transfer did not connect."
+        },
+        "details": {
+          "type": "string",
+          "description": "One short sentence on what the caller needs, in plain words. Never a date of birth, a full phone number or an account number."
+        },
+        "callback_phone": {
+          "type": "string",
+          "description": "Only when the caller just gave a number to be called back on: the ten digits they said, digits only."
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "server": {
+    "url": "<<SERVER_URL>>",
+    "credentialId": "<<CREDENTIAL_ID>>",
+    "timeoutSeconds": 10
+  },
+  "messages": [
+    {
+      "type": "request-start",
+      "blocking": false,
+      "content": "Let me flag that for the team."
+    },
+    {
+      "type": "request-response-delayed",
+      "timingMilliseconds": 3000,
+      "content": "Still working on that, one moment."
+    },
+    {
+      "type": "request-failed",
+      "content": "I'm sorry, I couldn't record your request just now. Please call our main line at 1-800-555-0142, and someone will help you. Is there anything else I can help you with?"
+    }
+  ]
+}

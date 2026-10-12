@@ -1,0 +1,583 @@
+{
+  "message": {
+    "timestamp": 1791817361923,
+    "type": "end-of-call-report",
+    "analysis": {
+      "summary": "Tobias called to check on his claims. After he was verified, the assistant read the status of his auto claim, which has been paid, and his home claim, which is waiting on documents due October 24. He had no further questions.",
+      "structuredData": {
+        "caller_name": "Tobias",
+        "sentiment": "positive",
+        "outcome": "resolved",
+        "escalated": false,
+        "emergency": false
+      },
+      "successEvaluation": "true"
+    },
+    "artifact": {
+      "messages": [
+        {
+          "role": "system",
+          "message": "You are the Observe Insurance claims assistant. You help callers check the status of their own claims, answer general questions about how claims work, and connect them with a claims representative. Verify identity with lookup_customer and verify_identity before any claim detail. Never read a date of birth or a full phone number aloud. Speak the tool result message exactly once.",
+          "time": 1791817331512,
+          "secondsFromStart": 0
+        },
+        {
+          "role": "bot",
+          "message": "Thanks for calling Observe Insurance claims. How can I help you today?",
+          "time": 1791817331992,
+          "endTime": 1791817335892,
+          "secondsFromStart": 0.48,
+          "duration": 3900,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "Hi, I'd like to check on my claim.",
+          "time": 1791817336112,
+          "endTime": 1791817337812,
+          "secondsFromStart": 4.6,
+          "duration": 1700
+        },
+        {
+          "role": "bot",
+          "message": "I can help with that. What's the phone number on your account?",
+          "time": 1791817337912,
+          "endTime": 1791817340812,
+          "secondsFromStart": 6.4,
+          "duration": 2900,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "It's 602-555-0101.",
+          "time": 1791817341012,
+          "endTime": 1791817342712,
+          "secondsFromStart": 9.5,
+          "duration": 1700
+        },
+        {
+          "role": "tool_calls",
+          "toolCalls": [
+            {
+              "id": "call_lookup_9f2b1c",
+              "type": "function",
+              "function": {
+                "name": "lookup_customer",
+                "arguments": "{\"phone\":\"602-555-0101\"}"
+              }
+            }
+          ],
+          "message": "",
+          "time": 1791817342412,
+          "secondsFromStart": 10.9
+        },
+        {
+          "role": "bot",
+          "message": "One moment while I look that up.",
+          "time": 1791817342512,
+          "endTime": 1791817344012,
+          "secondsFromStart": 11,
+          "duration": 1500,
+          "source": ""
+        },
+        {
+          "role": "tool_call_result",
+          "toolCallId": "call_lookup_9f2b1c",
+          "name": "lookup_customer",
+          "result": "{\"code\":\"needs_dob\",\"message\":\"Thanks. For security, what's the date of birth on the account?\"}",
+          "time": 1791817343112,
+          "secondsFromStart": 11.6
+        },
+        {
+          "role": "bot",
+          "message": "Thanks. For security, what's the date of birth on the account?",
+          "time": 1791817343212,
+          "endTime": 1791817345912,
+          "secondsFromStart": 11.7,
+          "duration": 2700,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "march fourteenth nineteen eighty six",
+          "time": 1791817346112,
+          "endTime": 1791817348212,
+          "secondsFromStart": 14.6,
+          "duration": 2100
+        },
+        {
+          "role": "tool_calls",
+          "toolCalls": [
+            {
+              "id": "call_verify_4e7a2d",
+              "type": "function",
+              "function": {
+                "name": "verify_identity",
+                "arguments": {
+                  "dob_month": 3,
+                  "dob_day": 14,
+                  "dob_year": 1986
+                }
+              }
+            }
+          ],
+          "message": "",
+          "time": 1791817348412,
+          "secondsFromStart": 16.9
+        },
+        {
+          "role": "bot",
+          "message": "Let me verify that.",
+          "time": 1791817348512,
+          "endTime": 1791817349412,
+          "secondsFromStart": 17,
+          "duration": 900,
+          "source": ""
+        },
+        {
+          "role": "tool_call_result",
+          "toolCallId": "call_verify_4e7a2d",
+          "name": "verify_identity",
+          "result": "{\"code\":\"verified\",\"message\":\"Thank you, Tobias, you're verified. What can I help you with today?\",\"data\":{\"first_name\":\"Tobias\"}}",
+          "time": 1791817349012,
+          "secondsFromStart": 17.5
+        },
+        {
+          "role": "bot",
+          "message": "Thank you, Tobias, you're verified. What can I help you with today?",
+          "time": 1791817349112,
+          "endTime": 1791817351512,
+          "secondsFromStart": 17.6,
+          "duration": 2400,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "What's the status of my claims?",
+          "time": 1791817351712,
+          "endTime": 1791817353012,
+          "secondsFromStart": 20.2,
+          "duration": 1300
+        },
+        {
+          "role": "tool_calls",
+          "toolCalls": [
+            {
+              "id": "call_status_7c1d3e",
+              "type": "function",
+              "function": {
+                "name": "get_claim_status",
+                "arguments": "{}"
+              }
+            }
+          ],
+          "message": "",
+          "time": 1791817353112,
+          "secondsFromStart": 21.6
+        },
+        {
+          "role": "bot",
+          "message": "Pulling up your claims now.",
+          "time": 1791817353212,
+          "endTime": 1791817354312,
+          "secondsFromStart": 21.7,
+          "duration": 1100,
+          "source": ""
+        },
+        {
+          "role": "tool_call_result",
+          "toolCallId": "call_status_7c1d3e",
+          "name": "get_claim_status",
+          "result": "\"{\\\"code\\\":\\\"ok\\\",\\\"message\\\":\\\"You have two claims on file. Your auto claim ending in one one five was approved, and a payment of four thousand eight hundred twenty dollars was issued on October eighth. Your home claim ending in one nine eight needs a few documents from you before review can continue: photos of the damage, a contractor estimate, and proof of ownership for the damaged items. Please send them by October twenty-fourth. You can upload them at observeinsurance dot com slash claims, email them to claims docs at observeinsurance dot com, or mail them to our claims department, and please include your claim number. Do you have any questions about either claim?\\\",\\\"data\\\":{\\\"claims\\\":[{\\\"claim_number_last3\\\":\\\"115\\\",\\\"status\\\":\\\"payment_issued\\\"},{\\\"claim_number_last3\\\":\\\"198\\\",\\\"status\\\":\\\"awaiting_documents\\\"}]}}\"",
+          "time": 1791817353812,
+          "secondsFromStart": 22.3
+        },
+        {
+          "role": "bot",
+          "message": "You have two claims on file. Your auto claim ending in one one five was approved, and a payment of four thousand eight hundred twenty dollars was issued on October eighth. Your home claim ending in one nine eight needs a few documents from you before review can continue: photos of the damage, a contractor estimate, and proof of ownership for the damaged items. Please send them by October twenty-fourth. You can upload them at observeinsurance dot com slash claims, email them to claims docs at observeinsurance dot com, or mail them to our claims department, and please include your claim number. Do you have any questions about either claim?",
+          "time": 1791817353912,
+          "endTime": 1791817358112,
+          "secondsFromStart": 22.4,
+          "duration": 4200,
+          "source": ""
+        },
+        {
+          "role": "user",
+          "message": "No, that's everything. Thank you.",
+          "time": 1791817358212,
+          "endTime": 1791817359412,
+          "secondsFromStart": 26.7,
+          "duration": 1200
+        },
+        {
+          "role": "tool_calls",
+          "toolCalls": [
+            {
+              "id": "call_end_2a6f8b",
+              "type": "function",
+              "function": {
+                "name": "endCall",
+                "arguments": "{}"
+              }
+            }
+          ],
+          "message": "",
+          "time": 1791817359412,
+          "secondsFromStart": 27.9
+        },
+        {
+          "role": "bot",
+          "message": "Thanks for calling Observe Insurance. Take care.",
+          "time": 1791817359462,
+          "endTime": 1791817360062,
+          "secondsFromStart": 27.95,
+          "duration": 600,
+          "source": ""
+        }
+      ],
+      "transcript": "AI: Thanks for calling Observe Insurance claims. How can I help you today?\nUser: Hi, I'd like to check on my claim.\nAI: I can help with that. What's the phone number on your account?\nUser: It's 602-555-0101.\nAI: One moment while I look that up.\nAI: Thanks. For security, what's the date of birth on the account?\nUser: march fourteenth nineteen eighty six\nAI: Let me verify that.\nAI: Thank you, Tobias, you're verified. What can I help you with today?\nUser: What's the status of my claims?\nAI: Pulling up your claims now.\nAI: You have two claims on file. Your auto claim ending in one one five was approved, and a payment of four thousand eight hundred twenty dollars was issued on October eighth. Your home claim ending in one nine eight needs a few documents from you before review can continue: photos of the damage, a contractor estimate, and proof of ownership for the damaged items. Please send them by October twenty-fourth. You can upload them at observeinsurance dot com slash claims, email them to claims docs at observeinsurance dot com, or mail them to our claims department, and please include your claim number. Do you have any questions about either claim?\nUser: No, that's everything. Thank you.\nAI: Thanks for calling Observe Insurance. Take care.\n",
+      "recordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b01-1791817360083-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+      "stereoRecordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b01-1791817360083-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+      "recording": {
+        "stereoUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b01-1791817360083-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+        "mono": {
+          "combinedUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b01-1791817360083-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+          "assistantUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b01-1791817360083-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-assistant-mono.wav",
+          "customerUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b01-1791817360083-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-customer-mono.wav"
+        }
+      },
+      "performanceMetrics": {
+        "turnLatencies": [
+          {
+            "modelLatency": 460,
+            "voiceLatency": 254,
+            "transcriberLatency": 242,
+            "endpointingLatency": 254,
+            "turnLatency": 1210
+          },
+          {
+            "modelLatency": 570,
+            "voiceLatency": 315,
+            "transcriberLatency": 300,
+            "endpointingLatency": 315,
+            "turnLatency": 1500
+          },
+          {
+            "modelLatency": 570,
+            "voiceLatency": 315,
+            "transcriberLatency": 300,
+            "endpointingLatency": 315,
+            "turnLatency": 1500
+          }
+        ],
+        "modelLatencyAverage": 533.333,
+        "voiceLatencyAverage": 294.667,
+        "transcriberLatencyAverage": 280.667,
+        "endpointingLatencyAverage": 294.667,
+        "turnLatencyAverage": 1403.333,
+        "fromTransportLatencyAverage": 21.4,
+        "toTransportLatencyAverage": 18.9,
+        "numUserInterrupted": 0,
+        "numAssistantInterrupted": 0
+      },
+      "nodes": [],
+      "variableValues": {},
+      "transfers": [],
+      "structuredOutputs": {
+        "5e0c7d1a-2b3c-4d5e-8f60-718293a4b5c6": {
+          "name": "claims_call",
+          "result": {
+            "caller_name": "Tobias",
+            "sentiment": "positive",
+            "outcome": "resolved",
+            "escalated": false,
+            "emergency": false
+          }
+        }
+      }
+    },
+    "startedAt": "2026-10-12T15:02:11.512Z",
+    "endedAt": "2026-10-12T15:02:40.083Z",
+    "endedReason": "assistant-ended-call",
+    "cost": 0.0579,
+    "costBreakdown": {
+      "stt": 0.0048,
+      "llm": 0.0112,
+      "tts": 0.0143,
+      "vapi": 0.0238,
+      "transport": 0,
+      "chat": 0,
+      "total": 0.0579,
+      "llmPromptTokens": 17920,
+      "llmCompletionTokens": 213,
+      "llmCachedPromptTokens": 0,
+      "ttsCharacters": 744,
+      "voicemailDetectionCost": 0,
+      "knowledgeBaseCost": 0,
+      "analysisCostBreakdown": {
+        "summary": 0.0011,
+        "summaryPromptTokens": 1412,
+        "summaryCompletionTokens": 64,
+        "summaryCachedPromptTokens": 0,
+        "structuredData": 0.0009,
+        "structuredDataPromptTokens": 1390,
+        "structuredDataCompletionTokens": 31,
+        "structuredDataCachedPromptTokens": 0,
+        "successEvaluation": 0.0007,
+        "successEvaluationPromptTokens": 1501,
+        "successEvaluationCompletionTokens": 1,
+        "successEvaluationCachedPromptTokens": 0,
+        "structuredOutput": 0.0011,
+        "structuredOutputPromptTokens": 1450,
+        "structuredOutputCompletionTokens": 33,
+        "structuredOutputCachedPromptTokens": 0
+      }
+    },
+    "durationMs": 28571,
+    "durationSeconds": 28.571,
+    "durationMinutes": 0.4762,
+    "summary": "Tobias called to check on his claims. After he was verified, the assistant read the status of his auto claim, which has been paid, and his home claim, which is waiting on documents due October 24. He had no further questions.",
+    "transcript": "AI: Thanks for calling Observe Insurance claims. How can I help you today?\nUser: Hi, I'd like to check on my claim.\nAI: I can help with that. What's the phone number on your account?\nUser: It's 602-555-0101.\nAI: One moment while I look that up.\nAI: Thanks. For security, what's the date of birth on the account?\nUser: march fourteenth nineteen eighty six\nAI: Let me verify that.\nAI: Thank you, Tobias, you're verified. What can I help you with today?\nUser: What's the status of my claims?\nAI: Pulling up your claims now.\nAI: You have two claims on file. Your auto claim ending in one one five was approved, and a payment of four thousand eight hundred twenty dollars was issued on October eighth. Your home claim ending in one nine eight needs a few documents from you before review can continue: photos of the damage, a contractor estimate, and proof of ownership for the damaged items. Please send them by October twenty-fourth. You can upload them at observeinsurance dot com slash claims, email them to claims docs at observeinsurance dot com, or mail them to our claims department, and please include your claim number. Do you have any questions about either claim?\nUser: No, that's everything. Thank you.\nAI: Thanks for calling Observe Insurance. Take care.\n",
+    "messages": [
+      {
+        "role": "system",
+        "message": "You are the Observe Insurance claims assistant. You help callers check the status of their own claims, answer general questions about how claims work, and connect them with a claims representative. Verify identity with lookup_customer and verify_identity before any claim detail. Never read a date of birth or a full phone number aloud. Speak the tool result message exactly once.",
+        "time": 1791817331512,
+        "secondsFromStart": 0
+      },
+      {
+        "role": "bot",
+        "message": "Thanks for calling Observe Insurance claims. How can I help you today?",
+        "time": 1791817331992,
+        "endTime": 1791817335892,
+        "secondsFromStart": 0.48,
+        "duration": 3900,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "Hi, I'd like to check on my claim.",
+        "time": 1791817336112,
+        "endTime": 1791817337812,
+        "secondsFromStart": 4.6,
+        "duration": 1700
+      },
+      {
+        "role": "bot",
+        "message": "I can help with that. What's the phone number on your account?",
+        "time": 1791817337912,
+        "endTime": 1791817340812,
+        "secondsFromStart": 6.4,
+        "duration": 2900,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "It's 602-555-0101.",
+        "time": 1791817341012,
+        "endTime": 1791817342712,
+        "secondsFromStart": 9.5,
+        "duration": 1700
+      },
+      {
+        "role": "tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_lookup_9f2b1c",
+            "type": "function",
+            "function": {
+              "name": "lookup_customer",
+              "arguments": "{\"phone\":\"602-555-0101\"}"
+            }
+          }
+        ],
+        "message": "",
+        "time": 1791817342412,
+        "secondsFromStart": 10.9
+      },
+      {
+        "role": "bot",
+        "message": "One moment while I look that up.",
+        "time": 1791817342512,
+        "endTime": 1791817344012,
+        "secondsFromStart": 11,
+        "duration": 1500,
+        "source": ""
+      },
+      {
+        "role": "tool_call_result",
+        "toolCallId": "call_lookup_9f2b1c",
+        "name": "lookup_customer",
+        "result": "{\"code\":\"needs_dob\",\"message\":\"Thanks. For security, what's the date of birth on the account?\"}",
+        "time": 1791817343112,
+        "secondsFromStart": 11.6
+      },
+      {
+        "role": "bot",
+        "message": "Thanks. For security, what's the date of birth on the account?",
+        "time": 1791817343212,
+        "endTime": 1791817345912,
+        "secondsFromStart": 11.7,
+        "duration": 2700,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "march fourteenth nineteen eighty six",
+        "time": 1791817346112,
+        "endTime": 1791817348212,
+        "secondsFromStart": 14.6,
+        "duration": 2100
+      },
+      {
+        "role": "tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_verify_4e7a2d",
+            "type": "function",
+            "function": {
+              "name": "verify_identity",
+              "arguments": {
+                "dob_month": 3,
+                "dob_day": 14,
+                "dob_year": 1986
+              }
+            }
+          }
+        ],
+        "message": "",
+        "time": 1791817348412,
+        "secondsFromStart": 16.9
+      },
+      {
+        "role": "bot",
+        "message": "Let me verify that.",
+        "time": 1791817348512,
+        "endTime": 1791817349412,
+        "secondsFromStart": 17,
+        "duration": 900,
+        "source": ""
+      },
+      {
+        "role": "tool_call_result",
+        "toolCallId": "call_verify_4e7a2d",
+        "name": "verify_identity",
+        "result": "{\"code\":\"verified\",\"message\":\"Thank you, Tobias, you're verified. What can I help you with today?\",\"data\":{\"first_name\":\"Tobias\"}}",
+        "time": 1791817349012,
+        "secondsFromStart": 17.5
+      },
+      {
+        "role": "bot",
+        "message": "Thank you, Tobias, you're verified. What can I help you with today?",
+        "time": 1791817349112,
+        "endTime": 1791817351512,
+        "secondsFromStart": 17.6,
+        "duration": 2400,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "What's the status of my claims?",
+        "time": 1791817351712,
+        "endTime": 1791817353012,
+        "secondsFromStart": 20.2,
+        "duration": 1300
+      },
+      {
+        "role": "tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_status_7c1d3e",
+            "type": "function",
+            "function": {
+              "name": "get_claim_status",
+              "arguments": "{}"
+            }
+          }
+        ],
+        "message": "",
+        "time": 1791817353112,
+        "secondsFromStart": 21.6
+      },
+      {
+        "role": "bot",
+        "message": "Pulling up your claims now.",
+        "time": 1791817353212,
+        "endTime": 1791817354312,
+        "secondsFromStart": 21.7,
+        "duration": 1100,
+        "source": ""
+      },
+      {
+        "role": "tool_call_result",
+        "toolCallId": "call_status_7c1d3e",
+        "name": "get_claim_status",
+        "result": "\"{\\\"code\\\":\\\"ok\\\",\\\"message\\\":\\\"You have two claims on file. Your auto claim ending in one one five was approved, and a payment of four thousand eight hundred twenty dollars was issued on October eighth. Your home claim ending in one nine eight needs a few documents from you before review can continue: photos of the damage, a contractor estimate, and proof of ownership for the damaged items. Please send them by October twenty-fourth. You can upload them at observeinsurance dot com slash claims, email them to claims docs at observeinsurance dot com, or mail them to our claims department, and please include your claim number. Do you have any questions about either claim?\\\",\\\"data\\\":{\\\"claims\\\":[{\\\"claim_number_last3\\\":\\\"115\\\",\\\"status\\\":\\\"payment_issued\\\"},{\\\"claim_number_last3\\\":\\\"198\\\",\\\"status\\\":\\\"awaiting_documents\\\"}]}}\"",
+        "time": 1791817353812,
+        "secondsFromStart": 22.3
+      },
+      {
+        "role": "bot",
+        "message": "You have two claims on file. Your auto claim ending in one one five was approved, and a payment of four thousand eight hundred twenty dollars was issued on October eighth. Your home claim ending in one nine eight needs a few documents from you before review can continue: photos of the damage, a contractor estimate, and proof of ownership for the damaged items. Please send them by October twenty-fourth. You can upload them at observeinsurance dot com slash claims, email them to claims docs at observeinsurance dot com, or mail them to our claims department, and please include your claim number. Do you have any questions about either claim?",
+        "time": 1791817353912,
+        "endTime": 1791817358112,
+        "secondsFromStart": 22.4,
+        "duration": 4200,
+        "source": ""
+      },
+      {
+        "role": "user",
+        "message": "No, that's everything. Thank you.",
+        "time": 1791817358212,
+        "endTime": 1791817359412,
+        "secondsFromStart": 26.7,
+        "duration": 1200
+      },
+      {
+        "role": "tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_end_2a6f8b",
+            "type": "function",
+            "function": {
+              "name": "endCall",
+              "arguments": "{}"
+            }
+          }
+        ],
+        "message": "",
+        "time": 1791817359412,
+        "secondsFromStart": 27.9
+      },
+      {
+        "role": "bot",
+        "message": "Thanks for calling Observe Insurance. Take care.",
+        "time": 1791817359462,
+        "endTime": 1791817360062,
+        "secondsFromStart": 27.95,
+        "duration": 600,
+        "source": ""
+      }
+    ],
+    "recordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b01-1791817360083-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-mono.wav",
+    "stereoRecordingUrl": "https://storage.vapi.ai/3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b01-1791817360083-0c5d2c1e-8a7b-4c3d-9e1f-2a3b4c5d6e7f-stereo.wav",
+    "call": {
+      "id": "3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b01",
+      "orgId": "4f1c2d3e-0000-4000-8000-00000000a0a0",
+      "type": "webCall",
+      "createdAt": "2026-10-12T15:02:10.904Z",
+      "updatedAt": "2026-10-12T15:02:10.904Z",
+      "assistantId": "a7e2c9d0-5b1f-4c3e-8d2a-0f9e8d7c6b01",
+      "webCallUrl": "https://vapi.daily.co/3f6c1a2e",
+      "transport": {
+        "provider": "daily",
+        "assistantVideoEnabled": false
+      }
+    },
+    "assistant": {
+      "id": "a7e2c9d0-5b1f-4c3e-8d2a-0f9e8d7c6b01",
+      "orgId": "4f1c2d3e-0000-4000-8000-00000000a0a0",
+      "name": "Observe Claims Web"
+    }
+  }
+}

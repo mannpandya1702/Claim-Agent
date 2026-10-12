@@ -1,0 +1,21 @@
+{
+  "type": "handoff",
+  "function": {
+    "name": "handoff_to_concierge"
+  },
+  "messages": [],
+  "destinations": [
+    {
+      "type": "assistant",
+      "assistantName": "Concierge",
+      "description": "The caller is back to their own account or claim.",
+      "contextEngineeringPlan": {
+        "type": "all"
+      },
+      "assistantOverrides": {
+        "firstMessage": "",
+        "firstMessageMode": "assistant-speaks-first-with-model-generated-message"
+      }
+    }
+  ]
+}

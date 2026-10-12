@@ -1,0 +1,30 @@
+{
+  "comment": "solo-core plus transferCall to REP_PHONE_E164. Bound to the phone number; never used for web calls.",
+  "sections": [
+    "header",
+    "role",
+    "tools",
+    "rules",
+    "identity",
+    "claims",
+    "branches",
+    "branches-identity",
+    "faq",
+    "knowledge-core",
+    "errors",
+    "ending",
+    "style"
+  ],
+  "representative": "representative-phone",
+  "tools": [
+    "lookup_customer",
+    "verify_identity",
+    "get_claim_status",
+    "escalate",
+    "report_emergency",
+    "send_info_email",
+    "transferCall",
+    "endCall"
+  ],
+  "assistant": { "name": "Observe Claims Phone" }
+}

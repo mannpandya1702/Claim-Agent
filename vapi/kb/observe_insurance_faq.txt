@@ -1,0 +1,35 @@
+REFERENCE FACTS ONLY. The assistant instructions and tool results win over this file.
+General facts about Observe Insurance claims. It holds no customer, account or claim status information.
+
+CORE
+- Office hours: Claims representatives are available Monday through Friday, 8 AM to 6 PM Eastern time, at 1-800-555-0142. Emergency claims, such as a home that is unsafe to stay in or a car that cannot be driven after an accident, can be reported on the same line 24 hours a day, 7 days a week. Anyone in danger should call 911 first.
+- Mailing address: Observe Insurance Claims Department, 100 Market Street, Suite 400, San Francisco, California, zip code 9 4 1 0 5.
+- Starting a new claim: Start a claim online at observeinsurance dot com slash claims, in the Observe Insurance mobile app, or by calling 1-800-555-0142. Have the policy number, the date of the loss and a short description of what happened ready.
+- How claims work: There are five steps. The claim is filed, the claims team reviews it, an adjuster is assigned, the adjuster gathers any documents that are needed, and then a decision is made and any payment is issued. Most decisions are made within 10 business days of receiving complete documents.
+- Sending documents: Upload them at observeinsurance dot com slash claims, email them to claims docs at observeinsurance dot com, or mail them to the claims department address. Always include the claim number.
+
+LONG TAIL
+- Accepted file types and sizes: Photos and documents can be uploaded as PDF, JPG, PNG or HEIC files of up to 25 MB each, up to 20 files at a time. Videos can be MP4 or MOV files of up to 200 MB. Emailed attachments are limited to 25 MB per message.
+- Fax: Documents can also be faxed to 1-800-555-0147. Put the claim number on the cover page.
+- Appeals: A denied claim can be appealed within 30 days of the date on the decision letter. To appeal, send a short letter saying why you disagree, with any new photos, estimates or receipts, by upload, email or mail, and include the claim number. A reviewer who was not part of the original decision handles the appeal. Most appeal decisions are made within 30 days of receiving the appeal.
+- Claim timelines: Most decisions are made within 10 business days of receiving complete documents. Claims involving an injury, a total loss or large property damage can take longer, and the adjuster gives updates along the way. A claim waiting for documents does not move forward until they arrive.
+- Payment methods and timing: Approved payments are sent by direct deposit or by check. Direct deposit usually arrives within 2 business days of the payment date. A mailed check usually arrives within 7 to 10 business days. If a payment has not arrived after that, a representative can trace it.
+- Checking claim status online: Claim status, uploaded documents and messages from the adjuster can be seen at any time by signing in at observeinsurance dot com slash claims or in the Observe Insurance mobile app.
+- What an adjuster does: An adjuster is the claims professional who looks into a claim, may inspect the damage, asks for any documents that are needed, and decides the claim and any payment amount under the policy.
+- Rental cars and temporary housing: If an auto policy includes rental reimbursement, a rental car is covered while the car is being repaired, up to the daily limit on the policy. If a home policy includes loss of use coverage, reasonable temporary housing costs are covered while the home cannot be lived in. Whether a particular policy includes these is a question for a representative.
+- Holiday closures: The claims office is closed on New Year's Day, Memorial Day, Independence Day, Labor Day, Thanksgiving Day and Christmas Day. Emergency claims can still be reported on those days at 1-800-555-0142.
+- Language support: Representatives can arrange a phone interpreter for most languages during office hours. Claim letters and forms are available in English and Spanish.
+- Adding documents after a decision: Documents can still be sent after a decision, the same ways as before, with the claim number. New information sent after a denial is reviewed as part of an appeal, so say that it is for an appeal when sending it.
+- Proof of ownership: Proof of ownership for a damaged or stolen item can be a receipt, a bank or card statement showing the purchase, a photo or video that shows the item, a warranty card or an appraisal.
+- Contractor estimate: A contractor estimate is a written quote from a licensed contractor for the repair, listing the work, the materials and the total cost.
+- Deductible: The deductible is the part of a covered loss the policyholder pays. It is subtracted from the approved amount before payment.
+- Date of loss: The date of loss is the date the accident, damage or theft happened.
+- Claim number: The claim number is the reference for a claim. It is printed on every letter and email about the claim and starts with the letters C L M.
+
+WHAT TESSA CANNOT DO
+- Tessa cannot make or change a coverage decision, or say whether something is covered.
+- Tessa cannot quote, change or explain premiums or bills, and cannot take payments.
+- Tessa cannot change a policy, add or remove a driver or vehicle, or cancel a policy.
+- Tessa cannot give legal or medical advice or discuss other insurance companies.
+- Tessa never takes Social Security numbers, card numbers or bank details.
+- If this reference does not mention something, that does not mean the answer is no. Say the detail is not available and offer a representative.

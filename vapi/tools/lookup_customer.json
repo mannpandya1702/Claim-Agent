@@ -1,0 +1,43 @@
+{
+  "type": "function",
+  "async": false,
+  "function": {
+    "name": "lookup_customer",
+    "strict": false,
+    "description": "Find the caller's account by the phone number on the account. Call it as soon as the caller says the phone number on their account; never for a callback number. Its result is a sentence that has already been spoken to the caller.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "phone": {
+          "type": "string",
+          "description": "The ten-digit phone number the caller stated, digits only. Only a number the caller said on this call."
+        }
+      },
+      "required": [
+        "phone"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "server": {
+    "url": "<<SERVER_URL>>",
+    "credentialId": "<<CREDENTIAL_ID>>",
+    "timeoutSeconds": 10
+  },
+  "messages": [
+    {
+      "type": "request-start",
+      "blocking": false,
+      "content": "One moment while I look that up."
+    },
+    {
+      "type": "request-response-delayed",
+      "timingMilliseconds": 3000,
+      "content": "Still looking, thanks for waiting."
+    },
+    {
+      "type": "request-failed",
+      "content": "I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?"
+    }
+  ]
+}

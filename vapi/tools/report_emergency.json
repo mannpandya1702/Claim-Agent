@@ -1,0 +1,40 @@
+{
+  "type": "function",
+  "async": false,
+  "function": {
+    "name": "report_emergency",
+    "strict": false,
+    "description": "Alert the claims team that someone is hurt or in danger right now, or that the caller may harm themselves. Call it immediately with no words of your own; it speaks the safety line before anything else happens. Not for past incidents that are the subject of a claim.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "note": {
+          "type": "string",
+          "description": "A few words on what is happening, from what the caller already said. Never ask the caller for this. No names, dates of birth or phone numbers."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "server": {
+    "url": "<<SERVER_URL>>",
+    "credentialId": "<<CREDENTIAL_ID>>",
+    "timeoutSeconds": 10
+  },
+  "messages": [
+    {
+      "type": "request-start",
+      "blocking": true,
+      "content": "If anyone is hurt or in immediate danger, please hang up and call 911 right now. If you are thinking about harming yourself, call or text 988."
+    },
+    {
+      "type": "request-response-delayed",
+      "timingMilliseconds": 3000,
+      "content": "I'm still here with you."
+    },
+    {
+      "type": "request-failed",
+      "content": "Please stay on the line. Are you safe right now?"
+    }
+  ]
+}

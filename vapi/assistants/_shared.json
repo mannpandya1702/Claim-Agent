@@ -1,0 +1,122 @@
+{
+  "comment": "Section-7 block shared by every assistant (accepted as-is by the hour-0 probe). Each variant file is deep-merged over 'assistant' (objects merge, arrays and scalars replace); scripts/render.ts fills the <<PLACEHOLDERS>>. The analysis schema is built from enums.ts, never written here.",
+  "assistant": {
+    "model": {
+      "provider": "openai",
+      "model": "gpt-5.4",
+      "temperature": 0.3,
+      "maxTokens": 400,
+      "messages": [{ "role": "system", "content": "<<PROMPT>>" }],
+      "toolIds": "<<TOOL_IDS>>"
+    },
+    "voice": {
+      "provider": "11labs",
+      "model": "eleven_flash_v2_5",
+      "voiceId": "EXAVITQu4vr4xnSDxMaL",
+      "stability": 0.5,
+      "similarityBoost": 0.75,
+      "optimizeStreamingLatency": 2
+    },
+    "transcriber": {
+      "provider": "deepgram",
+      "model": "nova-3",
+      "language": "en",
+      "numerals": true,
+      "smartFormat": false,
+      "confidenceThreshold": 0.3,
+      "endpointing": 300,
+      "keyterm": ["Observe Insurance", "claim number", "policy number", "date of birth"]
+    },
+    "startSpeakingPlan": {
+      "waitSeconds": 0.4,
+      "smartEndpointingPlan": { "provider": "livekit" },
+      "customEndpointingRules": [
+        {
+          "type": "assistant",
+          "regex": "(phone number|date of birth)",
+          "regexOptions": [{ "type": "ignore-case", "enabled": true }],
+          "timeoutSeconds": 2
+        }
+      ]
+    },
+    "stopSpeakingPlan": { "numWords": 2, "voiceSeconds": 0.3, "backoffSeconds": 2 },
+    "backgroundSound": "off",
+    "firstMessage": "Thanks for calling Observe Insurance claims support. This is Tessa, a virtual assistant, and this call may be recorded. To get started, what's the phone number on your account?",
+    "firstMessageMode": "assistant-speaks-first",
+    "hooks": [
+      {
+        "on": "customer.speech.timeout",
+        "options": { "timeoutSeconds": 10, "triggerMaxCount": 3, "triggerResetMode": "onUserSpeech" },
+        "do": [{ "type": "say", "exact": "Are you still there? Take your time." }]
+      },
+      {
+        "on": "customer.speech.timeout",
+        "options": { "timeoutSeconds": 20, "triggerMaxCount": 3, "triggerResetMode": "onUserSpeech" },
+        "do": [{ "type": "say", "exact": "I'm still here whenever you're ready." }]
+      },
+      {
+        "on": "customer.speech.timeout",
+        "options": { "timeoutSeconds": 40, "triggerMaxCount": 1 },
+        "do": [
+          {
+            "type": "say",
+            "exact": "If this is an emergency, please hang up and call 911. Otherwise, please call back any time. Goodbye."
+          },
+          { "type": "tool", "tool": { "type": "endCall" } }
+        ]
+      },
+      {
+        "on": "assistant.transcriber.endpointedSpeechLowConfidence[confidence=0.1:0.3]",
+        "do": [{ "type": "say", "exact": "Sorry, I didn't catch that. Could you say it again?" }]
+      }
+    ],
+    "silenceTimeoutSeconds": 45,
+    "maxDurationSeconds": 900,
+    "server": {
+      "url": "<<SERVER_URL>>",
+      "credentialId": "<<CREDENTIAL_ID>>",
+      "timeoutSeconds": 20,
+      "backoffPlan": { "type": "exponential", "maxRetries": 3, "baseDelaySeconds": 1 }
+    },
+    "serverMessages": ["end-of-call-report", "status-update", "transcript[transcriptType=\"final\"]"],
+    "analysisPlan": {
+      "summaryPlan": {
+        "enabled": true,
+        "timeoutSeconds": 10,
+        "messages": [
+          {
+            "role": "system",
+            "content": "You summarise insurance claims support calls for a representative. Write 2-3 sentences: who called (first name only if known), what they asked, what was resolved, and any next step. Never include a date of birth, a full phone number or a policy number."
+          },
+          { "role": "user", "content": "{{transcript}}" }
+        ]
+      },
+      "structuredDataPlan": {
+        "enabled": true,
+        "timeoutSeconds": 10,
+        "schema": "<<ANALYSIS_SCHEMA>>",
+        "messages": [
+          {
+            "role": "system",
+            "content": "Extract the fields from the transcript of an insurance claims support call. caller_name is the name the caller gave on the call, else \"unknown\". Never include a date of birth, a phone number or a policy number in any field."
+          },
+          { "role": "user", "content": "{{transcript}}" }
+        ]
+      },
+      "successEvaluationPlan": { "enabled": true, "rubric": "PassFail" }
+    },
+    "artifactPlan": {
+      "recordingEnabled": true,
+      "fullMessageHistoryEnabled": true,
+      "structuredOutputs": [
+        {
+          "name": "claims_call",
+          "type": "ai",
+          "description": "Caller name, sentiment, outcome",
+          "schema": "<<ANALYSIS_SCHEMA>>"
+        }
+      ]
+    },
+    "metadata": { "variant": "<<VARIANT>>", "promptSha256": "<<PROMPT_SHA256>>" }
+  }
+}

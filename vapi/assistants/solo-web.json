@@ -1,0 +1,30 @@
+{
+  "comment": "solo-core plus the knowledge-base query tool. The primary web demo assistant; no transferCall (a web call cannot be transferred).",
+  "sections": [
+    "header",
+    "role",
+    "tools",
+    "rules",
+    "identity",
+    "claims",
+    "branches",
+    "branches-identity",
+    "faq",
+    "knowledge-kb",
+    "errors",
+    "ending",
+    "style"
+  ],
+  "representative": "representative-web",
+  "tools": [
+    "lookup_customer",
+    "verify_identity",
+    "get_claim_status",
+    "escalate",
+    "report_emergency",
+    "send_info_email",
+    "faq_search",
+    "endCall"
+  ],
+  "assistant": { "name": "Observe Claims Web" }
+}
