@@ -1,0 +1,30 @@
+{
+  "tasks": {
+    "check": "deno check supabase/functions/vapi-webhook/*.ts supabase/functions/recording-url/*.ts scripts/*.ts",
+    "test": "deno test --allow-env --allow-net --allow-read supabase/functions/vapi-webhook/ scripts/",
+    "lint": "deno lint supabase/functions scripts",
+    "db": "deno run --allow-env --allow-net --allow-read scripts/db.ts",
+    "db:test": "deno run --allow-env --allow-net --allow-read scripts/db_test.ts",
+    "render": "deno run --allow-read --allow-write scripts/render.ts",
+    "sync:check": "deno run --allow-env --allow-net --allow-read --allow-write scripts/vapi_sync.ts check",
+    "sync:apply": "deno run --allow-env --allow-net --allow-read --allow-write scripts/vapi_sync.ts apply",
+    "probe": "deno run --allow-env --allow-net --allow-read --allow-write scripts/probe.ts",
+    "smoke": "deno run --allow-env --allow-net --allow-read scripts/smoke_tools.ts",
+    "battery": "deno run --allow-env --allow-net --allow-read --allow-write scripts/chat_battery.ts",
+    "replay": "deno run --allow-env --allow-net --allow-read scripts/replay_eocr.ts",
+    "reset": "deno run --allow-env --allow-net --allow-read scripts/reset_demo.ts",
+    "jobs": "deno run --allow-env --allow-net --allow-read scripts/jobs.ts",
+    "staff": "deno run --allow-env --allow-net --allow-read scripts/create_staff.ts",
+    "deploy": "supabase functions deploy vapi-webhook --no-verify-jwt --use-api && supabase functions deploy recording-url --use-api",
+    "clean-room": "deno run --allow-read --allow-run=git --allow-env scripts/clean_room_check.ts"
+  },
+  "imports": {
+    "@std/assert": "jsr:@std/assert@1.0.13",
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2.49.4"
+  },
+  "lint": {
+    "rules": { "exclude": ["no-explicit-any"] }
+  },
+  "fmt": { "lineWidth": 120 },
+  "exclude": ["dashboard/", "node_modules/"]
+}

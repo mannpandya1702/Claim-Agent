@@ -1,0 +1,16 @@
+# secrets and local-only files (never committed)
+.env
+.env.*
+!.env.example
+.banned-strings.local
+.sync-state.json
+fixtures/raw/
+supabase/.temp/
+supabase/.branches/
+
+# build output
+node_modules/
+dist/
+dashboard/dist/
+*.log
+.DS_Store

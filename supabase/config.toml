@@ -1,0 +1,9 @@
+project_id = "ttlksqialpgurugbxgyw"
+
+# VAPI calls this function with its own Bearer credential, not a Supabase JWT.
+[functions.vapi-webhook]
+verify_jwt = false
+
+# Staff-only: the dashboard calls it with the signed-in staff JWT.
+[functions.recording-url]
+verify_jwt = true
