@@ -727,15 +727,16 @@ Deno.test("the platform's own lines sound warm, and the safety lines keep every 
   assert(start.startsWith(SAFETY_911) && start.endsWith(SAFETY_988), start);
   assert(start.split(/\s+/).length <= SAFETY_START_MAX_WORDS, start);
   assertEquals(withRep.tools.report_emergency.messages[2].content, "Please stay on the line. Are you safe right now?");
-  // the silence hooks: two gentle nudges, then the emergency-safe goodbye and the hangup; and the short
-  // re-ask on a low-confidence transcript
+  // the silence hooks: two gentle nudges, then the emergency-safe goodbye and the hangup. No hook re-asks
+  // on a low-confidence transcript: on a 16:06 test call it fired on a noisy fragment while the model
+  // answered the real sentence, and the two lines collided ("Sorry. Could you repeat I can look into
+  // that."); rule 23 already asks the caller to repeat when what they said is unclear.
   const says = (p: any) => p.hooks.map((h: any) => h.do.filter((d: any) => d.type === "say").map((d: any) => d.exact));
   for (const key of ASSISTANT_KEYS) {
     assertEquals(says(withRep.assistants[key].payload), [
       ["No rush, I'm right here."],
       ["Take all the time you need."],
       ["If this is an emergency, please hang up and call 911. Otherwise, call us back any time. Take care."],
-      ["Sorry, could you repeat that?"],
     ], key);
     // the triggers keep their shape: 10 and 20 seconds three times each, reset when the caller speaks
     const hooks = withRep.assistants[key].payload.hooks;
@@ -743,11 +744,11 @@ Deno.test("the platform's own lines sound warm, and the safety lines keep every 
       ["customer.speech.timeout", { timeoutSeconds: 10, triggerMaxCount: 3, triggerResetMode: "onUserSpeech" }],
       ["customer.speech.timeout", { timeoutSeconds: 20, triggerMaxCount: 3, triggerResetMode: "onUserSpeech" }],
       ["customer.speech.timeout", { timeoutSeconds: 40, triggerMaxCount: 1 }],
-      ["assistant.transcriber.endpointedSpeechLowConfidence[confidence=0.1:0.3]", null],
     ], key);
+    assert(!hooks.some((h: any) => String(h.on).includes("LowConfidence")), `${key}: no low-confidence re-ask hook`);
     assertEquals(hooks[2].do[1], { type: "tool", tool: { type: "endCall" } }, key);
   }
-  // the low-confidence re-ask keeps the transcript masking a sensitive question started (redact.ts REASK_RE)
+  // a re-ask in the model's own words still keeps the transcript masking a sensitive question started
   const { REASK_RE } = await import("../supabase/functions/vapi-webhook/redact.ts");
   assertMatch("Sorry, could you repeat that?", REASK_RE);
   // a tool's transport-failure line is the server's own sentence for the same outcome, word for word

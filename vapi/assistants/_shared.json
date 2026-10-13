@@ -157,10 +157,6 @@
           },
           { "type": "tool", "tool": { "type": "endCall" } }
         ]
-      },
-      {
-        "on": "assistant.transcriber.endpointedSpeechLowConfidence[confidence=0.1:0.3]",
-        "do": [{ "type": "say", "exact": "Sorry, could you repeat that?" }]
       }
     ],
     "silenceTimeoutSeconds": 45,
