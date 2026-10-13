@@ -4,7 +4,7 @@
   "function": {
     "name": "start_claim",
     "strict": false,
-    "description": "Take down a new loss the caller is reporting, for a verified caller or a new caller whose details were confirmed on this call. Call it once you know what happened and when, and again with every detail, corrected, after the caller says the read-back was wrong. Its result is a sentence that has already been spoken to the caller: it reads the claim back and asks whether it is correct, or asks for what is still missing.",
+    "description": "Take down a new loss the caller is reporting, for a verified caller or a new caller whose details were confirmed on this call. Call it once you know what happened and when, and again with every detail, corrected, after the caller says the read-back was wrong. Its result is the sentence for the caller (already spoken, or read out word for word when spoken is false): it reads the claim back and asks whether it is correct, or asks for what is still missing.",
     "parameters": {
       "type": "object",
       "properties": {

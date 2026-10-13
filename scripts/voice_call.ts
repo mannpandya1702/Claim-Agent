@@ -114,6 +114,13 @@ export const SCENARIOS: Record<string, string[]> = {
     "!9 Sorry, wait, just the home claim please.",
     "Okay, thank you. That's everything, goodbye.",
   ],
+  // The control for barge-in: the same interruption during a turn the model speaks itself (an answer
+  // in its own words), to tell VAPI's handling of model speech from its handling of tool messages.
+  "barge-in-model": [
+    "Hi, can you walk me through how the claims process works, step by step?",
+    "!4 Sorry, wait, how long does a review usually take?",
+    "Okay, thanks. That's all, goodbye.",
+  ],
 };
 
 export const SAMPLE_RATE = 16000;

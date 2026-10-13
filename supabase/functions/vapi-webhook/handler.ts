@@ -10,7 +10,7 @@ import { isJobName, runJob } from "./jobs.ts";
 import { callKeyOf, parseCalls } from "./parse_tool_request.ts";
 import { onEndOfCallReport, onStatusUpdate, onTranscript } from "./post_call.ts";
 import { redactDeep, redactPII } from "./redact.ts";
-import { MAX_SPOKEN_CHARS, sentenceFor } from "./speak.ts";
+import { MAX_SPOKEN_CHARS, sentenceFor, spokenWords } from "./speak.ts";
 import { runTool, runToolWithin, TOOL_BUDGET_MS } from "./tools.ts";
 import type { Deps, ParsedToolCall, ToolCtx, ToolResult, VapiMessage } from "./types.ts";
 
@@ -238,17 +238,35 @@ async function runWithBackstop(
   }
 }
 
+/** A tool sentence longer than this many spoken words is read out by the model instead of by VAPI.
+ *  VAPI speaks a native tool message (results[].message) to the end: the caller cannot interrupt it
+ *  (voice test 01a13421: "Sorry, wait" nine seconds into the claims summary was not even transcribed),
+ *  while the model's own speech stops when the caller talks (01a13425: stopped 1.26 s after the caller
+ *  started, with a user-interrupted event). Short sentences stay native: exact and fastest; long ones
+ *  (summaries, read-backs, details) go through the model, which reads result.message word for word
+ *  when the result says spoken: false (rules.md rule 2). */
+export const NATIVE_MAX_WORDS = 20;
+
+/** Whether VAPI speaks the sentence itself: native messages on, short enough to be spoken in full
+ *  without needing to be interruptible, and under VAPI's length limit. */
+export function speaksNatively(sentence: string, nativeEnabled: boolean): boolean {
+  return nativeEnabled && sentence.length <= MAX_SPOKEN_CHARS && spokenWords(sentence) <= NATIVE_MAX_WORDS;
+}
+
 function toResponse(call: ParsedToolCall, result: ToolResult, native: boolean): ToolCallResponse {
+  // spoken: false tells the model the sentence was not spoken and is its to read, word for word.
+  const spoken = native ? {} : { spoken: false };
   let payload: string;
   try {
     payload = JSON.stringify({
       code: result.code,
       message: result.sentence,
+      ...spoken,
       ...(result.data ? { data: result.data } : {}),
     });
   } catch {
     // data that cannot be serialised is dropped rather than losing the sentence
-    payload = JSON.stringify({ code: result.code, message: result.sentence });
+    payload = JSON.stringify({ code: result.code, message: result.sentence, ...spoken });
   }
   const entry: ToolCallResponse = { name: call.name, toolCallId: call.id, result: payload };
   if (native) entry.message = { type: "request-complete", content: result.sentence };
@@ -295,7 +313,7 @@ export function createHandler(
       isChat: !message.call && isObj(message.chat),
       deps,
     };
-    const native = deps.env.NATIVE_TOOL_MESSAGES !== "false";
+    const nativeEnabled = deps.env.NATIVE_TOOL_MESSAGES !== "false";
     const results: ToolCallResponse[] = [];
     const tools: string[] = [];
     const codes: string[] = [];
@@ -307,10 +325,11 @@ export function createHandler(
       // paged), but its answer is the fallback once the batch is out of time.
       const left = Math.max(0, Math.floor(batchDeadline - performance.now()));
       const { result, error } = await runWithBackstop(routes, call, ctx, Math.min(backstopMs, left));
-      // VAPI refuses a longer spoken message; without it the model reads result.message instead
-      // (the NATIVE_TOOL_MESSAGES=false path), which beats the request-failed line.
+      // VAPI refuses a longer spoken message, and cannot be interrupted while it speaks one: a long
+      // sentence goes to the model to read (spoken: false), as does every sentence when native
+      // messages are off; a too-long one is also logged.
       const tooLong = result.sentence.length > MAX_SPOKEN_CHARS;
-      results.push(toResponse(call, result, native && !tooLong));
+      results.push(toResponse(call, result, speaksNatively(result.sentence, nativeEnabled)));
       tools.push(call.name);
       codes.push(result.code);
       if (error) errors.push(error);

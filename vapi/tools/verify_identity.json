@@ -4,7 +4,7 @@
   "function": {
     "name": "verify_identity",
     "strict": false,
-    "description": "Check the caller's date of birth against the account found by lookup_customer. Call only after lookup_customer's sentence asked for the date of birth. Its result is a sentence that has already been spoken to the caller; with intent claim_status it also gives a short summary of the claims on the account when it can (it names the claims it reads by their last three digits and says how many more are on file); when that read fails, its sentence only says the caller is verified.",
+    "description": "Check the caller's date of birth against the account found by lookup_customer. Call only after lookup_customer's sentence asked for the date of birth. Its result is the sentence for the caller (already spoken, or read out word for word when spoken is false); with intent claim_status it also gives a short summary of the claims on the account when it can (it names the claims it reads by their last three digits and says how many more are on file); when that read fails, its sentence only says the caller is verified.",
     "parameters": {
       "type": "object",
       "properties": {

@@ -4,7 +4,7 @@
   "function": {
     "name": "confirm_contact",
     "strict": false,
-    "description": "Record the caller's yes or no to the read-back of their contact details. Call it right after they answer, with no words of your own, not even an acknowledgement: its result sentence acknowledges them and has already been spoken to the caller.",
+    "description": "Record the caller's yes or no to the read-back of their contact details. Call it right after they answer, with no words of your own, not even an acknowledgement: its result sentence acknowledges them (rule 2: already spoken, or read out word for word when spoken is false).",
     "parameters": {
       "type": "object",
       "properties": {

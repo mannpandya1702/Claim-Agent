@@ -4,7 +4,7 @@
   "function": {
     "name": "capture_contact",
     "strict": false,
-    "description": "Save a caller's contact details for the claims team: a new caller's name, email and callback number, or the email a verified caller with none on file wants added to their account. Call it once the caller has given and spelled what you asked for, and again with the corrected details after a correction. Its result is a sentence that has already been spoken to the caller: it reads the details back and asks whether they are right.",
+    "description": "Save a caller's contact details for the claims team: a new caller's name, email and callback number, or the email a verified caller with none on file wants added to their account. Call it once the caller has given and spelled what you asked for, and again with the corrected details after a correction. Its result is the sentence for the caller (already spoken, or read out word for word when spoken is false): it reads the details back and asks whether they are right.",
     "parameters": {
       "type": "object",
       "properties": {

@@ -54,6 +54,7 @@ import {
   selectPersonas,
   SIM_CLAIM_NUMBER,
   type SimState,
+  spokenForm,
   type TurnRecord,
   vapiChat,
 } from "./chat_battery.ts";
@@ -83,6 +84,7 @@ function stateAfter(steps: { tool: string; args: Obj; code: string; data?: Obj }
     chatId: "c",
     model: [],
     continuation: [],
+    readAloud: [],
     filler: [],
     heard: [],
     cost: 0,
@@ -121,7 +123,7 @@ const TOBIAS_VERIFY = {
 // ---------------------------------------------------------------------------------------------
 // Fake VAPI: each request consumes the next list of model actions.
 // ---------------------------------------------------------------------------------------------
-type Action = { say: string } | { call: string; args?: Obj };
+type Action = { say: string } | { call: string; args?: Obj; noRead?: boolean; readAs?: string };
 
 function fakeVapi(script: Action[][]) {
   const bodies: Obj[] = [];
@@ -152,6 +154,12 @@ function fakeVapi(script: Action[][]) {
       if (tool.type === "code") {
         const result = await runMock(tool.code, action.args ?? {});
         output.push({ role: "tool", tool_call_id: id, content: JSON.stringify(result, null, 2) });
+        // a compliant model reads a spoken-false sentence out word for word (rules.md rule 2);
+        // { noRead: true } on the action scripts a model that does not
+        const r = result as Obj | null;
+        if (r && r.spoken === false && typeof r.message === "string" && !action.noRead) {
+          output.push({ role: "assistant", content: action.readAs ?? r.message });
+        }
       }
     }
     return { id: `chat-${n}`, output, cost: 0.01 };
@@ -843,6 +851,7 @@ Deno.test("advance names a date phrase the mock could not read but the server wo
     chatId: "c",
     model: [],
     continuation: [],
+    readAloud: [],
     filler: [],
     heard: [],
     cost: 0,
@@ -867,6 +876,7 @@ Deno.test("a claim spoken of as filed before confirm_claim filed it is flagged; 
     chatId: "c",
     model,
     continuation: [],
+    readAloud: [],
     filler: [],
     heard: [],
     cost: 0,
@@ -1139,6 +1149,7 @@ Deno.test("generic checks: smuggled identity fields, two questions, a missing mo
     cost: 0,
     model: [],
     continuation: [],
+    readAloud: [],
     calls: [{
       id: "c1",
       name: "get_claim_status",
@@ -1161,6 +1172,50 @@ Deno.test("generic checks: smuggled identity fields, two questions, a missing mo
 // Whole conversations against the fake.
 // ---------------------------------------------------------------------------------------------
 const TOBIAS_STATUS_VERIFY = { dob_month: 3, dob_day: 14, dob_year: 1986, intent: "claim_status" };
+
+Deno.test("a spoken-false sentence must be read out word for word: paraphrase and silence are caught", async () => {
+  // the chained claims read is longer than NATIVE_MAX_WORDS, so the model reads it (spoken: false)
+  const read = fakeVapi([
+    [{ call: "lookup_customer", args: { phone: "6025550101" } }],
+    [{ call: "verify_identity", args: TOBIAS_STATUS_VERIFY }],
+    [{ call: "endCall" }],
+  ]);
+  const ok = await runConversation(persona("f1"), 1, base, read.chat, () => NOW);
+  assertEquals(ok.problems, []);
+  assertEquals(ok.turns[1].readAloud.length, 1);
+  assertEquals(ok.turns[1].calls[0].result?.spoken, false);
+  assertEquals(ok.turns[1].heard, [...ok.turns[1].filler, ok.turns[1].readAloud[0].said]);
+
+  const paraphrase = fakeVapi([
+    [{ call: "lookup_customer", args: { phone: "6025550101" } }],
+    [{
+      call: "verify_identity",
+      args: TOBIAS_STATUS_VERIFY,
+      readAs: "You're verified, and you've got two claims going.",
+    }],
+    [{ call: "endCall" }],
+  ]);
+  const p = await runConversation(persona("f1"), 1, base, paraphrase.chat, () => NOW);
+  assert(!p.pass);
+  assertStringIncludes(p.problems.join(" | "), "t2: read a tool sentence differently");
+
+  const silent = fakeVapi([
+    [{ call: "lookup_customer", args: { phone: "6025550101" } }],
+    [{ call: "verify_identity", args: TOBIAS_STATUS_VERIFY, noRead: true }],
+    [{ call: "endCall" }],
+  ]);
+  const q = await runConversation(persona("f1"), 1, base, silent.chat, () => NOW);
+  assert(!q.pass);
+  assertStringIncludes(q.problems.join(" | "), "t2: 1 spoken-false tool sentence(s) never read out");
+});
+
+Deno.test("spokenForm: case, punctuation and spacing do not count; words do", () => {
+  assertEquals(
+    spokenForm("You're all set.  Your claim number ends in four seven two."),
+    spokenForm("you\u2019re all set, your claim number ends in four seven two"),
+  );
+  assert(spokenForm("ends in four seven two") !== spokenForm("ends in four seven three"));
+});
 
 Deno.test("F1 with a compliant model passes, and the requests chain like a voice call", async () => {
   const vapi = fakeVapi([

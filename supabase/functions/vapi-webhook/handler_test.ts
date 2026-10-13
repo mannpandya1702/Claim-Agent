@@ -1,7 +1,16 @@
 import { assert, assertEquals, assertFalse, assertMatch, assertNotMatch, assertStringIncludes } from "@std/assert";
 import { createFakeStore } from "./fake_store.ts";
-import { BATCH_BUDGET_MS, createHandler, handle, type Routes, timingSafeEqual, TOOL_BACKSTOP_MS } from "./handler.ts";
-import { sentenceFor } from "./speak.ts";
+import {
+  BATCH_BUDGET_MS,
+  createHandler,
+  handle,
+  NATIVE_MAX_WORDS,
+  type Routes,
+  speaksNatively,
+  timingSafeEqual,
+  TOOL_BACKSTOP_MS,
+} from "./handler.ts";
+import { sentenceFor, spokenWords } from "./speak.ts";
 import { TOOL_BUDGET_MS as TOOLS_OWN_BUDGET_MS } from "./tools.ts";
 import type { Deps, Env, ParsedToolCall, Store, ToolCtx, ToolResult, VapiMessage } from "./types.ts";
 
@@ -14,6 +23,16 @@ const TOBIAS_PHONE = "602-555-0101";
 type Ctx = Omit<ToolCtx, "toolCallId">;
 
 // No unit test may reach the network; a tool that tries gets a rejected promise, not a socket.
+/** What the handler adds for a sentence it leaves to the model (longer than NATIVE_MAX_WORDS). */
+function spokenFlag(sentence: string): { spoken?: false } {
+  return speaksNatively(sentence, true) ? {} : { spoken: false };
+}
+
+/** The native message VAPI speaks for a sentence, or undefined when the model reads it. */
+function nativeContent(sentence: string): string | undefined {
+  return speaksNatively(sentence, true) ? sentence : undefined;
+}
+
 const noNetwork = (() => Promise.reject(new Error("network disabled in unit tests"))) as typeof fetch;
 
 // A store that fails the test if anything touches it (routes that must never reach the DB).
@@ -70,7 +89,7 @@ interface Parsed {
   name: string;
   toolCallId: string;
   result: string;
-  json: { code: string; message: string; data?: Record<string, unknown> };
+  json: { code: string; message: string; spoken?: false; data?: Record<string, unknown> };
   message?: { type: string; content: string };
 }
 
@@ -393,8 +412,8 @@ Deno.test("tool calls without any call key -> 400", async () => {
 
 Deno.test("result is one-line JSON with code and message; the native message speaks the same sentence", async () => {
   const { routes } = fakeRoutes(() => ({
-    code: "not_found",
-    sentence: sentenceFor("not_found", { digits: "6025550199" }),
+    code: "needs_dob",
+    sentence: sentenceFor("needs_dob"),
     data: { digits: "6025550199", note: "two\nlines" },
   }));
   const { deps } = makeDeps({}, untouchableStore);
@@ -407,10 +426,33 @@ Deno.test("result is one-line JSON with code and message; the native message spe
   const [r] = await results(res);
   assertFalse(r.result.includes("\n"), "one line");
   assertEquals(Object.keys(r.json), ["code", "message", "data"]);
-  assertEquals(r.json.code, "not_found");
-  assertEquals(r.json.message, sentenceFor("not_found", { digits: "6025550199" }));
+  assertEquals(r.json.code, "needs_dob");
+  assertEquals(r.json.message, sentenceFor("needs_dob"));
   assertEquals(r.json.data, { digits: "6025550199", note: "two\nlines" });
   assertEquals(r.message, { type: "request-complete", content: r.json.message });
+});
+
+Deno.test("a sentence over NATIVE_MAX_WORDS goes to the model to read: spoken false, no native message", async () => {
+  // VAPI speaks a native tool message to the end with no way for the caller to interrupt it; the
+  // model's own speech can be interrupted, so long sentences are the model's to read word for word.
+  const long = sentenceFor("not_found", { digits: "6025550199" });
+  assert(spokenWords(long) > NATIVE_MAX_WORDS, `${spokenWords(long)} words`);
+  const short = sentenceFor("needs_dob");
+  assert(spokenWords(short) <= NATIVE_MAX_WORDS);
+  assert(speaksNatively(short, true) && !speaksNatively(short, false) && !speaksNatively(long, true));
+  const { routes } = fakeRoutes(() => ({ code: "not_found", sentence: long, data: { digits: "6025550199" } }));
+  const { deps, logs } = makeDeps({}, untouchableStore);
+  const [r] = await results(
+    await createHandler(routes)(
+      post({ message: callEnvelope({ toolCallList: [fnCall("t1", "lookup_customer", {})] }) }),
+      deps,
+    ),
+  );
+  assertEquals(r.message, undefined);
+  assertEquals(Object.keys(r.json), ["code", "message", "spoken", "data"]);
+  assertEquals(r.json, { code: "not_found", message: long, spoken: false, data: { digits: "6025550199" } });
+  // a long sentence is not an error; only one over VAPI's character limit is logged
+  assertFalse(String(logs.at(-1)?.error ?? "").includes("tool_message_too_long"));
 });
 
 Deno.test("data is omitted from the result when the tool returns none", async () => {
@@ -448,8 +490,13 @@ Deno.test("a tool that throws is a system_error sentence at HTTP 200", async () 
   );
   assertEquals(res.status, 200);
   const [r] = await results(res);
-  assertEquals(r.json, { code: "system_error", message: sentenceFor("system_error") });
-  assertEquals(r.message?.content, sentenceFor("system_error"));
+  // longer than NATIVE_MAX_WORDS, so the model reads it (spoken: false) and VAPI speaks nothing itself
+  assertEquals(r.json, {
+    code: "system_error",
+    message: sentenceFor("system_error"),
+    ...spokenFlag(sentenceFor("system_error")),
+  });
+  assertEquals(r.message?.content, nativeContent(sentenceFor("system_error")));
   assertEquals(logs.length, 1);
   assertEquals(logs[0].code, "system_error");
   assertStringIncludes(String(logs[0].error), "connection reset");
@@ -489,11 +536,24 @@ Deno.test("when runTool itself fails, emergency and escalate keep their safer se
     assertEquals(out[0].json, {
       code: "emergency_logged",
       message: sentenceFor("emergency_logged", { db_failed: true }),
+      ...spokenFlag(sentenceFor("emergency_logged", { db_failed: true })),
       data: { db_failed: true },
     }, how);
     assertEquals(out[0].json.message, "Please stay on the line. Are you safe right now?", how);
-    assertEquals(out[1].json, { code: "rep_unavailable", message: sentenceFor("rep_unavailable") }, how);
-    assertEquals(out[2].json, { code: "system_error", message: sentenceFor("system_error") }, how);
+    assertEquals(
+      out[1].json,
+      {
+        code: "rep_unavailable",
+        message: sentenceFor("rep_unavailable"),
+        ...spokenFlag(sentenceFor("rep_unavailable")),
+      },
+      how,
+    );
+    assertEquals(
+      out[2].json,
+      { code: "system_error", message: sentenceFor("system_error"), ...spokenFlag(sentenceFor("system_error")) },
+      how,
+    );
   }
 });
 
@@ -632,7 +692,7 @@ Deno.test("a sentence over VAPI's 1000-character limit goes out without the nati
   );
   const [r] = await results(res);
   assertEquals(r.message, undefined);
-  assertEquals(r.json, { code: "ok", message: long });
+  assertEquals(r.json, { code: "ok", message: long, spoken: false });
   assertStringIncludes(String(logs.at(-1)?.error), "tool_message_too_long");
 });
 
@@ -1091,7 +1151,10 @@ Deno.test("e2e: one delivery with lookup then verify walks the ladder in order",
   });
   const out = await results(await handle(post({ message }), deps));
   assertEquals(out.map((r) => [r.toolCallId, r.json.code]), [["tc1", "needs_dob"], ["tc2", "verified"], ["tc3", "ok"]]);
-  for (const r of out) assertEquals(r.message?.content, r.json.message);
+  for (const r of out) {
+    assertEquals(r.message?.content, nativeContent(r.json.message));
+    assertEquals(r.json.spoken, speaksNatively(r.json.message, true) ? undefined : false);
+  }
   const text = JSON.stringify(logs);
   for (const leak of ["0101", "1986", "Tobias"]) assertFalse(text.includes(leak), leak);
 });

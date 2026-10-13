@@ -58,7 +58,7 @@ Deno.test("parseCallerLine: plain lines wait for quiet, !<seconds> lines barge i
   }
 });
 
-Deno.test("scenarios: every line parses; barge-in talks over the claims read once, the rest never", () => {
+Deno.test("scenarios: every line parses; barge-in talks over the claims read once, barge-in-model over an answer, the rest never", () => {
   for (const [name, lines] of Object.entries(SCENARIOS)) {
     assert(lines.length > 0, name);
     const parsed = lines.map(parseCallerLine);
@@ -75,6 +75,10 @@ Deno.test("scenarios: every line parses; barge-in talks over the claims read onc
       // calls), and still inside even a summarized claims read (about 20 s)
       const at = barges[0].bargeInSeconds!;
       assert(at >= 6 && at <= 15, `barge-in at ${at} s`);
+    } else if (name === "barge-in-model") {
+      // the control: one barge-in over the model's own answer to the opening question
+      assertEquals(barges.length, 1);
+      assertEquals(parsed.findIndex((l) => l.bargeInSeconds !== null), 1);
     } else assertEquals(barges, [], name);
   }
 });

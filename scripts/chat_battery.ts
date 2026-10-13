@@ -55,6 +55,7 @@ import {
   verifiedFileClaimSentence,
   verifiedStatusSentence,
 } from "../supabase/functions/vapi-webhook/speak.ts";
+import { speaksNatively } from "../supabase/functions/vapi-webhook/handler.ts";
 import {
   claimChoicesData,
   claimEndingKey,
@@ -168,6 +169,9 @@ export function phonesIn(text: string): string[] {
 export interface MockResult {
   code: Code;
   message: string;
+  // as the webhook sends it: a sentence longer than NATIVE_MAX_WORDS is not spoken by VAPI but read
+  // out by the model, word for word (handler.ts speaksNatively)
+  spoken?: false;
   data?: Obj;
   meta: { request_id: string };
 }
@@ -316,9 +320,11 @@ export interface PlanCtx {
 }
 
 function result(ctx: PlanCtx, code: Code, data?: Obj, sentence?: string): MockResult {
+  const message = sentence ?? sentenceFor(code, data);
   return {
     code,
-    message: sentence ?? sentenceFor(code, data),
+    message,
+    ...(speaksNatively(message, true) ? {} : { spoken: false as const }),
     ...(data ? { data } : {}),
     meta: { request_id: ctx.requestId },
   };
@@ -1085,6 +1091,8 @@ export interface TurnRecord {
   // after them. On voice the tool's sentence ends the turn (probe P4), so
   // these are reported but never heard and never fail a run.
   continuation: string[];
+  // the model reading a spoken-false tool sentence out loud (heard; checked word for word)
+  readAloud: { expected: string; said: string }[];
   filler: string[]; // configured tool messages VAPI spoke
   heard: string[]; // what the caller hears, in order: model words, filler, tool sentences
   cost: number;
@@ -1109,6 +1117,7 @@ export function parseTurn(user: string, response: Obj, fillers: Set<string>, req
     calls: [],
     model: [],
     continuation: [],
+    readAloud: [],
     filler: [],
     heard: [],
     cost: typeof response.cost === "number" ? response.cost : 0,
@@ -1116,6 +1125,8 @@ export function parseTurn(user: string, response: Obj, fillers: Set<string>, req
   const output = Array.isArray(response.output) ? response.output : [];
   // The last output item was a server tool's answer that VAPI speaks (results[].message).
   let afterSpokenResult = false;
+  // The last output item was a server tool's answer the model must read out (spoken: false).
+  let toRead: string | null = null;
   for (const item of output) {
     const m = item && typeof item === "object" ? item as Obj : {};
     if (m.role === "assistant") {
@@ -1124,6 +1135,12 @@ export function parseTurn(user: string, response: Obj, fillers: Set<string>, req
       if (content) {
         if (toolCalls.length === 0 && turn.calls.length > 0 && isFillerText(content, fillers)) {
           turn.filler.push(content);
+        } else if (toolCalls.length === 0 && toRead !== null) {
+          turn.readAloud.push({ expected: toRead, said: content });
+          turn.heard.push(content);
+          toRead = null;
+          afterSpokenResult = true; // anything after the reading is a continuation, as after a spoken one
+          continue;
         } else if (toolCalls.length === 0 && afterSpokenResult) {
           turn.continuation.push(content);
           continue;
@@ -1132,7 +1149,10 @@ export function parseTurn(user: string, response: Obj, fillers: Set<string>, req
         }
         turn.heard.push(content);
       }
-      if (toolCalls.length > 0) afterSpokenResult = false;
+      if (toolCalls.length > 0) {
+        afterSpokenResult = false;
+        toRead = null;
+      }
       for (const raw of toolCalls) {
         const c = raw && typeof raw === "object" ? raw as Obj : {};
         const fn = c.function && typeof c.function === "object" ? c.function as Obj : {};
@@ -1157,9 +1177,12 @@ export function parseTurn(user: string, response: Obj, fillers: Set<string>, req
       const meta = parsed && typeof parsed.meta === "object" && parsed.meta ? parsed.meta as Obj : null;
       if (parsed && typeof parsed.code === "string" && meta?.request_id === requestId) {
         call.result = parsed as unknown as MockResult;
-        if (typeof parsed.message === "string") turn.heard.push(parsed.message);
+        // a spoken-false sentence is heard only when the model reads it out (below)
+        if (typeof parsed.message === "string" && parsed.spoken !== false) turn.heard.push(parsed.message);
       }
-      afterSpokenResult = SERVER_TOOL_SET.has(call.name) && typeof call.result?.message === "string";
+      const serverAnswer = SERVER_TOOL_SET.has(call.name) && typeof call.result?.message === "string";
+      toRead = serverAnswer && call.result?.spoken === false ? call.result.message : null;
+      afterSpokenResult = serverAnswer && toRead === null;
     }
   }
   return turn;
@@ -2340,6 +2363,11 @@ const IDENTITY_KEYS = new Set(["identityverified", "verified", "customerid", "ca
 const keyOf = (k: string) => k.toLowerCase().replace(/[^a-z0-9]/g, "");
 const SERVER_TOOL_SET: ReadonlySet<string> = new Set(SERVER_TOOLS);
 
+/** A sentence as it sounds: case, punctuation and spacing do not change what the caller hears. */
+export function spokenForm(text: string): string {
+  return text.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[^a-z0-9' ]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
 /** Rules every request must keep, whatever the persona (prompt rules 1, 2 and 5, and the mock contract). */
 export function genericProblems(turn: TurnRecord, toolNames: string[]): string[] {
   const problems: string[] = [];
@@ -2363,6 +2391,13 @@ export function genericProblems(turn: TurnRecord, toolNames: string[]): string[]
   if (server.length > 1) {
     problems.push(`chained ${server.join(" -> ")} in one turn (later calls answered from the turn-start state)`);
   }
+  for (const r of turn.readAloud) {
+    if (spokenForm(r.said) !== spokenForm(r.expected)) {
+      problems.push(`read a tool sentence differently: "${r.said.slice(0, 120)}" for "${r.expected.slice(0, 120)}"`);
+    }
+  }
+  const unread = turn.calls.filter((c) => c.result?.spoken === false).length - turn.readAloud.length;
+  if (unread > 0) problems.push(`${unread} spoken-false tool sentence(s) never read out`);
   if (turn.calls.length > 0 && turn.model.length > 0) {
     problems.push(`words of its own in a tool turn: "${turn.model.join(" ").slice(0, 160)}"`);
   }
@@ -2378,6 +2413,7 @@ function mergeTurns(parts: TurnRecord[]): TurnRecord {
     calls: parts.flatMap((p) => p.calls),
     model: parts.flatMap((p) => p.model),
     continuation: parts.flatMap((p) => p.continuation),
+    readAloud: parts.flatMap((p) => p.readAloud),
     filler: parts.flatMap((p) => p.filler),
     heard: parts.flatMap((p) => p.heard),
     cost: parts.reduce((s, p) => s + p.cost, 0),

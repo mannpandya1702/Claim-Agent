@@ -4,7 +4,7 @@
   "function": {
     "name": "escalate",
     "strict": false,
-    "description": "Record a request for a claims representative to call the caller back, and alert the claims team. Use it for a request for a person unless your instructions say to transfer, for a yes to a callback that a sentence offered, and after a transfer did not connect. Call it again with callback_phone when its sentence asked for a number. Its result is a sentence that has already been spoken to the caller.",
+    "description": "Record a request for a claims representative to call the caller back, and alert the claims team. Use it for a request for a person unless your instructions say to transfer, for a yes to a callback that a sentence offered, and after a transfer did not connect. Call it again with callback_phone when its sentence asked for a number. Its result is the sentence for the caller: already spoken, or read out word for word when spoken is false.",
     "parameters": {
       "type": "object",
       "properties": {

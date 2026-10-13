@@ -4,7 +4,7 @@
   "function": {
     "name": "lookup_customer",
     "strict": false,
-    "description": "Find the caller's account by the phone number on the account. Call it as soon as the caller says the phone number on their account; never for a callback number. Its result is a sentence that has already been spoken to the caller.",
+    "description": "Find the caller's account by the phone number on the account. Call it as soon as the caller says the phone number on their account; never for a callback number. Its result is the sentence for the caller: already spoken, or read out word for word when spoken is false.",
     "parameters": {
       "type": "object",
       "properties": {
