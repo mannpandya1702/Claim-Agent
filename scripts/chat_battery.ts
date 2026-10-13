@@ -1396,8 +1396,11 @@ const POLICY_NUMBER_ASK = /\bpolicy number\b/i;
 // What Ava said on a test call instead of looking up the right third number.
 const LOOKUP_REFUSED =
   /\b(can't|cannot|can not|unable to) (look up|check|try|search) (another|any more|more|a different)\b/i;
-// A warm re-ask of garbled speech (rules.md rule 23), in whatever words the model picks.
-const UNCLEAR_REASK = /\b(catch|caught|say (that|it) again|repeat|didn't (quite )?(get|hear)|missed)\b/i;
+// A warm re-ask of garbled speech (rules.md rule 23), in whatever words the model picks: the rule asks for
+// different words each time, so "I'm not following that part. Could you say it a different way?" and
+// "I'm not sure what you mean by red desk." count (live battery 2026-10-13).
+const UNCLEAR_REASK =
+  /\b(catch|caught|say (that|it) again|say (that|it) (a different way|another way|differently)|repeat|rephrase|didn't (quite )?(get|hear|understand)|(not|didn't|did not) (quite )?follow(ing)?|not sure what you mean|missed)\b/i;
 const INJURY_ASK = /\b(anyone|anybody|you|everyone) (hurt|injured)\?|\binjur(y|ies)\b[^.?]*\?/i;
 // A caller who can't hear Ava (rules.md rule 25): a line check that keeps "hear me", never rule 23's
 // "didn't catch that" or a request to say it again; then only what they missed (rule 26), with no
@@ -2747,6 +2750,13 @@ const IDENTITY_KEYS = new Set(["identityverified", "verified", "customerid", "ca
 const keyOf = (k: string) => k.toLowerCase().replace(/[^a-z0-9]/g, "");
 const SERVER_TOOL_SET: ReadonlySet<string> = new Set(SERVER_TOOLS);
 
+/** Turn text for the persona patterns. The model often writes a curly apostrophe (U+2019), and
+ *  "didn't" is the same word either way: a modelNever pattern must still catch it, and a modelSays
+ *  pattern must still find it. */
+export function patternText(parts: string[]): string {
+  return parts.join(" ").replace(/[\u2018\u2019]/g, "'");
+}
+
 /** A sentence as it sounds: case, punctuation and spacing do not change what the caller hears. */
 export function spokenForm(text: string): string {
   return text.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[^a-z0-9' ]+/g, " ").replace(/\s+/g, " ").trim();
@@ -2834,8 +2844,8 @@ export function turnProblems(spec: TurnSpec, turn: TurnRecord): string[] {
     if (!first || first.name !== spec.firstToolSilent) problems.push(`first call was not ${spec.firstToolSilent}`);
     else if (first.wordsBefore) problems.push(`spoke before ${spec.firstToolSilent}`);
   }
-  const model = turn.model.join(" ");
-  const heard = turn.heard.join(" ");
+  const model = patternText(turn.model);
+  const heard = patternText(turn.heard);
   for (const re of spec.modelSays ?? []) {
     if (!re.test(model)) problems.push(`model text lacks ${re}: "${model.slice(0, 160)}"`);
   }
@@ -2930,8 +2940,8 @@ export function conversationProblems(persona: Persona, turns: TurnRecord[]): str
   if (persona.toolOrder && JSON.stringify(names) !== JSON.stringify(persona.toolOrder)) {
     problems.push(`tool order [${names.join(", ")}], expected [${persona.toolOrder.join(", ")}]`);
   }
-  const model = turns.flatMap((t) => t.model).join(" ");
-  const heard = turns.flatMap((t) => t.heard).join(" ");
+  const model = patternText(turns.flatMap((t) => t.model));
+  const heard = patternText(turns.flatMap((t) => t.heard));
   for (const re of persona.modelNever ?? []) if (re.test(model)) problems.push(`model text matches ${re}`);
   for (const re of persona.heardNever ?? []) if (re.test(heard)) problems.push(`caller heard ${re}`);
   for (const re of persona.modelSomewhere ?? []) if (!re.test(model)) problems.push(`model never said ${re}`);

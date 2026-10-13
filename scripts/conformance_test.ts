@@ -434,7 +434,7 @@ Deno.test("the reference prompt's ideas are in every prompt, in Ava's own rules"
       // varied samples keep the words the endpointing cues and the transcript masking key on
       /but keep the words that say what you're asking for, such as "phone number", "date of birth", "best number" or "spell it, letter by letter"\./,
       // a caller's own address is the tool's to read back, never the model's
-      /Never say, spell or read back a caller's own email address yourself\./,
+      /Never say, spell or read back a caller's own email address yourself; if they missed a tool's read-back, read that sentence again in full, as rule 26 says\./,
       /Put it plainly, such as "That's not something I can share or change\."/,
     ];
     for (const re of pins) assertMatch(prompt, re, key);
@@ -531,7 +531,7 @@ Deno.test("a caller who can't hear Ava: a line check, then only what they missed
       // not rule 23's line, and no blame
       /the line is the problem, not what they said: never say you didn't catch them, and never say whose end the trouble is on\./,
       // one turn of her own words: the check, the missed part, the waiting question with its key words
-      /Answer in one turn of your own words, with no tool call: a short sorry and a line check in a few words that keep the words "hear me", such as "[^"]+"; then, if they missed something you said, "I was saying" and only the part they missed, as rule 26 says;/,
+      /Answer in one turn of your own words, with no tool call: a short sorry and a line check in a few words that keep the words "hear me", such as "[^"]+"; then, if they missed something you said, "I was saying" and only the part they missed, as rule 26 says, or, if they missed a read-back they have to confirm, that tool's sentence again in full;/,
       /end with that question, keeping its key words, such as "phone number", "date of birth" or "spell"\./,
       /With nothing to repeat, the line check alone\. Said in passing like this, the line check isn't a second question under rule 1\./,
       // a request in the same breath is confirmed in a few words and done on a yes, never claimed early
@@ -575,7 +575,10 @@ Deno.test("a caller who can't hear Ava: a line check, then only what they missed
         /never changed and never added to, and the whole repeat is about 20 words at most\./,
         /Say a web or email address again only if it was the point of what they missed\./,
         // a read-back to confirm is read again whole, as the tool wrote it, never shortened
-        /A read-back the caller has to confirm, of their details or a new claim, is never shortened or put in your own words: read that tool's sentence again in full, exactly as it was written, and never say a caller's own email address any other way\./,
+        /A read-back the caller has to confirm, of their details or a new claim, is never shortened, described or put in your own words, however long it is: read that tool's sentence again in full, exactly as it was written, every name, letter and digit, and never say a caller's own email address any other way\./,
+        // live battery 2026-10-13: "I was saying I was reading back your name, email, and best number.
+        // Did I get that right?" asked for a yes to details the caller never heard
+        /"I was reading back your details" is not a read-back: they can't confirm what they haven't heard\./,
         /A question you were waiting on keeps its key words, such as "phone number", "date of birth" or "spell"\./,
         /Never call a tool again just to repeat what it said: no second email, lookup, verification or callback\./,
         /Never close a repeat with a rule 14 follow-up, such as "Does that make sense\?" or "Does that help\?"\./,

@@ -46,6 +46,7 @@ import {
   type MockResult,
   parseOptions,
   parseTurn,
+  patternText,
   type Persona,
   PERSONAS,
   phonesIn,
@@ -1691,6 +1692,79 @@ Deno.test("line trouble: what Ava did on 01a13635, and rule 23's line, fail", as
     [{ call: "confirm_contact", args: { correct: true } }],
   ]);
   assertStringIncludes(text, "t6: tools [confirm_contact], expected []");
+});
+
+// Live battery 2026-10-13: "I\u2019m sorry, I still didn\u2019t get that part." (U+2019) failed garbled's
+// re-ask pattern, which spells "didn't" with a straight apostrophe. The same typography would let a
+// curly "didn\u2019t catch" past every modelNever pattern.
+Deno.test("a curly apostrophe is the same word: a re-ask still passes and rule 23's line still fails", async () => {
+  const curly = (s: string) => s.replaceAll("'", "\u2019");
+  assertEquals(patternText(["I\u2019m here.", "It\u2018s fine."]), "I'm here. It's fine.");
+  const garbled = await runConversation(
+    persona("garbled"),
+    1,
+    base,
+    fakeVapi([
+      ...STATUS_TOBIAS,
+      [{ say: "Sorry, I didn't catch the last part. Could you say that again?" }],
+      [{
+        say: curly(
+          "I'm sorry, I still didn't get that part. Could you say just what you want to do with the home claim?",
+        ),
+      }],
+    ]).chat,
+    () => NOW,
+  );
+  assertEquals(garbled.problems, []);
+  // the second re-ask in different words, as rule 23 asks (live battery 2026-10-13)
+  const reworded = await runConversation(
+    persona("garbled"),
+    1,
+    base,
+    fakeVapi([
+      ...STATUS_TOBIAS,
+      [{ say: "Sorry, I didn't catch the last part. Could you say that again?" }],
+      [{ say: curly("I'm sorry, I'm not following that part. Could you say it a different way?") }],
+    ]).chat,
+    () => NOW,
+  );
+  assertEquals(reworded.problems, []);
+  const unsure = await runConversation(
+    persona("garbled"),
+    1,
+    base,
+    fakeVapi([
+      ...STATUS_TOBIAS,
+      [{ say: "Sorry, I didn't catch the last part. Could you say that again?" }],
+      [{
+        say:
+          "I\u2019m not sure what you mean by \u201cred desk.\u201d Could you tell me what you want help with on the home claim?",
+      }],
+    ]).chat,
+    () => NOW,
+  );
+  assertEquals(unsure.problems, []);
+  // a reply that is no re-ask at all still fails
+  const answered = await runConversation(
+    persona("garbled"),
+    1,
+    base,
+    fakeVapi([
+      ...STATUS_TOBIAS,
+      [{ say: "Sorry, I didn't catch the last part. Could you say that again?" }],
+      [{ say: "Your home claim needs documents by October twenty-fourth." }],
+    ]).chat,
+    () => NOW,
+  );
+  assertStringIncludes(answered.problems.join(" | "), "t4: model text lacks /\\b(catch|caught");
+  const hello = await runConversation(
+    persona("cant-hear-hello"),
+    1,
+    base,
+    fakeVapi([...STATUS_TOBIAS, [{ say: curly("Sorry, I didn't catch that. Could you say it again?") }]]).chat,
+    () => NOW,
+  );
+  assertStringIncludes(hello.problems.join(" | "), "t3: model text matches /\\b(didn't|did not");
 });
 
 // ---------------------------------------------------------------------------------------------
