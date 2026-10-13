@@ -1156,12 +1156,15 @@ const VAPI_ACKNOWLEDGEMENT_PHRASES = [
 // How callers on test calls tried to stop Ava: "sorry, wait", "excuse me", "hang on", "hey Ava".
 const EXTRA_INTERRUPTION_PHRASES = ["sorry", "excuse", "hang", "hey", "ava", "question"];
 
-Deno.test("barge-in: one word stops Ava, backchannels never do, and the greeting is heard in full", () => {
+Deno.test("barge-in: the caller's voice stops Ava without waiting for a transcript, and the greeting is heard in full", () => {
   for (const key of ASSISTANT_KEYS) {
     const p = withRep.assistants[key].payload;
     assertEquals(p.stopSpeakingPlan, {
-      numWords: 1,
-      voiceSeconds: 0.2,
+      // voice activity alone stops Ava (numWords 0): on a 10:54 test call speech-to-text took up
+      // to 7.7 s on some turns, and a word-count rule waits for that transcript while Ava keeps
+      // talking; 0.4 s of voice ignores clicks and line noise but catches "wait" or "sorry"
+      numWords: 0,
+      voiceSeconds: 0.4,
       // after an interruption Ava answers half a second later, not a full second (a test call
       // heard about four seconds of silence after cutting in)
       backoffSeconds: 0.5,

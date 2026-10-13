@@ -412,8 +412,8 @@ Deno.test("tool calls without any call key -> 400", async () => {
 
 Deno.test("result is one-line JSON with code and message; the native message speaks the same sentence", async () => {
   const { routes } = fakeRoutes(() => ({
-    code: "needs_dob",
-    sentence: sentenceFor("needs_dob"),
+    code: "claim_retry",
+    sentence: sentenceFor("claim_retry"),
     data: { digits: "6025550199", note: "two\nlines" },
   }));
   const { deps } = makeDeps({}, untouchableStore);
@@ -426,17 +426,17 @@ Deno.test("result is one-line JSON with code and message; the native message spe
   const [r] = await results(res);
   assertFalse(r.result.includes("\n"), "one line");
   assertEquals(Object.keys(r.json), ["code", "message", "data"]);
-  assertEquals(r.json.code, "needs_dob");
-  assertEquals(r.json.message, sentenceFor("needs_dob"));
+  assertEquals(r.json.code, "claim_retry");
+  assertEquals(r.json.message, sentenceFor("claim_retry"));
   assertEquals(r.json.data, { digits: "6025550199", note: "two\nlines" });
   assertEquals(r.message, { type: "request-complete", content: r.json.message });
 });
 
 Deno.test("a sentence over NATIVE_MAX_WORDS goes to the model to read: spoken false, no native message", async () => {
   // VAPI speaks a native tool message to the end with no way for the caller to interrupt it; the
-  // model's own speech can be interrupted, so long sentences (a spelled read-back here) are the
-  // model's to read word for word. 28 words is about nine seconds at voice speed 1.0.
-  assertEquals(NATIVE_MAX_WORDS, 28);
+  // model's own speech can be interrupted, so all but very short sentences (a spelled read-back here)
+  // are the model's to read word for word. 12 words is about four seconds at voice speed 1.0.
+  assertEquals(NATIVE_MAX_WORDS, 12);
   const long = sentenceFor("contact_readback", {
     first_name: "Jane",
     last_name: "Doe",
@@ -444,19 +444,17 @@ Deno.test("a sentence over NATIVE_MAX_WORDS goes to the model to read: spoken fa
     callback_phone: "+16025550177",
   });
   assert(spokenWords(long) > NATIVE_MAX_WORDS, `${spokenWords(long)} words`);
-  const short = sentenceFor("needs_dob");
-  assert(spokenWords(short) <= NATIVE_MAX_WORDS);
+  const short = sentenceFor("claim_retry");
+  assert(spokenWords(short) <= NATIVE_MAX_WORDS, `${spokenWords(short)} words`);
   assert(speaksNatively(short, true) && !speaksNatively(short, false) && !speaksNatively(long, true));
-  // a number read back with its question is short enough to be spoken natively, with no model turn
-  const readBack = sentenceFor("not_found", { digits: "6025550199" });
-  assert(speaksNatively(readBack, true), `${spokenWords(readBack)} words`);
-  // the common callback answers are native too (28 words), so no model-turn gap follows the filler
-  for (const target of ["account", "caller_id"]) {
-    const queued = sentenceFor("rep_queued", { target });
-    assert(speaksNatively(queued, true), `${target}: ${spokenWords(queued)} words`);
+  // the date-of-birth question, a number read-back and the callback answers are model-read, so the
+  // caller can cut in on any of them
+  for (const [code, data] of [["needs_dob", {}], ["not_found", { digits: "6025550199" }]] as const) {
+    assertFalse(speaksNatively(sentenceFor(code, data), true), code);
   }
-  // the main line in figures is said digit by digit (38 words in all), so this stays model-read
-  // and the caller can cut in
+  for (const target of ["account", "caller_id"]) {
+    assertFalse(speaksNatively(sentenceFor("rep_queued", { target }), true), target);
+  }
   assertFalse(speaksNatively(sentenceFor("rep_unavailable"), true));
   const { routes } = fakeRoutes(() => ({ code: "contact_readback", sentence: long, data: { pending: true } }));
   const { deps, logs } = makeDeps({}, untouchableStore);
@@ -474,26 +472,29 @@ Deno.test("a sentence over NATIVE_MAX_WORDS goes to the model to read: spoken fa
 });
 
 Deno.test("data is omitted from the result when the tool returns none", async () => {
-  const { routes } = fakeRoutes(() => ({ code: "already_verified", sentence: sentenceFor("already_verified") }));
+  const { routes } = fakeRoutes(() => ({ code: "claim_retry", sentence: sentenceFor("claim_retry") }));
   const { deps } = makeDeps({}, untouchableStore);
   const res = await createHandler(routes)(
     post({ message: callEnvelope({ toolCallList: [fnCall("t1", "lookup_customer", {})] }) }),
     deps,
   );
   const [r] = await results(res);
-  assertEquals(r.result, JSON.stringify({ code: "already_verified", message: sentenceFor("already_verified") }));
+  assertEquals(r.result, JSON.stringify({ code: "claim_retry", message: sentenceFor("claim_retry") }));
 });
 
 Deno.test("NATIVE_TOOL_MESSAGES=false omits the message key; anything else keeps it", async () => {
+  // a sentence short enough to be native, so only the flag decides
+  const short = () => ({ code: "claim_retry" as const, sentence: sentenceFor("claim_retry") });
   const msg = { message: callEnvelope({ toolCallList: [fnCall("t1", "lookup_customer", {})] }) };
   const off = makeDeps({ NATIVE_TOOL_MESSAGES: "false" }, untouchableStore);
-  const [r] = await results(await createHandler(fakeRoutes().routes)(post(msg), off.deps));
+  const [r] = await results(await createHandler(fakeRoutes(short).routes)(post(msg), off.deps));
   assertFalse("message" in r);
-  assertEquals(r.json.message, sentenceFor("needs_dob"));
+  assertEquals(r.json.message, sentenceFor("claim_retry"));
+  assertEquals(r.json.spoken, false);
   for (const value of [undefined, "true", "FALSE ", ""]) {
     const on = makeDeps(value === undefined ? {} : { NATIVE_TOOL_MESSAGES: value }, untouchableStore);
-    const [r2] = await results(await createHandler(fakeRoutes().routes)(post(msg), on.deps));
-    assertEquals(r2.message, { type: "request-complete", content: sentenceFor("needs_dob") }, String(value));
+    const [r2] = await results(await createHandler(fakeRoutes(short).routes)(post(msg), on.deps));
+    assertEquals(r2.message, { type: "request-complete", content: sentenceFor("claim_retry") }, String(value));
   }
 });
 

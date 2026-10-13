@@ -76,8 +76,8 @@
       ]
     },
     "stopSpeakingPlan": {
-      "numWords": 1,
-      "voiceSeconds": 0.2,
+      "numWords": 0,
+      "voiceSeconds": 0.4,
       "backoffSeconds": 0.5,
       "interruptionPhrases": [
         "stop",
