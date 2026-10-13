@@ -56,23 +56,23 @@ const REP_PHONE = "+16025550188";
 const ENDCALL_GOODBYE = "Thanks for calling Observe Insurance. Take care.";
 const FIRST_MESSAGE =
   "Hey, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. How can I help you today?";
-// The ElevenLabs voice every assistant speaks with (field names per the VAPI ElevenLabsVoice schema):
-// Flash v2.5, ElevenLabs' lowest-latency model, which takes the same voice id and honours every setting
-// below (the openapi says only eleven_v4_turbo ignores style, similarity, speaker boost, speed and the
-// streaming latency); a natural pace (speed 1.0; 0.8 sounded slow on test calls), a little more
-// expression (stability 0.45, style 0.35), and a ChunkPlan that sends text to TTS from 15 characters,
-// so audio starts sooner while the default punctuation boundaries still decide where a chunk ends.
+// The ElevenLabs voice every assistant speaks with (field names per the VAPI ElevenLabsVoice schema),
+// as chosen: Multilingual v2, ElevenLabs' most natural-sounding model, a calm pace (speed 0.9),
+// a steady delivery (stability 0.75, style 0), SSML parsing on, no streaming-latency shortcuts
+// (optimizeStreamingLatency 0), and a ChunkPlan that sends whole sentences to TTS (at least 80
+// characters, ending on . ! or ?) so intonation runs across a sentence. Quality over first-audio speed.
 const VOICE = {
   provider: "11labs",
+  model: "eleven_multilingual_v2",
   voiceId: "bP6y87KyX5lwNEi7xOkX",
-  model: "eleven_flash_v2_5",
-  speed: 1.0,
-  stability: 0.45,
-  style: 0.35,
+  speed: 0.9,
+  stability: 0.75,
   similarityBoost: 0.75,
+  style: 0,
   useSpeakerBoost: true,
-  optimizeStreamingLatency: 3,
-  chunkPlan: { enabled: true, minCharacters: 15 },
+  enableSsmlParsing: true,
+  optimizeStreamingLatency: 0,
+  chunkPlan: { enabled: true, minCharacters: 80, punctuationBoundaries: [".", "!", "?"] },
 };
 // What the platform says while a tool runs: request-start and the delayed line. Every tool sets its
 // own request-start: without one VAPI picks a default filler ("Hold on a sec", "Just a sec").
