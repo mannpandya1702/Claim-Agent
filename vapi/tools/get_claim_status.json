@@ -4,10 +4,20 @@
   "function": {
     "name": "get_claim_status",
     "strict": false,
-    "description": "Read every claim on the verified caller's account. Call it when a verified caller asks about their claims. Takes no input: the account comes from the verified call, never from the caller. Its result is a sentence that has already been spoken to the caller.",
+    "description": "Read the verified caller's claims. Call it when a verified caller asks about their claims: with no detail for a short summary (it names the claims it reads and says how many more are on file); with detail documents when they want to hear what documents are needed and how to send them; with detail claim and claim_ending for more about one claim, such as why it was denied, how to appeal, when it was paid or who the adjuster is; with detail claim and no claim_ending when they ask about the other claims on file or have not said which claim. Call it again for each new question: never answer about a claim from memory or from an earlier result. The account comes from the verified call, never from the caller. Its result is a sentence that has already been spoken to the caller.",
     "parameters": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "detail": {
+          "type": "string",
+          "enum": ["summary", "documents", "claim"],
+          "description": "summary (the default) for where each claim stands; documents for what the claims waiting on documents need, by when and how to send them; claim for everything about the one claim claim_ending names."
+        },
+        "claim_ending": {
+          "type": "string",
+          "description": "With detail claim: the claim the caller means, as they said it: the last digits written as digits (198), the claim type word (auto, home or property), or both (home 198). Leave it out when they have not said which."
+        }
+      },
       "additionalProperties": false
     }
   },

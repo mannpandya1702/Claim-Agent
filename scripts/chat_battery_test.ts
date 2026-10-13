@@ -12,12 +12,17 @@ import {
   assertThrows,
 } from "@std/assert";
 import { SERVER_TOOLS } from "../supabase/functions/vapi-webhook/enums.ts";
+import { createFakeStore } from "../supabase/functions/vapi-webhook/fake_store.ts";
 import { parseLossDate } from "../supabase/functions/vapi-webhook/loss_date.ts";
 import {
+  MAX_TURN_WORDS,
   sentenceFor,
+  spokenWords,
   verifiedFileClaimSentence,
   verifiedStatusSentence,
 } from "../supabase/functions/vapi-webhook/speak.ts";
+import { runTool } from "../supabase/functions/vapi-webhook/tools.ts";
+import type { ToolCtx } from "../supabase/functions/vapi-webhook/types.ts";
 import { VapiError } from "./lib/vapi.ts";
 import {
   advance,
@@ -234,6 +239,89 @@ Deno.test("claims mock reads only for a verified caller", async () => {
     { tool: "verify_identity", args: { dob_month: 5, dob_day: 9, dob_year: 1990 }, code: "verified" },
   ]);
   assertEquals((await answer("get_claim_status", ines, {})).code, "no_claims");
+  assertEquals((await answer("get_claim_status", ines, { detail: "documents" })).code, "no_claims");
+  // not verified, whatever the detail asked for
+  assertEquals(
+    (await answer("get_claim_status", initialState(), { detail: "claim", claim_ending: "115" })).code,
+    "not_verified",
+  );
+});
+
+// Who verifies, and every detail and claim_ending a model might pass, read by the mock and the server alike.
+const STATUS_ACCOUNTS: [string, string, [number, number, number]][] = [
+  ["Tobias", "6025550101", [3, 14, 1986]],
+  ["Ronan", "6025550102", [11, 2, 1979]],
+  ["Sloane", "6025550103", [7, 21, 1992]],
+];
+const STATUS_ARGS: Obj[] = [
+  {},
+  { detail: "summary" },
+  { detail: " Documents " },
+  { detail: "claim" },
+  { detail: "bogus" },
+  { detail: "claim", claim_ending: "115" },
+  { detail: "claim", claim_ending: "198" },
+  { detail: "claim", claim_ending: "one one five" },
+  { detail: "claim", claim_ending: "CLM-240198" },
+  { detail: "claim", claim_ending: "home" },
+  { detail: "claim", claim_ending: "the car one" },
+  { detail: "claim", claim_ending: "property" },
+  { detail: "claim", claim_ending: "777" },
+  { detail: "claim", claim_ending: "the other one" },
+  { detail: "claim", claim_ending: "ending in one nine eight" },
+  { detail: "claim", claim_ending: "home 198" },
+  { detail: "claim", claim_ending: "auto 198" },
+  { detail: "claim", claim_ending: "the one paid October 8" },
+  { detail: "claim", claim_ending: "the one from 10/8" },
+  { detail: "claim", claim_ending: "the $4,820 one" },
+  { detail: "claim", claim_ending: "198 or 115" },
+  { detail: "claim", claim_ending: "the denied one" },
+  { detail: "claim", claim_ending: "the one that needs documents" },
+  { detail: "claim", claim_ending: "117" },
+  { detail: "documents", claim_ending: "the home one" },
+  { detail: "documents", claim_ending: "115" },
+  { detail: "documents", claim_ending: "198" },
+  { detail: "summary", claim_ending: "198" },
+  { claim_ending: "177" },
+  { claim_ending: 115 },
+];
+
+Deno.test("claims mock: every detail and claim_ending answers exactly as the server does", async () => {
+  let seq = 0;
+  for (const [name, phone, [m, d, y]] of STATUS_ACCOUNTS) {
+    const deps = {
+      store: createFakeStore(undefined, { now: () => NOW }),
+      fetch: (() => Promise.reject(new Error("no network"))) as typeof fetch,
+      env: { VAPI_ORG_ID: "org", VAPI_WEBHOOK_SECRET: "secret" },
+      now: () => NOW,
+      waitUntil: () => {},
+      log: () => {},
+    };
+    const tc: Omit<ToolCtx, "toolCallId"> = {
+      callKey: `battery-${name}`,
+      channel: "chat",
+      callerNumber: null,
+      isChat: true,
+      deps,
+    };
+    const run = (tool: string, args: Obj) => runTool({ id: `tc-${++seq}`, name: tool, args }, tc);
+    assertEquals((await run("lookup_customer", { phone })).code, "needs_dob");
+    assertEquals((await run("verify_identity", { dob_month: m, dob_day: d, dob_year: y })).code, "verified");
+    const state = stateAfter([
+      { tool: "lookup_customer", args: { phone }, code: "needs_dob" },
+      { tool: "verify_identity", args: { dob_month: m, dob_day: d, dob_year: y }, code: "verified" },
+    ]);
+    for (const args of STATUS_ARGS) {
+      const server = await run("get_claim_status", args);
+      const mock = await answer("get_claim_status", state, args);
+      assertEquals(
+        [mock.code, mock.message, mock.data ?? null],
+        [server.code, server.sentence, server.data ?? null],
+        `${name} ${JSON.stringify(args)}`,
+      );
+      assert(spokenWords(mock.message) <= MAX_TURN_WORDS, mock.message);
+    }
+  }
 });
 
 Deno.test("escalate mock: new row, callback merge, verified account target, channels down", async () => {
@@ -460,8 +548,18 @@ Deno.test("verify mock with an intent: straight into the claim, or the claims re
   assertEquals([file.code, file.message], ["verified", verifiedFileClaimSentence(plain)]);
   const status = await answer("verify_identity", found, { ...TOBIAS_FILE_VERIFY, intent: " Claim_Status " });
   const claims = await answer("get_claim_status", stateAfter([TOBIAS_LOOKUP, TOBIAS_VERIFY]), {});
-  assertEquals(status.message, verifiedStatusSentence(plain, claims.message));
+  assertEquals(status.message, verifiedStatusSentence("Thank you, Tobias, you're verified.", claims.message));
   assertEquals(status.data, { first_name: "Tobias", status_read: true, claims: claims.data?.claims });
+  assert(spokenWords(status.message) <= MAX_TURN_WORDS);
+  // a returning caller: "Welcome back." without the date, and still both claims in one turn
+  const returning = await answer("verify_identity", found, { ...TOBIAS_FILE_VERIFY, intent: "claim_status" }, {
+    persona: persona("returning"),
+  });
+  assertEquals(
+    returning.message,
+    verifiedStatusSentence("Thank you, Tobias, you're verified. Welcome back.", claims.message),
+  );
+  assert(spokenWords(returning.message) <= MAX_TURN_WORDS);
   // other, an unknown intent or none: the plain answer
   for (const intent of ["other", "something", undefined]) {
     assertEquals((await answer("verify_identity", found, { ...TOBIAS_VERIFY.args, intent })).message, plain);

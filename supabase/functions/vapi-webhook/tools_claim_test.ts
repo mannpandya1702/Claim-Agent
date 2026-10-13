@@ -5,8 +5,17 @@
 import { assert, assertEquals, assertFalse, assertStringIncludes } from "@std/assert";
 import { type Channel, CLAIM_DOCUMENTS } from "./enums.ts";
 import { createFakeStore, type FakeStore } from "./fake_store.ts";
-import { assertSpeakable, claimsSentence, MAX_SPOKEN_CHARS, sentenceFor } from "./speak.ts";
-import { runTool, runToolWithin } from "./tools.ts";
+import {
+  assertSpeakable,
+  claimDetailSentence,
+  claimsSentence,
+  documentsSentence,
+  MAX_SPOKEN_CHARS,
+  MAX_TURN_WORDS,
+  sentenceFor,
+  spokenWords,
+} from "./speak.ts";
+import { claimEndingKey, claimMatchesKey, runTool, runToolWithin } from "./tools.ts";
 import type { Claim, Deps, Env, ToolCtx, ToolResult } from "./types.ts";
 
 const CALL_KEY = "8d2e3f40-5b6c-4d7e-8f90-a1b2c3d4e5f6";
@@ -233,7 +242,8 @@ Deno.test("verify intent claim_status: the claims are read in the same call and 
       ],
     },
   });
-  assertStringIncludes(r.sentence, "You have two claims on file.");
+  assertStringIncludes(r.sentence, "You have two claims.");
+  assert(spokenWords(r.sentence) <= MAX_TURN_WORDS, `${spokenWords(r.sentence)} words`);
   // a get_claim_status of its own in the ledger, under the verify's toolCallId
   assertEquals(
     h.attempts().map((a) => `${a.tool_call_id}:${a.tool_name}:${a.code}`).slice(-2),
@@ -248,6 +258,32 @@ Deno.test("verify intent claim_status: the claims are read in the same call and 
   );
   assertEquals(again, r);
   assertEquals(h.attempts().length, 3);
+});
+
+Deno.test("verify intent claim_status for a returning caller: welcome back, without the date, then the summary", async () => {
+  const h = harness({ env: { PRIOR_CONTACTS_ENABLED: "true" } });
+  await h.store.upsertInteraction({
+    vapi_call_id: "prior-call-1",
+    customer_id: TOBIAS,
+    caller_name: "Tobias Halvorsen",
+    summary: "Asked about the home claim documents.",
+    sentiment: "neutral",
+    outcome: "resolved",
+    started_at: "2026-10-11T02:30:00Z",
+    ended_at: "2026-10-11T02:36:00Z",
+    analysis_status: "ok",
+  });
+  const opening = "Thank you, Tobias, you're verified. Welcome back.";
+  const r = await verifyTobias(h, { intent: "claim_status" });
+  assertEquals(
+    r.sentence,
+    `${opening} ${claimsSentence(tobiasClaims(h), TODAY, MAX_TURN_WORDS - spokenWords(opening))}`,
+  );
+  assert(!r.sentence.includes("I see you called"), r.sentence);
+  // both claims still fit the turn after the longer opening
+  assertStringIncludes(r.sentence, "one nine eight");
+  assertStringIncludes(r.sentence, "one one five");
+  assert(spokenWords(r.sentence) <= MAX_TURN_WORDS, `${spokenWords(r.sentence)} words`);
 });
 
 Deno.test("verify intent claim_status: no claims gives the no_claims sentence after the opening", async () => {
@@ -285,7 +321,7 @@ Deno.test("verify intent claim_status: a failed ledger claim still answers with 
   assertFalse(h.attempts().some((a) => a.tool_name === "get_claim_status"));
 });
 
-Deno.test("verify intent claim_status: a busy account still fits VAPI's limit after the opening", async () => {
+Deno.test("verify intent claim_status: a busy account still fits one turn after the opening", async () => {
   const h = harness();
   for (let i = 0; i < 12; i++) {
     h.store.claims.push({
@@ -304,8 +340,8 @@ Deno.test("verify intent claim_status: a busy account still fits VAPI's limit af
     });
   }
   const r = await verifyTobias(h, { intent: "claim_status" });
-  assert(r.sentence.startsWith("Thank you, Tobias, you're verified. You have fourteen claims on file."), r.sentence);
-  assert(r.sentence.length <= MAX_SPOKEN_CHARS, `${r.sentence.length} characters`);
+  assert(r.sentence.startsWith("Thank you, Tobias, you're verified. You have fourteen claims."), r.sentence);
+  assert(spokenWords(r.sentence) <= MAX_TURN_WORDS, `${spokenWords(r.sentence)} words`);
   assertStringIncludes(r.sentence, "more claims on file");
 });
 
@@ -320,6 +356,296 @@ Deno.test("verify intent: other, absent or unknown changes nothing; a failed ver
   const wrong = await h.run("verify_identity", { dob_month: 3, dob_day: 15, dob_year: 1986, intent: "claim_status" });
   assertEquals(wrong.code, "auth_failed");
   assertFalse(h.attempts().some((a) => a.tool_name === "get_claim_status"));
+});
+
+// ---------------------------------------------------------------------------------------------
+// get_claim_status {detail, claim_ending}: the details the summary leaves out, on request
+// ---------------------------------------------------------------------------------------------
+const claimNumbered = (h: Harness, number: string) => h.store.claims.find((c) => c.claim_number === number)!;
+
+Deno.test("get_claim_status detail documents: the list, the due date and how to send it", async () => {
+  const h = harness();
+  await verifyTobias(h);
+  const r = await h.run("get_claim_status", { detail: "documents" }, "tc_docs");
+  assertEquals(r, {
+    code: "claim_documents",
+    sentence: documentsSentence(tobiasClaims(h), TODAY),
+    data: { claims: [{ claim_number_last3: "198", status: "awaiting_documents" }] },
+  });
+  assertStringIncludes(r.sentence, "photos of the damage, a contractor estimate, and proof of ownership");
+  assert(spokenWords(r.sentence) <= MAX_TURN_WORDS);
+  assertEquals(h.attempts().at(-1)?.code, "claim_documents");
+  // read-only: a replay of the same toolCallId reads again and keeps one ledger row
+  assertEquals(await h.run("get_claim_status", { detail: "documents" }, "tc_docs"), r);
+  assertEquals(h.attempts().filter((a) => a.tool_call_id === "tc_docs").length, 1);
+});
+
+Deno.test("get_claim_status detail documents: a named claim narrows the list only to a claim awaiting documents", async () => {
+  const h = harness();
+  h.store.claims.push({
+    ...claimNumbered(h, "CLM-240198"),
+    id: crypto.randomUUID(),
+    claim_number: "CLM-240305",
+    claim_type: "auto",
+    documents_required: ["a police report"],
+    documents_due: "2026-10-30",
+    filed_on: "2026-10-02",
+  });
+  await verifyTobias(h);
+  const awaiting = tobiasClaims(h).filter((c) => c.status === "awaiting_documents");
+  const one = await h.run("get_claim_status", { detail: "documents", claim_ending: "305" });
+  assertEquals(one.sentence, documentsSentence([claimNumbered(h, "CLM-240305")], TODAY));
+  // the paid auto claim needs nothing, so naming it reads every claim that does
+  for (const claim_ending of ["115", "nope"]) {
+    const all = await h.run("get_claim_status", { detail: "documents", claim_ending });
+    assertEquals(all.sentence, documentsSentence(awaiting, TODAY), claim_ending);
+    assertEquals(all.data?.claims, [
+      { claim_number_last3: "198", status: "awaiting_documents" },
+      { claim_number_last3: "305", status: "awaiting_documents" },
+    ]);
+  }
+});
+
+Deno.test("get_claim_status detail documents: nothing to send", async () => {
+  const h = harness();
+  await verifyAs(h, "6025550102", [11, 2, 1979]); // Ronan: one claim, under review
+  assertEquals(await h.run("get_claim_status", { detail: "documents" }), {
+    code: "no_documents_needed",
+    sentence: "None of your claims needs documents right now. Is there anything else I can help with?",
+  });
+});
+
+Deno.test("get_claim_status detail claim: one claim by its ending, its type or as the only claim", async () => {
+  const h = harness();
+  await verifyTobias(h);
+  const paid = claimDetailSentence(claimNumbered(h, "CLM-240115"), TODAY);
+  for (
+    const claim_ending of [
+      "115",
+      "5",
+      "one one five",
+      "CLM-240115",
+      "ending in 115",
+      "ending in one one five",
+      "auto",
+      "the car one",
+      "auto 115",
+      "the paid one",
+      "the one paid October 8",
+      "the one they paid on 10/8",
+      115,
+    ]
+  ) {
+    const r = await h.run("get_claim_status", { detail: "claim", claim_ending });
+    assertEquals(r.code, "claim_detail", String(claim_ending));
+    assertEquals(r.sentence, paid, String(claim_ending));
+    assertEquals(r.data, { claims: [{ claim_number_last3: "115", status: "payment_issued" }] });
+  }
+  assertStringIncludes(paid, "was issued by direct deposit on October eighth. Your adjuster is Leona Fairbanks.");
+  // a claim awaiting documents: its documents, its due date and its adjuster
+  const home = await h.run("get_claim_status", { detail: "claim", claim_ending: "home" });
+  assertEquals(home.sentence, claimDetailSentence(claimNumbered(h, "CLM-240198"), TODAY));
+  assertStringIncludes(home.sentence, "by October twenty-fourth. Your adjuster is Leona Fairbanks.");
+  // a named claim with no detail given means that claim; an explicit summary stays the summary
+  assertEquals((await h.run("get_claim_status", { claim_ending: "198" })).code, "claim_detail");
+  assertEquals((await h.run("get_claim_status", { detail: "summary", claim_ending: "198" })).code, "ok");
+  assertEquals((await h.run("get_claim_status", { detail: "everything" })).code, "ok");
+
+  // Sloane's only claim needs no ending: the reason, the adjuster and how to appeal
+  const s = harness();
+  await verifyAs(s, "6025550103", [7, 21, 1992]);
+  const denied = await s.run("get_claim_status", { detail: "claim" });
+  assertEquals(denied.code, "claim_detail");
+  assertStringIncludes(denied.sentence, "was denied because the item class is not covered by the policy.");
+  assertStringIncludes(denied.sentence, "Your adjuster is Leona Fairbanks.");
+  assertStringIncludes(denied.sentence, "To appeal, send us a short letter within thirty days");
+  // an account's only claim is the one meant, whatever words came with it: a misheard ending or the
+  // wrong type gets that claim's details (which say its type and ending), never a question for digits
+  for (const claim_ending of ["117", "auto", "the home one", "the other one"]) {
+    assertEquals(await s.run("get_claim_status", { detail: "claim", claim_ending }), denied, claim_ending);
+  }
+  const r = harness();
+  await verifyAs(r, "6025550102", [11, 2, 1979]); // Ronan: one auto claim
+  const ronan = await r.run("get_claim_status", { detail: "claim", claim_ending: "home" });
+  assertEquals(ronan.code, "claim_detail");
+  assert(ronan.sentence.startsWith("Your auto claim ending in two one one is under review"), ronan.sentence);
+});
+
+Deno.test("get_claim_status detail claim: words that name no single claim are asked about", async () => {
+  const h = harness();
+  await verifyTobias(h);
+  const which =
+    "Which claim do you mean, your home claim ending in one nine eight or your auto claim ending in one one five?";
+  for (
+    const claim_ending of [undefined, "777", "boat", "198 or 115", "the 8th", "the $4,820 one", "home 115"]
+  ) {
+    const args = claim_ending === undefined ? { detail: "claim" } : { detail: "claim", claim_ending };
+    const r = await h.run("get_claim_status", args);
+    assertEquals(r.code, "claim_not_identified", JSON.stringify(args));
+    assertEquals(r.sentence, which, JSON.stringify(args));
+    assertEquals(r.data, {
+      claims: [
+        { claim_number_last3: "198", claim_type: "home", status: "awaiting_documents" },
+        { claim_number_last3: "115", claim_type: "auto", status: "payment_issued" },
+      ],
+    });
+  }
+  // two claims of the type named: only those two are offered
+  h.store.claims.push({ ...claimNumbered(h, "CLM-240115"), id: crypto.randomUUID(), claim_number: "CLM-240777" });
+  const autos = await h.run("get_claim_status", { detail: "claim", claim_ending: "auto" });
+  assertEquals(autos.sentence, "Which auto claim do you mean, the one ending in seven seven seven or one one five?");
+  // the ledger never counts the question as a status read
+  assertEquals(h.attempts().at(-1)?.code, "claim_not_identified");
+});
+
+Deno.test("get_claim_status detail claim: the claims the summary only counted are offered first", async () => {
+  const h = harness();
+  // a claim filed on an earlier call: the summary reads the documents and the payment, and counts it
+  h.store.claims.push({
+    ...claimNumbered(h, "CLM-240115"),
+    id: crypto.randomUUID(),
+    claim_number: "CLM-260472",
+    status: "received",
+    status_detail: null,
+    adjuster_name: null,
+    amount_approved: null,
+    filed_on: "2026-10-12",
+    updated_on: "2026-10-12",
+  });
+  await verifyTobias(h);
+  const summary = await h.run("get_claim_status", {});
+  assertStringIncludes(summary.sentence, "There is one more claim on file.");
+  assert(!summary.sentence.includes("four seven two"), summary.sentence);
+  const other = await h.run("get_claim_status", { detail: "claim" });
+  assertEquals(
+    other.sentence,
+    "Which claim do you mean, your auto claim ending in four seven two, your home claim ending in one nine eight, or your auto claim ending in one one five?",
+  );
+  // and the caller can name it now that they have heard its ending
+  const named = await h.run("get_claim_status", { detail: "claim", claim_ending: "472" });
+  assertEquals(named.code, "claim_detail");
+  assertStringIncludes(named.sentence, "ending in four seven two was received on October twelfth");
+
+  // five claims or more: four are offered by ending, never a question for digits the caller never heard
+  for (const n of ["301", "302"]) {
+    h.store.claims.push({
+      ...claimNumbered(h, "CLM-240115"),
+      id: crypto.randomUUID(),
+      claim_number: `CLM-260${n}`,
+      claim_type: "property",
+      status: "closed",
+      filed_on: "2026-01-01",
+    });
+  }
+  const five = await h.run("get_claim_status", { detail: "claim" });
+  assertEquals(five.code, "claim_not_identified");
+  assertEquals((five.data?.claims as unknown[]).length, 4);
+  assert(!/digits/.test(five.sentence), five.sentence);
+  assertStringIncludes(five.sentence, "your auto claim ending in four seven two");
+  assertStringIncludes(five.sentence, "your property claim ending in three zero two");
+});
+
+Deno.test("get_claim_status detail claim: two claims with the same ending are told apart by type", async () => {
+  const h = harness();
+  h.store.claims.push({
+    ...claimNumbered(h, "CLM-240115"),
+    id: crypto.randomUUID(),
+    claim_number: "CLM-250198",
+    claim_type: "property",
+    status: "denied",
+    status_detail: "The item class is not covered by the policy",
+    amount_approved: null,
+  });
+  await verifyTobias(h);
+  const r = await h.run("get_claim_status", { detail: "claim", claim_ending: "198" });
+  assertEquals(r.code, "claim_not_identified");
+  assertEquals(
+    r.sentence,
+    "Which claim do you mean, your home claim ending in one nine eight or your property claim ending in one nine eight?",
+  );
+  // the answer names the type: that claim, not the same question again
+  for (const claim_ending of ["property 198", "the property one ending in 198", "property"]) {
+    const one = await h.run("get_claim_status", { detail: "claim", claim_ending });
+    assertEquals(one.code, "claim_detail", claim_ending);
+    assertStringIncludes(one.sentence, "Your property claim ending in one nine eight was denied because", claim_ending);
+  }
+  assertEquals(
+    (await h.run("get_claim_status", { detail: "claim", claim_ending: "home 198" })).sentence,
+    claimDetailSentence(claimNumbered(h, "CLM-240198"), TODAY),
+  );
+  // the same type and ending as well: told apart by where they stand, and named by it
+  claimNumbered(h, "CLM-250198").claim_type = "home";
+  const twin = await h.run("get_claim_status", { detail: "claim", claim_ending: "home 198" });
+  assertEquals(
+    twin.sentence,
+    "Which home claim do you mean, the one ending in one nine eight that needs documents or the one ending in one nine eight that was denied?",
+  );
+  const byStatus = await h.run("get_claim_status", { detail: "claim", claim_ending: "the denied one" });
+  assertEquals(byStatus.code, "claim_detail");
+  assertStringIncludes(byStatus.sentence, "was denied because");
+});
+
+Deno.test("get_claim_status details: not verified is refused as before, and no claims is no_claims", async () => {
+  const h = harness();
+  const r = await h.run("get_claim_status", { detail: "claim", claim_ending: "115" });
+  assertEquals([r.code, r.data], ["not_verified", { level: "none" }]);
+  const ines = harness();
+  await verifyAs(ines, "6025550105", [5, 9, 1990]);
+  for (const detail of ["summary", "documents", "claim"]) {
+    assertEquals((await ines.run("get_claim_status", { detail })).code, "no_claims", detail);
+  }
+  // a placeholder in the arguments is refused before anything is read
+  assertEquals((await h.run("get_claim_status", { detail: "claim", claim_ending: "{{claim}}" })).code, "bad_args");
+});
+
+Deno.test("claimEndingKey reads digits, digit words, claim types and statuses, and nothing else", () => {
+  assertEquals(claimEndingKey("198"), "198");
+  assertEquals(claimEndingKey(198), "198");
+  assertEquals(claimEndingKey("ending in 1 9 8"), "198");
+  assertEquals(claimEndingKey("one nine eight"), "198");
+  assertEquals(claimEndingKey("ending in one nine eight"), "198");
+  assertEquals(claimEndingKey("the one one five"), "115");
+  assertEquals(claimEndingKey("ending in five"), "5");
+  assertEquals(claimEndingKey("Oh nine oh"), "090");
+  assertEquals(claimEndingKey("CLM-240198"), "240198");
+  assertEquals(claimEndingKey("CLM-240198, ending 198"), "240198");
+  assertEquals(claimEndingKey("Home"), "home");
+  assertEquals(claimEndingKey("the house claim"), "home");
+  assertEquals(claimEndingKey("my car"), "auto");
+  // a type and an ending together narrow each other
+  assertEquals(claimEndingKey("home 198"), "home 198");
+  assertEquals(claimEndingKey("the home one ending in one nine eight"), "home 198");
+  // where a claim stands names it too
+  assertEquals(claimEndingKey("the denied one"), "denied");
+  assertEquals(claimEndingKey("the one that needs documents"), "awaiting_documents");
+  assertEquals(claimEndingKey("the approved one"), "approved");
+  // "one" next to other words is a word, not a digit
+  assertEquals(claimEndingKey("the home one"), "home");
+  // dates and amounts are not endings; two endings, or two types, name neither
+  assertEquals(claimEndingKey("the one paid October 8"), "payment_issued");
+  assertEquals(claimEndingKey("the one from Oct. 8th, 2026"), "");
+  assertEquals(claimEndingKey("the one from 10/8"), "");
+  assertEquals(claimEndingKey("the 8th"), "");
+  assertEquals(claimEndingKey("the $4,820 one"), "");
+  assertEquals(claimEndingKey("the 4820 dollars one"), "");
+  assertEquals(claimEndingKey("198 or 115"), "");
+  assertEquals(claimEndingKey("one nine eight or one one five"), "");
+  assertEquals(claimEndingKey("auto or home"), "");
+  assertEquals(claimEndingKey("home, 198 or 199"), "home");
+  for (const v of ["", "the other one", "two claims", null, undefined, {}, true]) {
+    assertEquals(claimEndingKey(v), "", String(v));
+  }
+});
+
+Deno.test("claimMatchesKey: every part of the key must fit the claim", () => {
+  assert(claimMatchesKey("240198", "home", "awaiting_documents", "198"));
+  assert(claimMatchesKey("240198", "home", "awaiting_documents", "home 198"));
+  assertFalse(claimMatchesKey("240198", "home", "awaiting_documents", "auto 198"));
+  assertFalse(claimMatchesKey("240198", "home", "awaiting_documents", "115"));
+  assert(claimMatchesKey("240115", "auto", "payment_issued", "approved"));
+  assert(claimMatchesKey("240115", "auto", "payment_issued", "payment_issued"));
+  assertFalse(claimMatchesKey("240115", "auto", "approved", "payment_issued"));
+  assertFalse(claimMatchesKey("240115", "auto", "payment_issued", ""));
 });
 
 // ---------------------------------------------------------------------------------------------

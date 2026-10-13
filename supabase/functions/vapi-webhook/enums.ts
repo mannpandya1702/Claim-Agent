@@ -29,6 +29,12 @@ export type ClaimIntakeKind = typeof CLAIM_INTAKE_KINDS[number];
 export const VERIFY_INTENTS = ["claim_status", "file_claim", "other"] as const;
 export type VerifyIntent = typeof VERIFY_INTENTS[number];
 
+// get_claim_status's optional detail: summary (the default) says where each claim stands in a few
+// words; documents reads what the claims awaiting documents need and how to send them; claim tells
+// the whole story of the one claim claim_ending names.
+export const CLAIM_STATUS_DETAILS = ["summary", "documents", "claim"] as const;
+export type ClaimStatusDetail = typeof CLAIM_STATUS_DETAILS[number];
+
 export const CLAIM_STATUSES = [
   "received",
   "under_review",
@@ -193,6 +199,10 @@ export const CODES = [
   "ok",
   "no_claims",
   "not_verified",
+  "claim_documents",
+  "no_documents_needed",
+  "claim_detail",
+  "claim_not_identified",
   // escalate
   "rep_queued",
   "rep_queued_no_number",
@@ -237,6 +247,11 @@ export const CODES = [
   "claim_intake_saved",
 ] as const;
 export type Code = typeof CODES[number];
+
+// get_claim_status answers that read the verified caller's claims (verify_identity's chained read is
+// recorded as one of these too): the post-call outcome and call reason count any of them as a status
+// read. claim_not_identified asked which claim and read nothing.
+export const STATUS_READ_CODES = ["ok", "no_claims", "claim_documents", "no_documents_needed", "claim_detail"] as const;
 
 export const CHANNELS = ["webCall", "inboundPhoneCall", "outboundPhoneCall", "chat", "unknown"] as const;
 export type Channel = typeof CHANNELS[number];

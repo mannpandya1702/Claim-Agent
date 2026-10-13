@@ -25,7 +25,12 @@ const OFFER_BEFORE_RE = /\b(can|could|may|might|would you|do you want|if you)\b/
 // callback request: an emergency page asks nobody to call the caller back.
 const BACKED_ALERT_STATUSES: ReadonlySet<string> = new Set(["sent", "skipped"]);
 
-const STATUS_WORDS_RE = /claim ending in|was approved|payment of|under review|was denied|was received on/i;
+// The claims summary, the documents answer and one claim's details, in the tools' own wording: a claim
+// by its ending ("claims, ending in" when several are read together) or a status said outright. A
+// phrase the clause puts after "whether" or "if" is a refusal ("I can't share whether it was paid
+// until he's verified"), not a read.
+const STATUS_WORDS_RE =
+  /(?<!\b(?:whether|if)\b[^.,;:!?]*)(?:claims?,? ending in|was approved|was paid(?:,| on )|payment of|under review|was denied|were (?:both )?received|was received on|needs documents from you)/i;
 
 const EMAIL_PROMISE_RE = /(I've|I have) (emailed|sent (that|it|the))/i;
 // What the caller is told was emailed is a send_info_email topic or the confirmation of a claim taken

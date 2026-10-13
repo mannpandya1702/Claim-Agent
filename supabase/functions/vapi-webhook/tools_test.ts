@@ -127,15 +127,13 @@ Deno.test("happy path: lookup -> needs_dob -> verify -> verified -> get_claim_st
 
   const status = await h.run("get_claim_status", {});
   assertEquals(status.code, "ok");
-  for (
-    const part of [
-      "You have two claims on file.",
-      "Your auto claim ending in one one five was approved, and a payment of four thousand eight hundred twenty dollars was issued on October eighth.",
-      "contractor estimate",
-      "Please send them by October twenty-fourth.",
-      "Do you have any questions about either claim?",
-    ]
-  ) assertStringIncludes(status.sentence, part);
+  // the short summary: where each claim stands, money and dates in words, the details on request
+  assertEquals(
+    status.sentence,
+    "You have two claims. Your home claim ending in one nine eight needs documents from you by October twenty-fourth. " +
+      "Your auto claim ending in one one five was paid, four thousand eight hundred twenty dollars on October eighth. " +
+      "Would you like me to go over what's needed, or email you the list?",
+  );
   assertEquals(status.data, {
     claims: [
       { claim_number_last3: "115", status: "payment_issued" },

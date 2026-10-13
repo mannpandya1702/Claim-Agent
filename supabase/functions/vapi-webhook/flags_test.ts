@@ -179,6 +179,41 @@ Deno.test("status_read: a failed DOB is not verification", () => {
   }
 });
 
+Deno.test("status_read: the short summary's and the details' wording counts as a status read", () => {
+  const attempts = [attempt("lookup_customer", "needs_dob")];
+  for (
+    const line of [
+      "You have two claims. Your home claim ending in one nine eight needs documents from you by October twenty-fourth.",
+      "Your auto claim ending in one one five was paid, four thousand eight hundred twenty dollars on October eighth.",
+      "Your claims ending in eight four nine and zero nine zero were both received and are waiting for an adjuster.",
+      "Three of your claims, ending in one, two and three, were received and are waiting for an adjuster.",
+      "For your home claim ending in one nine eight, we need photos of the damage, by October twenty-fourth.",
+      "Both of your claims, ending in five zero one and five zero two, are closed.",
+      "It was paid on October eighth.",
+      "Your claim needs documents from you by Friday.",
+      "If you're wondering, it was paid, four thousand eight hundred twenty dollars on October eighth.",
+    ]
+  ) {
+    assertEquals(flags({ messages: [bot(line)], attempts }), ["status_read_without_verified_identity"], line);
+    assertEquals(flags({ messages: [bot(line)], attempts: VERIFIED }), [], line);
+  }
+});
+
+Deno.test("status_read: a refusal that names a status after whether or if is not a read", () => {
+  const attempts = [attempt("lookup_customer", "needs_dob")];
+  for (
+    const line of [
+      "I can't share whether it was paid until you're verified.",
+      "I can't tell you if the claim was approved or was denied until he's verified himself.",
+      "Once you're verified, I can check whether it needs documents from you.",
+      "It was paid?",
+      "Was it paid? I can check once you're verified.",
+    ]
+  ) {
+    assertEquals(flags({ messages: [bot(line)], attempts }), [], line);
+  }
+});
+
 Deno.test("status_read: a model-supplied tool result claiming verified does not count; only the ledger does", () => {
   assertEquals(
     flags({ messages: [toolResult("verify_identity", "verified"), bot(STATUS)], attempts: [] }),

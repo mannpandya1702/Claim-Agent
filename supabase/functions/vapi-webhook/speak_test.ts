@@ -1,10 +1,14 @@
 import { assert, assertEquals, assertNotEquals, assertStringIncludes, assertThrows } from "@std/assert";
-import { CLAIM_STATUSES, type Code, CODES, MAIN_LINE_SPOKEN } from "./enums.ts";
+import { CLAIM_DOCUMENTS, CLAIM_STATUSES, type Code, CODES, MAIN_LINE_SPOKEN } from "./enums.ts";
 import type { Claim } from "./types.ts";
 import {
   assertSpeakable,
+  byReadingPriority,
+  claimDetailSentence,
   claimsSentence,
-  MAX_SPOKEN_CHARS,
+  claimsUnread,
+  documentsSentence,
+  MAX_TURN_WORDS,
   numberToWords,
   sentenceFor,
   speakDate,
@@ -14,6 +18,7 @@ import {
   speakMoney,
   speakPhone,
   spokenName,
+  spokenWords,
   verifiedFileClaimSentence,
   verifiedStatusSentence,
   withoutTrailingQuestion,
@@ -105,6 +110,23 @@ const VARIANTS: [Code, Record<string, unknown> | undefined][] = [
   ["not_verified", { level: "phone_found" }],
   ["not_verified", { level: "locked" }],
   ["ok", { claims: byNumber("CLM-240115"), refDate: TODAY }],
+  ["ok", { claims: SEED_CLAIMS, refDate: TODAY }],
+  ["claim_documents", { claims: SEED_CLAIMS, refDate: TODAY }],
+  ["claim_detail", { claims: byNumber("CLM-240177"), refDate: TODAY }],
+  ["claim_detail", { claims: byNumber("CLM-240198"), refDate: TODAY }],
+  ["claim_not_identified", { claims: [{ claim_number_last3: "198" }, { claim_number_last3: "115" }] }],
+  ["claim_not_identified", {
+    claims: [
+      { claim_number_last3: "198", claim_type: "home", status: "awaiting_documents" },
+      { claim_number_last3: "115", claim_type: "auto", status: "payment_issued" },
+    ],
+  }],
+  ["claim_not_identified", {
+    claims: [
+      { claim_number_last3: "198", claim_type: "home", status: "awaiting_documents" },
+      { claim_number_last3: "198", claim_type: "home", status: "denied" },
+    ],
+  }],
   ["rep_queued", { target: "account" }],
   ["rep_queued", { target: "given", digits: "6025550101" }],
   ["rep_queued", { target: "caller_id" }],
@@ -239,151 +261,514 @@ Deno.test("system_error never sounds like not_found", () => {
   assert(!/can't find|not finding/i.test(sentenceFor("system_error")));
 });
 
-Deno.test("claimsSentence over the demo seed reads every fact in words", () => {
-  const tobias = claimsSentence(SEED_CLAIMS.filter((c) => c.customer_id === TOBIAS), TODAY);
-  for (
-    const part of [
-      "four thousand eight hundred twenty dollars",
-      "October eighth",
-      "contractor estimate",
-      "October twenty-fourth",
-    ]
-  ) {
-    assertStringIncludes(tobias, part);
+// ---------------------------------------------------------------------------------------------
+// get_claim_status: the short summary, then the details on request.
+// ---------------------------------------------------------------------------------------------
+const TOBIAS_SUMMARY = "You have two claims. " +
+  "Your home claim ending in one nine eight needs documents from you by October twenty-fourth. " +
+  "Your auto claim ending in one one five was paid, four thousand eight hundred twenty dollars on October eighth. " +
+  "Would you like me to go over what's needed, or email you the list?";
+const TOBIAS_DOCUMENTS =
+  "For your home claim ending in one nine eight, we need photos of the damage, a contractor estimate, and proof of ownership for the damaged items, by October twenty-fourth. " +
+  "You can upload them at observeinsurance dot com slash claims, or email them to claims docs at observeinsurance dot com. " +
+  "Would you like me to email you this list too?";
+const tobiasClaims = () => SEED_CLAIMS.filter((c) => c.customer_id === TOBIAS);
+const words = (s: string) => s.trim().split(/\s+/).length;
+let seq = 0;
+/** A claim like the seeded ones, with its own number and overrides. */
+const claim = (over: Partial<Claim>): Claim => ({
+  ...SEED_CLAIMS[2],
+  id: `c-gen-${++seq}`,
+  claim_number: `CLM-25${String(seq).padStart(4, "0")}`,
+  ...over,
+});
+
+Deno.test("the claims summary for the demo seed: one short clause per claim, in one turn", () => {
+  const tobias = claimsSentence(tobiasClaims(), TODAY);
+  assertEquals(tobias, TOBIAS_SUMMARY);
+  assertEquals(spokenWords(tobias), 52);
+  // the list, the instructions and the adjuster wait for a detail
+  for (const later of ["contractor estimate", "upload", "Leona", "direct deposit"]) {
+    assert(!tobias.includes(later), later);
   }
   assertEquals(
-    tobias,
-    "You have two claims on file. " +
-      "Your auto claim ending in one one five was approved, and a payment of four thousand eight hundred twenty dollars was issued on October eighth. " +
-      "Your home claim ending in one nine eight needs a few documents from you before review can continue: photos of the damage, a contractor estimate, and proof of ownership for the damaged items. " +
-      "Please send them by October twenty-fourth. You can upload them at observeinsurance dot com slash claims, email them to claims docs at observeinsurance dot com, or mail them to our claims department, and please include your claim number. " +
-      "Do you have any questions about either claim?",
-  );
-  assertEquals(
     claimsSentence(byNumber("CLM-240211"), TODAY),
-    "Your auto claim ending in two one one is under review with your adjuster, Bertrand Wexley. A decision is expected within five business days. Do you have any questions about that claim?",
+    "Your auto claim ending in two one one is under review with your adjuster, Bertrand Wexley. Do you have any questions about it?",
   );
   assertEquals(
     claimsSentence(byNumber("CLM-240177"), TODAY),
-    "Your property claim ending in one seven seven was denied, and I'm sorry about that. The reason given is that the item class is not covered by the policy. You have thirty days to appeal. Do you have any questions about that claim?",
+    "Your property claim ending in one seven seven was denied, I'm sorry to say. Would you like to hear the reason and how to appeal?",
   );
   assertEquals(
     claimsSentence(byNumber("CLM-240230"), TODAY),
-    "Your home claim ending in two three zero was received on October tenth and is waiting for an adjuster to be assigned. Do you have any questions about that claim?",
+    "Your home claim ending in two three zero was received on October tenth and is waiting for an adjuster. Do you have any questions about it?",
   );
-  assertStringIncludes(claimsSentence(SEED_CLAIMS, TODAY), "You have five claims on file. ");
-  assertStringIncludes(claimsSentence(SEED_CLAIMS, TODAY), "Do you have any questions about any of them?");
   assertThrows(() => claimsSentence([], TODAY));
+  assertEquals(sentenceFor("ok", { claims: tobiasClaims(), refDate: TODAY }), TOBIAS_SUMMARY);
 });
 
-Deno.test("every claim status has a speakable sentence", () => {
-  const base = SEED_CLAIMS[0];
-  for (const status of CLAIM_STATUSES) {
-    const s = claimsSentence([{ ...base, status }], TODAY);
-    assertSpeakable(s);
-    assertStringIncludes(s, "Your auto claim ending in one one five ");
+Deno.test("the chained read fits one turn after the verified opening, with or without welcome back", () => {
+  const plain = "Thank you, Tobias, you're verified.";
+  const back = "Thank you, Tobias, you're verified. Welcome back.";
+  for (const opening of [plain, back]) {
+    const s = verifiedStatusSentence(
+      opening,
+      claimsSentence(tobiasClaims(), TODAY, MAX_TURN_WORDS - spokenWords(opening)),
+    );
+    assertEquals(s, `${opening} ${TOBIAS_SUMMARY}`);
+    assert(spokenWords(s) <= MAX_TURN_WORDS, `${spokenWords(s)} words`);
   }
+  assertEquals(MAX_TURN_WORDS, 60);
+});
+
+Deno.test("the summary clause for every status", () => {
+  const base = byNumber("CLM-240115")[0];
+  const one = (over: Partial<Claim>) => claimsSentence([{ ...base, ...over }], TODAY);
+  const it = "Do you have any questions about it?";
+  const head = "Your auto claim ending in one one five";
   assertEquals(
-    claimsSentence([{ ...base, status: "approved" }], TODAY),
-    "Your auto claim ending in one one five was approved for four thousand eight hundred twenty dollars. Do you have any questions about that claim?",
+    one({ status: "received" }),
+    `${head} was received on September second and is waiting for an adjuster. ${it}`,
   );
+  assertEquals(one({ status: "under_review" }), `${head} is under review with your adjuster, Leona Fairbanks. ${it}`);
+  assertEquals(one({ status: "under_review", adjuster_name: null }), `${head} is under review. ${it}`);
+  assertEquals(
+    one({ status: "awaiting_documents", documents_due: "2026-10-30" }),
+    `${head} needs documents from you by October thirtieth. Would you like me to go over what's needed, or email you the list?`,
+  );
+  assertStringIncludes(one({ status: "awaiting_documents", documents_due: null }), "needs documents from you. Would");
+  assertEquals(
+    one({ status: "approved" }),
+    `${head} was approved for four thousand eight hundred twenty dollars. ${it}`,
+  );
+  assertEquals(one({ status: "approved", amount_approved: null }), `${head} was approved. ${it}`);
+  assertEquals(
+    one({ status: "payment_issued" }),
+    `${head} was paid, four thousand eight hundred twenty dollars on October eighth. ${it}`,
+  );
+  assertEquals(one({ status: "payment_issued", amount_approved: null }), `${head} was paid on October eighth. ${it}`);
+  assertEquals(
+    one({ status: "denied" }),
+    `${head} was denied, I'm sorry to say. Would you like to hear the reason and how to appeal?`,
+  );
+  assertEquals(one({ status: "closed" }), `${head} is closed. ${it}`);
+  // a date outside this year says the year
   assertStringIncludes(
-    claimsSentence([{ ...base, status: "approved", amount_approved: null }], TODAY),
-    "was approved. Do",
+    one({ status: "received", filed_on: "2025-12-30" }),
+    "was received on December thirtieth, twenty twenty five and is waiting",
   );
-  assertStringIncludes(claimsSentence([{ ...base, status: "closed" }], TODAY), "is closed.");
+  for (const status of CLAIM_STATUSES) assertSpeakable(one({ status }));
+  assertThrows(() => one({ status: "lost" as Claim["status"] }));
 });
 
-Deno.test("the documents sentence carries the list, the due date and the submission instructions", () => {
-  const docs = byNumber("CLM-240198")[0];
-  const s = claimsSentence([docs], TODAY);
-  assertStringIncludes(s, "photos of the damage, a contractor estimate, and proof of ownership for the damaged items.");
-  assertStringIncludes(s, "Please send them by October twenty-fourth.");
-  assertStringIncludes(s, "upload them at observeinsurance dot com slash claims");
-  assertStringIncludes(s, "email them to claims docs at observeinsurance dot com");
-  assertStringIncludes(s, "mail them to our claims department, and please include your claim number.");
-  assertStringIncludes(
-    claimsSentence([{ ...docs, documents_required: ["a police report", "photos"] }], TODAY),
-    ": a police report and photos.",
+Deno.test("claims that read the same are read together", () => {
+  const received = (n: string, filed: string) =>
+    claim({ claim_number: `CLM-24${n}`, status: "received", adjuster_name: null, filed_on: filed });
+  const pair = [received("1090", "2026-10-02"), received("0849", "2026-10-05")];
+  // a group that is every claim on the account says how many there are, so there is no count before it
+  assertEquals(
+    claimsSentence(pair, TODAY),
+    "Both of your claims, ending in eight four nine and zero nine zero, were received and are waiting for an adjuster. Do you have any questions about either one?",
   );
-  const bare = claimsSentence([{ ...docs, documents_required: [], documents_due: null }], TODAY);
-  assertStringIncludes(bare, "before review can continue. You can upload");
+  const three = [...pair, received("0311", "2026-10-07")];
+  assertEquals(
+    claimsSentence(three, TODAY),
+    "All three of your claims, ending in three one one, eight four nine, and zero nine zero, were received and are waiting for an adjuster. Do you have any questions about any of them?",
+  );
+  const docs = byNumber("CLM-240198")[0];
+  assertEquals(
+    claimsSentence([...three, docs], TODAY),
+    "You have four claims. Your home claim ending in one nine eight needs documents from you by October twenty-fourth. " +
+      "Three of your claims, ending in three one one, eight four nine, and zero nine zero, were received and are waiting for an adjuster. " +
+      "Would you like me to go over what's needed, or email you the list?",
+  );
+  // a pair that is not every claim keeps the count and says "both"
+  assertEquals(
+    claimsSentence([...pair, docs], TODAY),
+    "You have three claims. Your home claim ending in one nine eight needs documents from you by October twenty-fourth. " +
+      "Your claims ending in eight four nine and zero nine zero were both received and are waiting for an adjuster. " +
+      "Would you like me to go over what's needed, or email you the list?",
+  );
+  // denials read together, so the summary says it is sorry once (rule 16)
+  const denied = byNumber("CLM-240177")[0];
+  const deniedToo = { ...denied, id: "c-178", claim_number: "CLM-240178", filed_on: "2026-09-20" };
+  assertEquals(
+    claimsSentence([denied, deniedToo, docs], TODAY),
+    "You have three claims. Your home claim ending in one nine eight needs documents from you by October twenty-fourth. " +
+      "Your claims ending in one seven eight and one seven seven were both denied, I'm sorry to say. " +
+      "Would you like me to go over what's needed, or email you the list?",
+  );
+  assertEquals(
+    claimsSentence([denied, deniedToo], TODAY),
+    "Both of your claims, ending in one seven eight and one seven seven, were denied, I'm sorry to say. Would you like to hear the reason and how to appeal?",
+  );
+  // a denial that cannot be grouped (no ending to say) is read on its own, without a second apology
+  const twice = claimsSentence([denied, { ...deniedToo, claim_number: "X" }], TODAY);
+  assertEquals(twice.match(/sorry/g)?.length, 1, twice);
+  assertStringIncludes(twice, "Your property claim was denied, I'm sorry to say. Your property claim ending in");
+  assertStringIncludes(twice, "one seven seven was denied. Would you like");
+  // under review without an adjuster, and closed, read together; an adjuster's name keeps a claim on its own
+  const review = (n: string, adjuster: string | null) =>
+    claim({ claim_number: `CLM-24${n}`, status: "under_review", adjuster_name: adjuster });
+  assertStringIncludes(
+    claimsSentence([review("0101", null), review("0202", null)], TODAY),
+    "Both of your claims, ending in two zero two and one zero one, are under review.",
+  );
+  assertStringIncludes(
+    claimsSentence([review("0101", null), review("0202", null), docs], TODAY),
+    "Your claims ending in two zero two and one zero one are both under review.",
+  );
+  const named = claimsSentence([review("0101", "Bertrand Wexley"), review("0202", null)], TODAY);
+  assertStringIncludes(named, "ending in one zero one is under review with your adjuster, Bertrand Wexley.");
+  assertStringIncludes(named, "ending in two zero two is under review.");
+  assertStringIncludes(
+    claimsSentence([claim({ status: "closed" }), claim({ status: "closed" }), docs], TODAY),
+    "are both closed.",
+  );
+  assertEquals(
+    claimsSentence([
+      claim({ status: "closed", claim_number: "CLM-240501" }),
+      claim({ status: "closed", claim_number: "CLM-240502" }),
+    ], TODAY),
+    "Both of your claims, ending in five zero two and five zero one, are closed. Do you have any questions about either one?",
+  );
+  // a claim with no ending to say is never folded into a group it cannot be told apart in
+  const bare = claimsSentence([received("1090", "2026-10-02"), {
+    ...received("0849", "2026-10-05"),
+    claim_number: "X",
+  }], TODAY);
+  assertStringIncludes(bare, "Your auto claim was received on October fifth");
 });
 
-Deno.test("several claims awaiting documents hear the instructions once, after the last of them", () => {
+Deno.test("reading order: what needs the caller first, then money, then claims in progress, newest first", () => {
+  const claims = [
+    claim({ status: "closed", filed_on: "2026-10-11" }),
+    claim({ status: "received", adjuster_name: null, filed_on: "2026-10-10" }),
+    claim({ status: "approved", amount_approved: null, filed_on: "2026-09-01" }),
+    claim({ status: "denied", filed_on: "2026-08-01" }),
+    claim({ status: "awaiting_documents", documents_due: null, filed_on: "2026-07-01" }),
+  ];
+  const s = claimsSentence(claims, TODAY, 500);
+  const at = (part: string) => s.indexOf(part);
+  assert(at("needs documents") < at("was denied"), s);
+  assert(at("was denied") < at("was approved"), s);
+  assert(at("was approved") < at("was received"), s);
+  // four clauses at most; the fifth claim is counted, not dropped
+  assert(!s.includes("is closed"), s);
+  assertStringIncludes(s, "There is one more claim on file. Would you like me to go over what's needed");
+  // within a status the newest claim is read first
+  const older = claim({
+    status: "approved",
+    amount_approved: null,
+    filed_on: "2026-01-01",
+    claim_number: "CLM-240111",
+  });
+  const newer = claim({
+    status: "approved",
+    amount_approved: null,
+    filed_on: "2026-02-01",
+    claim_number: "CLM-240222",
+  });
+  const pair = claimsSentence([older, newer], TODAY);
+  assert(pair.indexOf("two two two") < pair.indexOf("one one one"), pair);
+  assertEquals(byReadingPriority(older, newer), 1);
+});
+
+Deno.test("claims awaiting documents are read earliest due date first, a claim with no due date last", () => {
+  const due = (n: string, documents_due: string | null, filed_on: string) =>
+    claim({ claim_number: `CLM-240${n}`, status: "awaiting_documents", documents_due, filed_on });
+  // 305 was filed later, but 198's documents are due first
+  const c198 = due("198", "2026-10-24", "2026-09-28");
+  const c305 = due("305", "2026-10-30", "2026-10-02");
+  const c306 = due("306", "2026-11-02", "2026-10-05");
+  const open = due("307", null, "2026-10-09");
+  assertEquals([c305, c198].sort(byReadingPriority), [c198, c305]);
+  assertEquals([open, c306, c305, c198].sort(byReadingPriority), [c198, c305, c306, open]);
+  // two: the summary reads the earlier deadline first
+  const two = claimsSentence([c305, c198], TODAY);
+  assert(two.indexOf("one nine eight") < two.indexOf("three zero five"), two);
+  // three: the one only counted is the latest deadline, never the earliest
+  const three = claimsSentence([c306, c305, c198], TODAY);
+  assertEquals(
+    three,
+    "You have three claims. Your auto claim ending in one nine eight needs documents from you by October twenty-fourth. " +
+      "Your auto claim ending in three zero five needs documents from you by October thirtieth. " +
+      "There is one more claim on file. Would you like me to go over what's needed, or email you the list?",
+  );
+  assertEquals(claimsUnread([c306, c305, c198], TODAY), [c306]);
+  assertEquals(claimsUnread(tobiasClaims(), TODAY), []);
+  // the documents answer gives the earliest deadline its line, and the next its due date
+  const docs = { ...byNumber("CLM-240198")[0] };
+  const police = { ...c305, documents_required: ["a police report"] };
+  assertEquals(
+    documentsSentence([police, docs], TODAY),
+    "For your home claim ending in one nine eight, we need a few documents, by October twenty-fourth. " +
+      "Your auto claim ending in three zero five needs documents by October thirtieth. " +
+      "You can upload them at observeinsurance dot com slash claims, or email them to claims docs at observeinsurance dot com. " +
+      "Would you like me to email you the full list?",
+  );
+  const s = documentsSentence([c306, c305, docs], TODAY);
+  assert(s.startsWith("For your home claim ending in one nine eight,"), s);
+  assertStringIncludes(s, "by October twenty-fourth. Two more claims need documents too.");
+});
+
+Deno.test("the summary stays within the words it is given; what does not fit is counted", () => {
+  const many = Array.from(
+    { length: 6 },
+    (_, i) =>
+      claim({
+        status: "awaiting_documents",
+        filed_on: `2026-09-${String(10 + i).padStart(2, "0")}`,
+        documents_due: "2026-10-30",
+      }),
+  );
+  const s = claimsSentence(many, TODAY);
+  assert(spokenWords(s) <= MAX_TURN_WORDS, `${spokenWords(s)} words`);
+  assert(s.startsWith("You have six claims. "), s);
+  assertStringIncludes(s, "more claims on file.");
+  const tight = claimsSentence(many, TODAY, 40);
+  assert(spokenWords(tight) <= 40, `${spokenWords(tight)} words`);
+  assert(spokenWords(tight) < spokenWords(s));
+  // never fewer than one clause, however small the budget
+  assertStringIncludes(claimsSentence(many, TODAY, 1), "There are five more claims on file.");
+});
+
+// The longest realistic data: a three-word adjuster's name, six-figure amounts with cents, dates in
+// another year (which add the year), a long note, and the longest seeded document list.
+const WORST: Partial<Claim> = {
+  claim_type: "property",
+  adjuster_name: "Maximiliana Rosalind Featherstonehaugh",
+  amount_approved: 123456.78,
+  filed_on: "2025-12-27",
+  updated_on: "2025-12-28",
+  documents_due: "2025-12-29",
+  documents_required: [...CLAIM_DOCUMENTS.home],
+  status_detail:
+    "The adjuster is reviewing the repair estimates against the photos and the policy limits, and will call you once the inspection report comes back from the field team",
+};
+
+Deno.test("every mix of up to four claims fits one turn, and so does the chained read of up to three", () => {
+  const opening = "Thank you, Mary Ann, you're verified. Welcome back.";
+  const mixes = (n: number): Claim["status"][][] =>
+    n === 0 ? [[]] : mixes(n - 1).flatMap((m) => CLAIM_STATUSES.map((s) => [...m, s]));
+  let checked = 0;
+  for (let n = 1; n <= 4; n++) {
+    for (const mix of mixes(n)) {
+      const claims = mix.map((status, i) => claim({ ...WORST, status, claim_number: `CLM-2${i}9999` }));
+      const s = claimsSentence(claims, TODAY);
+      assert(spokenWords(s) <= MAX_TURN_WORDS, `${mix.join(",")}: ${spokenWords(s)} words: ${s}`);
+      assertEquals(s.split("?").length - 1, 1, s);
+      if (n <= 3) {
+        const chained = verifiedStatusSentence(opening, claimsSentence(claims, TODAY, MAX_TURN_WORDS - words(opening)));
+        assert(spokenWords(chained) <= MAX_TURN_WORDS, `chained ${mix.join(",")}: ${spokenWords(chained)} words`);
+      }
+      checked++;
+    }
+  }
+  assertEquals(checked, 7 + 49 + 343 + 2401);
+});
+
+Deno.test("claim_documents: the list, the due date and how to send it, in one turn", () => {
+  assertEquals(documentsSentence(tobiasClaims(), TODAY), TOBIAS_DOCUMENTS);
+  assertEquals(spokenWords(TOBIAS_DOCUMENTS), 59);
+  assertEquals(sentenceFor("claim_documents", { claims: tobiasClaims(), refDate: TODAY }), TOBIAS_DOCUMENTS);
   const docs = byNumber("CLM-240198")[0];
-  const second: Claim = {
-    ...docs,
-    id: "c-extra",
+  assertEquals(
+    documentsSentence([{ ...docs, documents_required: ["a police report"], documents_due: null }], TODAY),
+    "For your home claim ending in one nine eight, we need a police report. " +
+      "You can upload them at observeinsurance dot com slash claims, or email them to claims docs at observeinsurance dot com. " +
+      "Would you like me to email you this list too?",
+  );
+  // a list that cannot be said whole is "a few documents", and the email carries the full list
+  const fullList = "Would you like me to email you the full list?";
+  for (
+    const documents_required of [
+      [],
+      ["photos of the damage", "data {x}"],
+      Array(12).fill("a signed statement of loss"),
+    ]
+  ) {
+    const s = documentsSentence([{ ...docs, documents_required }], TODAY);
+    assertStringIncludes(s, "we need a few documents, by October twenty-fourth.");
+    assert(s.endsWith(fullList), s);
+  }
+  // a due date in another year makes the longest seeded list too long for the turn
+  const late = documentsSentence([{ ...docs, documents_due: "2025-12-29" }], TODAY);
+  assertStringIncludes(late, "we need a few documents, by December twenty-ninth, twenty twenty five.");
+  assert(spokenWords(late) <= MAX_TURN_WORDS);
+  // only claims awaiting documents are read; none is an error, never an invented list
+  assertThrows(() => documentsSentence(byNumber("CLM-240115"), TODAY));
+  assertEquals(
+    sentenceFor("claim_documents", { claims: byNumber("CLM-240115"), refDate: TODAY }),
+    sentenceFor("system_error"),
+  );
+});
+
+Deno.test("claim_documents with several claims: lists while they fit, the rest mentioned, never dropped", () => {
+  const docs = byNumber("CLM-240198")[0];
+  const police = claim({
     claim_number: "CLM-240305",
-    claim_type: "auto",
+    status: "awaiting_documents",
     documents_required: ["a police report"],
     documents_due: "2026-10-30",
-  };
-  const busy = [docs, byNumber("CLM-240211")[0], second];
-  const s = claimsSentence(busy, TODAY);
-  assertEquals(s.split("You can upload them at").length - 1, 1);
-  assert(s.indexOf("You can upload them at") > s.indexOf("ending in three zero five"), "after the last one");
-  assertStringIncludes(s, "Please send them by October twenty-fourth. Your auto claim ending in two one one");
-  // VAPI's ToolMessageComplete.content allows at most 1000 characters.
-  assert(s.length <= 1000, `${s.length} characters`);
-  for (const customer of new Set(SEED_CLAIMS.map((c) => c.customer_id))) {
-    const own = SEED_CLAIMS.filter((c) => c.customer_id === customer);
-    assert(claimsSentence(own, TODAY).length <= 1000, customer);
-  }
-});
-
-Deno.test("a busy account stays within VAPI's 1000 characters: open and newest claims first, the rest pointed to", () => {
-  assertEquals(MAX_SPOKEN_CHARS, 1000);
-  const docs = byNumber("CLM-240198")[0];
-  const many: Claim[] = [
-    ...SEED_CLAIMS,
-    { ...docs, id: "c-301", claim_number: "CLM-240301", filed_on: "2026-10-02", documents_due: "2026-10-28" },
-    { ...SEED_CLAIMS[0], id: "c-302", claim_number: "CLM-240302", status: "closed", filed_on: "2026-10-11" },
-    { ...byNumber("CLM-240211")[0], id: "c-303", claim_number: "CLM-240303", filed_on: "2026-10-05" },
-  ];
-  // five seed claims alone already ran past the limit before claims were budgeted
-  for (const set of [SEED_CLAIMS, many]) {
-    const s = claimsSentence(set, TODAY);
-    assert(s.length <= MAX_SPOKEN_CHARS, `${s.length} characters`);
-    assertSpeakable(s);
-    assertStringIncludes(s, `You have ${numberToWords(set.length)} claims on file. `);
-    assertStringIncludes(
-      s,
-      "more claims on file, and you can find every claim at observeinsurance dot com slash claims.",
-    );
-    assert(s.endsWith("Do you have any questions about any of them?"));
-    assertEquals(s.split("You can upload them at").length - 1, 1, "the instructions are said once");
-  }
-  const s = claimsSentence(many, TODAY);
-  // the newest open claims are read; the closed one waits even though it is the newest
-  assertStringIncludes(s, "ending in three zero one");
-  assertStringIncludes(s, "ending in two three zero");
-  assert(!s.includes("three zero two"), "a closed claim is read last");
-  // read in filing order
-  assert(s.indexOf("one nine eight") < s.indexOf("three zero one"));
-});
-
-Deno.test("claim free text too long to read in full is left out, never cut", () => {
-  const base = byNumber("CLM-240211")[0];
-  const long = `The adjuster is ${"still reviewing the repair estimates and the photos, ".repeat(6)}and will call you.`;
+    filed_on: "2026-10-02",
+  });
+  // two short lists both fit
+  const photos = claim({
+    claim_number: "CLM-240306",
+    status: "awaiting_documents",
+    documents_required: ["photos"],
+    documents_due: null,
+    filed_on: "2026-10-01",
+  });
   assertEquals(
-    claimsSentence([{ ...base, status_detail: long }], TODAY),
-    claimsSentence([{ ...base, status_detail: null }], TODAY),
+    documentsSentence([police, photos], TODAY),
+    "For your auto claim ending in three zero five, we need a police report, by October thirtieth. " +
+      "For your auto claim ending in three zero six, we need photos. " +
+      "You can upload them at observeinsurance dot com slash claims, or email them to claims docs at observeinsurance dot com. " +
+      "Would you like me to email you this list too?",
   );
-  const docs = byNumber("CLM-240198")[0];
-  const listed = claimsSentence([{ ...docs, documents_required: Array(12).fill("a signed statement of loss") }], TODAY);
-  assertStringIncludes(listed, "needs a few documents from you before review can continue. Please send them by");
-  assertStringIncludes(
-    claimsSentence([{ ...base, adjuster_name: "A".repeat(80) }], TODAY),
-    "is under review. A decision",
+  // the longest seeded list leaves no room for a second: the first is listed in brief, the second mentioned
+  const two = documentsSentence([docs, police], TODAY);
+  assert(spokenWords(two) <= MAX_TURN_WORDS, `${spokenWords(two)} words: ${two}`);
+  assertStringIncludes(two, "ending in three zero five");
+  assertStringIncludes(two, "ending in one nine eight");
+  assert(two.endsWith("Would you like me to email you the full list?"), two);
+  // a third claim awaiting documents is always mentioned
+  const third = claim({ status: "awaiting_documents", documents_required: ["a receipt"], filed_on: "2026-09-01" });
+  const s = documentsSentence([police, photos, third], TODAY);
+  assertEquals(
+    s,
+    "For your auto claim ending in three zero five, we need a police report, by October thirtieth. Two more claims need documents too. " +
+      "You can upload them at observeinsurance dot com slash claims, or email them to claims docs at observeinsurance dot com. " +
+      "Would you like me to email you the full list?",
   );
+  const four = documentsSentence([police, photos, third, { ...third, id: "x", claim_number: "CLM-240999" }], TODAY);
+  assertStringIncludes(four, "Three more claims need documents too.");
+  assert(spokenWords(four) <= MAX_TURN_WORDS, `${spokenWords(four)} words`);
+  // worst case: two claims with the longest seeded list, due in another year
+  const worst = [claim({ ...WORST, status: "awaiting_documents" }), claim({ ...WORST, status: "awaiting_documents" })];
+  const tight = documentsSentence(worst, TODAY);
+  assert(spokenWords(tight) <= MAX_TURN_WORDS, `${spokenWords(tight)} words`);
+  assertStringIncludes(tight, "One more claim needs documents too.");
 });
 
-Deno.test("claim free text is made speakable or left out", () => {
+const TOBIAS_HOME_DETAIL =
+  "For your home claim ending in one nine eight, we need photos of the damage, a contractor estimate, and proof of ownership for the damaged items, by October twenty-fourth. " +
+  "Your adjuster is Leona Fairbanks. Would you like to hear how to send them, or have me email you this list?";
+const SLOANE_DETAIL =
+  "Your property claim ending in one seven seven was denied because the item class is not covered by the policy. " +
+  "Your adjuster is Leona Fairbanks. " +
+  "To appeal, send us a short letter within thirty days, saying why you disagree, with any new photos or estimates. " +
+  "Is there anything else I can help with?";
+
+Deno.test("claim_detail: the whole story of one claim, in one turn", () => {
+  const anything = "Is there anything else I can help with?";
+  // how the payment went out is said in the payment's own clause, not repeated as a second sentence
+  assertEquals(
+    claimDetailSentence(byNumber("CLM-240115")[0], TODAY),
+    "Your auto claim ending in one one five was approved, and a payment of four thousand eight hundred twenty dollars was issued by direct deposit on October eighth. " +
+      `Your adjuster is Leona Fairbanks. ${anything}`,
+  );
+  // a claim awaiting documents: its list, its due date and its adjuster, then how to send them on request
+  assertEquals(claimDetailSentence(byNumber("CLM-240198")[0], TODAY), TOBIAS_HOME_DETAIL);
+  assertEquals(spokenWords(TOBIAS_HOME_DETAIL), 50);
+  assertEquals(
+    claimDetailSentence(byNumber("CLM-240211")[0], TODAY),
+    `Your auto claim ending in two one one is under review with your adjuster, Bertrand Wexley. A decision is expected within five business days. ${anything}`,
+  );
+  // a denial: the reason first (the summary already said sorry), the adjuster, and how to appeal
+  assertEquals(claimDetailSentence(byNumber("CLM-240177")[0], TODAY), SLOANE_DETAIL);
+  assertEquals(spokenWords(SLOANE_DETAIL), 53);
+  assert(!/sorry/i.test(SLOANE_DETAIL));
+  assertEquals(
+    claimDetailSentence(byNumber("CLM-240230")[0], TODAY),
+    `Your home claim ending in two three zero was received on October tenth and is waiting for an adjuster to be assigned. ${anything}`,
+  );
+  const base = byNumber("CLM-240115")[0];
+  assertEquals(
+    claimDetailSentence({ ...base, status: "approved", status_detail: null, adjuster_name: null }, TODAY),
+    `Your auto claim ending in one one five was approved for four thousand eight hundred twenty dollars. ${anything}`,
+  );
+  // a closed claim names its adjuster too
+  assertEquals(
+    claimDetailSentence({ ...base, status: "closed", status_detail: "Closed at your request" }, TODAY),
+    `Your auto claim ending in one one five is closed. Closed at your request. Your adjuster is Leona Fairbanks. ${anything}`,
+  );
+  // a payment note that says something else is kept as its own sentence
+  assertEquals(
+    claimDetailSentence({ ...base, status_detail: "Mailed to the address on file", adjuster_name: null }, TODAY),
+    "Your auto claim ending in one one five was approved, and a payment of four thousand eight hundred twenty dollars was issued on October eighth. " +
+      `Mailed to the address on file. ${anything}`,
+  );
+  assertStringIncludes(
+    claimDetailSentence({ ...base, status_detail: "Payment was issued via check.", adjuster_name: null }, TODAY),
+    "dollars was issued by check on October eighth. Is there",
+  );
+  const denied = byNumber("CLM-240177")[0];
+  assertEquals(
+    claimDetailSentence({ ...denied, status_detail: null, adjuster_name: null }, TODAY),
+    "Your property claim ending in one seven seven was denied. " +
+      `To appeal, send us a short letter within thirty days, saying why you disagree, with any new photos or estimates. ${anything}`,
+  );
+  assertStringIncludes(
+    claimDetailSentence({ ...denied, status_detail: "ACV limits apply." }, TODAY),
+    "was denied because ACV limits apply. Your adjuster",
+  );
+  // without an adjuster the claim awaiting documents says how to send them itself
+  assertEquals(
+    claimDetailSentence({ ...byNumber("CLM-240198")[0], adjuster_name: null }, TODAY),
+    TOBIAS_DOCUMENTS,
+  );
+  assertEquals(
+    sentenceFor("claim_detail", { claims: byNumber("CLM-240230"), refDate: TODAY }),
+    claimDetailSentence(byNumber("CLM-240230")[0], TODAY),
+  );
+  assertEquals(sentenceFor("claim_detail", { claims: tobiasClaims(), refDate: TODAY }), sentenceFor("system_error"));
+  assertThrows(() => claimDetailSentence({ ...base, status: "lost" as Claim["status"] }, TODAY));
+});
+
+Deno.test("claim_detail: optional parts are said while they fit; the status and the appeal window always are", () => {
+  for (const status of CLAIM_STATUSES) {
+    const s = claimDetailSentence(claim({ ...WORST, status }), TODAY);
+    assert(spokenWords(s) <= MAX_TURN_WORDS, `${status}: ${spokenWords(s)} words: ${s}`);
+    assert(s.endsWith("?"), s);
+    assertEquals(s.split("?").length - 1, 1, s);
+  }
+  const paid = claimDetailSentence(claim({ ...WORST, status: "payment_issued" }), TODAY);
+  // the long note does not fit next to the payment; the adjuster's name still does
+  assert(!paid.includes("inspection report"), paid);
+  assertStringIncludes(paid, "Your adjuster is Maximiliana Rosalind Featherstonehaugh.");
+  // the appeal window is always said; how to appeal is said before the adjuster's name when only one fits
+  const longReason = { ...WORST, status: "denied" as const, status_detail: WORST.status_detail };
+  const denied = claimDetailSentence(claim(longReason), TODAY);
+  assertStringIncludes(denied, "thirty days");
+  const reasonless = claimDetailSentence(claim({ ...WORST, status: "denied", status_detail: null }), TODAY);
+  assertStringIncludes(reasonless, "To appeal, send us a short letter within thirty days");
+  assertStringIncludes(reasonless, "Your adjuster is Maximiliana Rosalind Featherstonehaugh.");
+  // a tight budget keeps the status and the window, in their short forms
+  assertEquals(
+    claimDetailSentence(byNumber("CLM-240177")[0], TODAY, 20),
+    "Your property claim ending in one seven seven was denied. You have thirty days to appeal. Is there anything else I can help with?",
+  );
+  // the claim awaiting documents: the adjuster and the instructions while both fit, else the adjuster
+  // and the offer to hear how; with the list too long, "a few documents" and the full list by email
+  const home = byNumber("CLM-240198")[0];
+  assertEquals(
+    claimDetailSentence({ ...home, documents_required: ["a police report"] }, TODAY),
+    "For your home claim ending in one nine eight, we need a police report, by October twenty-fourth. Your adjuster is Leona Fairbanks. " +
+      "You can upload them at observeinsurance dot com slash claims, or email them to claims docs at observeinsurance dot com. " +
+      "Would you like me to email you this list too?",
+  );
+  const worst = claimDetailSentence(claim({ ...WORST, status: "awaiting_documents" }), TODAY);
+  assert(spokenWords(worst) <= MAX_TURN_WORDS, `${spokenWords(worst)} words: ${worst}`);
+  assertStringIncludes(worst, "Your adjuster is Maximiliana Rosalind Featherstonehaugh.");
+});
+
+Deno.test("claim free text is made speakable, or left out when it cannot be said whole", () => {
   const base = byNumber("CLM-240211")[0];
   const read = (detail: string | null, adjuster: string | null = "Bertrand Wexley") =>
-    claimsSentence([{ ...base, status_detail: detail, adjuster_name: adjuster }], TODAY);
+    claimDetailSentence({ ...base, status_detail: detail, adjuster_name: adjuster }, TODAY);
   assertStringIncludes(read("Expected by 2026-10-30"), "Expected by October thirtieth.");
   assertStringIncludes(
     read("An offer of $12,500.50 is pending"),
@@ -393,24 +778,71 @@ Deno.test("claim free text is made speakable or left out", () => {
   assertStringIncludes(read("Depreciation of 12% applies"), "twelve percent");
   assertStringIncludes(read("Linked to CLM-240115"), "Linked to CLM-two four zero one one five.");
   assertStringIncludes(read("Covers 12,000 miles and 2.5 days"), "twelve thousand miles and two point five days");
-  assertStringIncludes(read("Repair shop \u2014 \u201cpending\u201d"), 'Repair shop - "pending".');
-  // An unsafe detail is dropped, never spoken, and the rest of the answer still goes out.
+  assertStringIncludes(read("Repair shop — “pending”"), 'Repair shop - "pending".');
+  // An unsafe or overlong detail is dropped, never spoken or cut, and the rest of the answer still goes out.
   assertEquals(read("waiting on data {x}"), read(null));
-  assertStringIncludes(read(null, null), "is under review. Do you have");
-  const denied = byNumber("CLM-240177")[0];
-  assertStringIncludes(
-    claimsSentence([{ ...denied, status_detail: null }], TODAY),
-    "was denied, and I'm sorry about that. You have thirty days to appeal.",
-  );
-  assertStringIncludes(
-    claimsSentence([{ ...denied, status_detail: "ACV limits apply." }], TODAY),
-    "The reason given is that ACV limits apply. You have",
-  );
+  const long = `The adjuster is ${"still reviewing the repair estimates and the photos, ".repeat(6)}and will call you.`;
+  assertEquals(read(long), read(null));
+  assertStringIncludes(read(null, null), "is under review. Is there");
+  assertStringIncludes(read(null, "A".repeat(80)), "is under review. Is there");
 });
 
-Deno.test("claim dates outside the current year include the year", () => {
-  const s = claimsSentence([{ ...byNumber("CLM-240230")[0], filed_on: "2025-12-30" }], TODAY);
-  assertStringIncludes(s, "was received on December thirtieth, twenty twenty five and is waiting");
+Deno.test("claim_not_identified offers the claims by type and ending, never asking for a number", () => {
+  const offer = (claim_number_last3: string, claim_type?: string, status = "received") => ({
+    claim_number_last3,
+    claim_type,
+    status,
+  });
+  assertEquals(
+    sentenceFor("claim_not_identified", { claims: [offer("198", "home"), offer("115", "auto")] }),
+    "Which claim do you mean, your home claim ending in one nine eight or your auto claim ending in one one five?",
+  );
+  // the same type: said once
+  assertEquals(
+    sentenceFor("claim_not_identified", { claims: [offer("777", "auto"), offer("115", "auto")] }),
+    "Which auto claim do you mean, the one ending in seven seven seven or one one five?",
+  );
+  // the same ending: told apart by type, or by where they stand when the type is the same too
+  assertEquals(
+    sentenceFor("claim_not_identified", { claims: [offer("198", "home"), offer("198", "property")] }),
+    "Which claim do you mean, your home claim ending in one nine eight or your property claim ending in one nine eight?",
+  );
+  assertEquals(
+    sentenceFor("claim_not_identified", {
+      claims: [offer("198", "home", "awaiting_documents"), offer("198", "home", "denied")],
+    }),
+    "Which home claim do you mean, the one ending in one nine eight that needs documents or the one ending in one nine eight that was denied?",
+  );
+  assertEquals(
+    sentenceFor("claim_not_identified", {
+      claims: [offer("198", "home"), offer("115", "auto"), offer("090", "property"), offer("849", "auto")],
+    }),
+    "Which claim do you mean, your home claim ending in one nine eight, your auto claim ending in one one five, " +
+      "your property claim ending in zero nine zero, or your auto claim ending in eight four nine?",
+  );
+  // more than four: the first four are offered
+  const five = sentenceFor("claim_not_identified", {
+    claims: ["1", "2", "3", "4", "5"].map((n) => offer(`10${n}`, "auto")),
+  });
+  assertEquals(
+    five,
+    "Which auto claim do you mean, the one ending in one zero one, one zero two, one zero three, or one zero four?",
+  );
+  // without types (older data) the endings alone
+  assertEquals(
+    sentenceFor("claim_not_identified", { claims: [{ claim_number_last3: "198" }, { claim_number_last3: "115" }] }),
+    "Which claim do you mean, the one ending in one nine eight or one one five?",
+  );
+  // fewer than two endings to offer: by type, never by a number (rule 11)
+  const ask = "Which claim do you mean, your auto, home or property claim?";
+  assertEquals(sentenceFor("claim_not_identified"), ask);
+  assertEquals(sentenceFor("claim_not_identified", { claims: [offer("198", "home")] }), ask);
+  assertEquals(sentenceFor("claim_not_identified", { claims: [offer("{{x}}"), offer("12")] }), ask);
+  for (const s of [ask, five]) assert(!/digits|number/i.test(s), s);
+  assertEquals(
+    sentenceFor("no_documents_needed"),
+    "None of your claims needs documents right now. Is there anything else I can help with?",
+  );
 });
 
 Deno.test("speakDigits spaces digits and drops everything else", () => {
@@ -837,7 +1269,7 @@ Deno.test("claim_readback: the article, the type, the summary when given and the
 
 Deno.test("claim sentences: one question each, at most sixty words, digits as words and never 'oh'", () => {
   const codes = CODES.filter((c) => c.startsWith("claim_"));
-  assertEquals(codes.length, 15);
+  assertEquals(codes.length, 18);
   for (const [code, data] of VARIANTS.filter(([c]) => c.startsWith("claim_"))) {
     const s = sentenceFor(code, data);
     assertEquals(s.split("?").length - 1, 1, `${code}: ${s}`);
@@ -850,6 +1282,72 @@ Deno.test("claim sentences: one question each, at most sixty words, digits as wo
   assertStringIncludes(sentenceFor("claim_filed", { claim_last3: "070" }), "ends in zero seven zero");
   // only the last three digits of a claim number are ever spoken
   assertStringIncludes(sentenceFor("claim_filed", { claim_last3: "CLM-482472" }), "ends in four seven two.");
+});
+
+// Read-backs that spell an address letter by letter are the only sentences allowed past one turn.
+const SPELLING_READBACKS: ReadonlySet<Code> = new Set(["contact_readback"]);
+const MAX_READBACK_WORDS = 75;
+
+Deno.test("every spoken sentence fits one turn: sixty words at most, seventy-five for a spelled read-back", () => {
+  // The worst realistic data for every dynamic sentence: the longest names, four claims, the longest
+  // seeded document list, six-figure amounts and dates in another year.
+  const worst = (status: Claim["status"], i: number) =>
+    claim({ ...WORST, status, claim_number: `CLM-2${i}9999`, filed_on: `2025-12-${10 + i}` });
+  const four = (["awaiting_documents", "denied", "payment_issued", "under_review"] as const).map(worst);
+  const cases: [Code, Record<string, unknown> | undefined][] = [
+    ...VARIANTS,
+    ["verified", { first_name: "Mary Ann" }],
+    ["ok", { claims: four, refDate: TODAY }],
+    ["ok", { claims: tobiasClaims(), refDate: TODAY }],
+    ["claim_documents", { claims: [worst("awaiting_documents", 1), worst("awaiting_documents", 2)], refDate: TODAY }],
+    ["claim_documents", { claims: tobiasClaims(), refDate: TODAY }],
+    ...CLAIM_STATUSES.map((status, i): [Code, Record<string, unknown>] => [
+      "claim_detail",
+      { claims: [worst(status, i)], refDate: TODAY },
+    ]),
+    ["claim_not_identified", { claims: ["198", "115", "090", "849"].map((n) => ({ claim_number_last3: n })) }],
+    // four claims offered with a type each, all with the same ending: told apart by where they stand
+    ...[true, false].map((sameType): [Code, Record<string, unknown>] => [
+      "claim_not_identified",
+      {
+        claims: (["awaiting_documents", "under_review", "payment_issued", "denied", "closed"] as const).map((
+          status,
+          i,
+        ) => ({ claim_number_last3: "999", claim_type: sameType || i % 2 ? "property" : "home", status })),
+      },
+    ]),
+    ["contact_readback", {
+      first_name: "Mary Ann",
+      last_name: "Featherstonehaugh-Whitley",
+      email: "maryann.featherstonehaugh@outlook.com",
+      callback_phone: "+16025550177",
+    }],
+    ["contact_saved_new", { first_name: "Mary Ann", has_email: false }],
+    ["contact_saved_existing", { first_name: "Mary Ann" }],
+    ["contact_retry", { has_email: true, has_phone: true }],
+    ["claim_readback", {
+      claim_type: "property",
+      loss_date: "2025-12-24",
+      // the longest summary the read-back says is 80 characters
+      summary: "a tree branch through the back porch roof during the big thunderstorm last week",
+      today: TODAY,
+    }],
+    ["claim_intake_saved", { first_name: "Mary Ann", emailed: true }],
+    ["claim_filed", { claim_last3: "472", emailed: true }],
+  ];
+  for (const [code, data] of cases) {
+    const s = sentenceFor(code, data);
+    const limit = SPELLING_READBACKS.has(code) ? MAX_READBACK_WORDS : MAX_TURN_WORDS;
+    assert(spokenWords(s) <= limit, `${code} has ${spokenWords(s)} words: ${s}`);
+  }
+  // every code is covered, and the seeded account's answers fit with room to spare
+  for (const code of CODES) assert(cases.some(([c]) => c === code), `${code} has no representative case`);
+  assert(spokenWords(claimsSentence(tobiasClaims(), TODAY)) <= MAX_TURN_WORDS);
+  const opening = "Thank you, Tobias, you're verified. Welcome back.";
+  assert(
+    spokenWords(`${opening} ${claimsSentence(tobiasClaims(), TODAY, MAX_TURN_WORDS - spokenWords(opening))}`) <=
+      MAX_TURN_WORDS,
+  );
 });
 
 Deno.test("speakLossDate: the weekday and the date, the same in every zone", () => {
@@ -901,19 +1399,4 @@ Deno.test("verify intents: the verified opening without its question, then the s
     verifiedStatusSentence(plain, sentenceFor("no_claims")),
     "Thank you, Tobias, you're verified. I don't see any claims on file for your account. Would you like me to explain how to start one?",
   );
-});
-
-Deno.test("claimsSentence honours a smaller limit, so the chained read fits after the verified opening", () => {
-  const many: Claim[] = Array.from({ length: 10 }, (_, i) => ({
-    ...SEED_CLAIMS[1],
-    id: `c-${i}`,
-    claim_number: `CLM-25${String(i).padStart(4, "0")}`,
-    filed_on: `2026-08-${String(10 + i).padStart(2, "0")}`,
-  }));
-  const full = claimsSentence(many, TODAY);
-  const small = claimsSentence(many, TODAY, 700);
-  assert(full.length <= MAX_SPOKEN_CHARS);
-  assert(small.length <= 700, `${small.length}`);
-  assert(small.length < full.length);
-  assertStringIncludes(small, "more claims on file");
 });

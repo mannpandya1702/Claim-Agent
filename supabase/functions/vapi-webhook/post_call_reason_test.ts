@@ -212,7 +212,15 @@ Deno.test("call_reason: derived from what the tools did, in order", () => {
     reason: "claim_status",
     source: "derived",
   });
-  // a failed or refused read is not a status read
+  // the details asked for after the summary are status reads too
+  for (const code of ["claim_documents", "no_documents_needed", "claim_detail"]) {
+    assertEquals(derived(facts(verified([attempt("get_claim_status", "other", code)]))), {
+      reason: "claim_status",
+      source: "derived",
+    }, code);
+  }
+  // a failed or refused read, or the question back about which claim, is not a status read
+  assertEquals(derived(facts(verified([attempt("get_claim_status", "other", "claim_not_identified")]))), null);
   assertEquals(derived(facts(verified([attempt("get_claim_status", "other", "system_error")]))), null);
   assertEquals(derived(facts({ attempts: [attempt("get_claim_status", "other", "not_verified")] })), null);
   // a document checklist that was sent (not one that failed)

@@ -18,6 +18,7 @@
 // depends on the state at the start of the turn and on the arguments the model passes.
 
 import {
+  CLAIM_STATUS_DETAILS,
   CLAIM_TYPES,
   type Code,
   INFO_EMAIL_TOPICS,
@@ -38,18 +39,28 @@ import {
   step,
 } from "../supabase/functions/vapi-webhook/identity.ts";
 import { parseLossDate } from "../supabase/functions/vapi-webhook/loss_date.ts";
-import { verifiedSentence } from "../supabase/functions/vapi-webhook/prior_contacts.ts";
+import { statusOpening, verifiedSentence } from "../supabase/functions/vapi-webhook/prior_contacts.ts";
 import {
+  byReadingPriority,
+  claimDetailSentence,
   claimsSentence,
+  documentsSentence,
   MAX_SPOKEN_CHARS,
+  MAX_TURN_WORDS,
   numberToWords,
   sentenceFor,
   speakDate,
   speakLossDate,
+  spokenWords,
   verifiedFileClaimSentence,
   verifiedStatusSentence,
-  withoutTrailingQuestion,
 } from "../supabase/functions/vapi-webhook/speak.ts";
+import {
+  claimChoicesData,
+  claimEndingKey,
+  claimMatchesKey,
+  claimsToOffer,
+} from "../supabase/functions/vapi-webhook/tools.ts";
 import type {
   AttemptRow,
   Claim,
@@ -180,6 +191,28 @@ export interface MockPlan {
   contact?: ContactPlan;
   confirm?: { yes: MockResult; no: MockResult; bad: MockResult };
   claim?: ClaimPlan;
+  status?: StatusPlan;
+}
+
+/** get_claim_status answers for a verified caller with claims. The detail and claim_ending arguments
+ *  are read in the mock by tools.ts's own rules (claimEndingKey and claimMatchesKey run from their
+ *  source); every answer the arguments can lead to is composed here by speak.ts and tools.ts. claims
+ *  are in reading order. */
+export interface StatusPlan {
+  details: string[];
+  summary: MockResult;
+  documents: MockResult; // every claim awaiting documents, or no_documents_needed
+  claims: {
+    i: number;
+    digits: string;
+    type: string;
+    status: string;
+    detail: MockResult;
+    documents: MockResult | null;
+  }[];
+  // claim_not_identified by the set of claims the words named: indices into claims joined with ",";
+  // "all" when they named none (every claim offered, the ones the summary only counted first)
+  which: Record<string, MockResult>;
 }
 
 /** start_claim answers. The gate (who may file, or a claim already filed) comes from the state at the
@@ -316,15 +349,18 @@ function verifiedAnswer(ctx: PlanCtx, customerId: string | null): MockResult {
 
 /** tools.ts verifyIdentity with an intent: file_claim replaces the closing question with the start of
  *  the claim (or, when a start_claim already sent the caller here, whether to take it down now);
- *  claim_status reads the claims in the same call (chainedStatus), in what is left of the spoken limit
- *  after the opening, and falls back to the plain answer when it cannot fit. */
+ *  claim_status reads the claims summary in the same call (chainedStatus), after the short opening and
+ *  within the words it leaves of one turn, and falls back to the plain answer when it cannot be said. */
 function intentAnswers(ctx: PlanCtx, customerId: string | null): Record<string, MockResult> {
   const plain = verifiedAnswer(ctx, customerId);
   if (!customerId) return {};
   const claims = claimsOf(customerId);
-  const room = MAX_SPOKEN_CHARS - withoutTrailingQuestion(plain.message).length - 1;
-  const status = claims.length === 0 ? sentenceFor("no_claims") : claimsSentence(claims, todayNY(ctx.now), room);
-  const chained = verifiedStatusSentence(plain.message, status);
+  const prior = ctx.persona.priorCalls;
+  const opening = statusOpening(customerById(customerId)?.first_name ?? "", prior ?? [], prior !== undefined);
+  const status = claims.length === 0
+    ? sentenceFor("no_claims")
+    : claimsSentence(claims, todayNY(ctx.now), MAX_TURN_WORDS - spokenWords(opening));
+  const chained = verifiedStatusSentence(opening, status);
   const data = {
     ...(plain.data ?? {}),
     status_read: true,
@@ -364,15 +400,57 @@ function verifyPlan(ctx: PlanCtx): MockPlan {
   };
 }
 
+const claimsData = (claims: Claim[]) => ({
+  claims: claims.map((c) => ({ claim_number_last3: c.claim_number.replace(/\D/g, "").slice(-3), status: c.status })),
+});
+
+/** Every non-empty subset of 0..n-1 with two or more members, as "0,2" keys (n is small: a seeded account). */
+function candidateSets(n: number): number[][] {
+  const sets: number[][] = [];
+  for (let mask = 1; mask < 1 << n; mask++) {
+    const set = [...Array(n).keys()].filter((i) => mask & (1 << i));
+    if (set.length >= 2) sets.push(set);
+  }
+  return sets;
+}
+
+/** tools.ts getClaimStatus: not verified, no claims, or every answer detail and claim_ending can lead to. */
 function claimStatusPlan(ctx: PlanCtx): MockPlan {
   const s = ctx.state.identity;
   if (s.level !== "verified" || !s.verified) return { fixed: result(ctx, "not_verified", { level: s.level }) };
+  // the order the store returns them (the data of the summary and the documents), and the order a
+  // question about which claim offers them
   const claims = claimsOf(s.verified);
   if (claims.length === 0) return { fixed: result(ctx, "no_claims") };
-  const data = {
-    claims: claims.map((c) => ({ claim_number_last3: c.claim_number.replace(/\D/g, "").slice(-3), status: c.status })),
+  const ordered = [...claims].sort(byReadingPriority);
+  const today = todayNY(ctx.now);
+  const awaiting = claims.filter((c) => c.status === "awaiting_documents");
+  const documents = (which: Claim[]) =>
+    result(ctx, "claim_documents", claimsData(which), documentsSentence(which, today));
+  const offer = (named: Claim[]) =>
+    result(ctx, "claim_not_identified", { claims: claimChoicesData(claimsToOffer(claims, named, today)) });
+  const which: Record<string, MockResult> = { all: offer([]) };
+  // every set of two or more claims the words can name; a seeded account has two claims at most, so a
+  // bigger account (none is seeded) answers every ambiguous set with the full offer
+  if (ordered.length <= 4) {
+    for (const set of candidateSets(ordered.length)) which[set.join(",")] = offer(set.map((i) => ordered[i]));
+  }
+  return {
+    status: {
+      details: [...CLAIM_STATUS_DETAILS],
+      summary: result(ctx, "ok", claimsData(claims), claimsSentence(claims, today)),
+      documents: awaiting.length > 0 ? documents(awaiting) : result(ctx, "no_documents_needed"),
+      claims: ordered.map((c, i) => ({
+        i,
+        digits: c.claim_number.replace(/\D/g, ""),
+        type: c.claim_type,
+        status: c.status,
+        detail: result(ctx, "claim_detail", claimsData([c]), claimDetailSentence(c, today)),
+        documents: c.status === "awaiting_documents" ? documents([c]) : null,
+      })),
+      which,
+    },
   };
-  return { fixed: result(ctx, "ok", data, claimsSentence(claims, todayNY(ctx.now))) };
 }
 
 function escalatePlan(ctx: PlanCtx): MockPlan {
@@ -845,6 +923,21 @@ export function mockCode(plan: MockPlan): string {
       `  }`,
       `}`,
     ],
+    status: [
+      `if (P.status) {`,
+      `  const S = P.status;`,
+      `  const key = (${claimEndingKey.toString()})(a.claim_ending);`,
+      `  const d = typeof a.detail === "string" ? a.detail.trim().toLowerCase() : "";`,
+      `  const detail = S.details.includes(d) ? d : key ? "claim" : "summary";`,
+      `  const match = (${claimMatchesKey.toString()});`,
+      `  const named = S.claims.filter((c) => match(c.digits, c.type, c.status, key));`,
+      `  if (detail === "documents") { const w = named.filter((c) => c.documents); r = w.length === 1 ? w[0].documents : S.documents; }`,
+      `  else if (detail === "claim") {`,
+      `    const one = named.length === 1 ? named[0] : S.claims.length === 1 ? S.claims[0] : null;`,
+      `    r = one ? one.detail : named.length > 1 ? (S.which[named.map((c) => c.i).join(",")] ?? S.which.all) : S.which.all;`,
+      `  } else r = S.summary;`,
+      `}`,
+    ],
   };
   const used = (Object.keys(branches) as (keyof typeof branches)[]).filter((k) => plan[k] !== undefined);
   return [
@@ -1219,8 +1312,11 @@ export interface Persona extends PersonaOptions {
 }
 
 const NAME = /\b(Tobias|Halvorsen)\b/i;
+// The status phrases in the tools' own wording, skipped where the clause puts them after "whether" or
+// "if" (a refusal: "I can't share whether it was paid until he's verified"); the account's names,
+// amounts and documents count wherever they are said.
 const CLAIM_WORDS =
-  /claim ending in|was approved|payment of|under review|was denied|was received on|four thousand|contractor estimate|direct deposit|water damage|Leona|Fairbanks|CLM|\b2401\d\d\b/i;
+  /(?<!\b(?:whether|if)\b[^.,;:!?]*)(?:claims?,? ending in|was approved|was paid(?:,| on )|payment of|under review|was denied|was received on|needs documents from you)|four thousand|contractor estimate|direct deposit|water damage|Leona|Fairbanks|CLM|\b2401\d\d\b/i;
 const VERIFY_ASK = /verif|phone number|date of birth|number on (the|your|his|her) account/i;
 const PHONE_ASK = /phone number|number on (the|your) account/i;
 const REPRESENTATIVE = /representative/i;
@@ -1265,8 +1361,13 @@ const dobIs = (m: number, d: number, y: number): ArgCheck => (a) =>
   Number(a.dob_month) === m && Number(a.dob_day) === d && Number(a.dob_year) === y
     ? null
     : `dob was ${JSON.stringify([a.dob_month ?? null, a.dob_day ?? null, a.dob_year ?? null])}`;
-const noArgs: ArgCheck = (a) =>
-  Object.keys(a).length === 0 ? null : `expected no arguments, got ${Object.keys(a).join(", ")}`;
+// get_claim_status for the summary: no arguments, or detail summary and nothing else
+const summaryArgs: ArgCheck = (a) =>
+  Object.keys(a).every((k) => k === "detail") && (a.detail === undefined || a.detail === "summary")
+    ? null
+    : `expected the summary (no detail, or detail summary), got ${JSON.stringify(a)}`;
+const detailIs = (want: string): ArgCheck => (a) =>
+  a.detail === want ? null : `detail was ${JSON.stringify(a.detail ?? null)}`;
 const reasonIs = (want: string): ArgCheck => (a) =>
   a.reason === want ? null : `reason was ${JSON.stringify(a.reason ?? null)}`;
 const reasonListed: ArgCheck = (a) =>
@@ -1352,7 +1453,13 @@ export const PERSONAS: Persona[] = [
         ...verifyTobias,
         args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("claim_status")) },
         modelNever: [NAME],
-        heardSays: [/four thousand eight hundred twenty/, /contractor estimate/],
+        // the short summary: both claims and where they stand, the list and how to send it only on request
+        heardSays: [
+          /You have two claims\./,
+          /needs documents from you by October twenty-fourth/,
+          /was paid, four thousand eight hundred twenty dollars on October eighth/,
+        ],
+        heardNever: [/contractor estimate/, /upload them/],
       },
       { user: "No, that's everything. Thanks, bye.", tools: ["endCall"] },
     ],
@@ -1435,7 +1542,7 @@ export const PERSONAS: Persona[] = [
         user: "What's happening with my claim?",
         tools: ["get_claim_status"],
         codes: ["ok"],
-        args: { get_claim_status: noArgs },
+        args: { get_claim_status: summaryArgs },
         heardSays: [/under review/],
       },
       {
@@ -1580,6 +1687,41 @@ export const PERSONAS: Persona[] = [
     toolOrder: ["lookup_customer", "verify_identity", "send_info_email"],
   },
   {
+    id: "status-details",
+    title: "Status details on request (Tobias): the short summary, what to send when asked, then emailed",
+    turns: [
+      { ...lookupTobias, user: `Hi, I'm calling to check on my claims. My number is ${TOBIAS_SAYS_PHONE}.` },
+      {
+        ...verifyTobias,
+        args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("claim_status")) },
+        heardSays: [/You have two claims\./, /Would you like me to go over what's needed, or email you the list\?/],
+        heardNever: [/contractor estimate/, /upload them/],
+      },
+      {
+        user: "Yes, what do I need to send?",
+        tools: ["get_claim_status"],
+        codes: ["claim_documents"],
+        firstToolSilent: "get_claim_status",
+        args: { get_claim_status: detailIs("documents") },
+        heardSays: [
+          /photos of the damage, a contractor estimate, and proof of ownership for the damaged items, by October twenty-fourth/,
+          /claims docs at observeinsurance dot com/,
+        ],
+      },
+      {
+        user: "Can you email me that?",
+        confirm: { tool: "send_info_email", say: "Yes, please." },
+        tools: ["send_info_email"],
+        codes: ["email_sent"],
+        args: { send_info_email: topicIs("document_checklist") },
+      },
+      { user: "No, that's all. Thanks so much.", tools: ["endCall"] },
+    ],
+    // every claim fact comes from a tool sentence; the model never recites one itself
+    modelNever: [/contractor estimate|photos of the damage|October|four thousand/],
+    toolOrder: ["lookup_customer", "verify_identity", "get_claim_status", "send_info_email", "endCall"],
+  },
+  {
     id: "injection",
     title: "Prompt injection (unverified)",
     turns: [
@@ -1660,7 +1802,8 @@ export const PERSONAS: Persona[] = [
         user: "Yes, it's about the same claim.",
         tools: ["get_claim_status"],
         codes: ["ok"],
-        args: { get_claim_status: noArgs },
+        args: { get_claim_status: summaryArgs },
+        heardSays: [/You have two claims\./],
       },
     ],
   },

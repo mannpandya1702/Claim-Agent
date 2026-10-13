@@ -34,6 +34,7 @@ import {
   type Outcome,
   type Sentiment,
   SENTIMENTS,
+  STATUS_READ_CODES,
 } from "./enums.ts";
 import { computeFlags } from "./flags.ts";
 import { callerIdNumber, usableCallbackNumber } from "./identity.ts";
@@ -86,6 +87,7 @@ const IDLE_ENDED_REASONS: ReadonlySet<string> = new Set(["silence-timed-out", "e
 const COMPLETE_ANALYSIS: ReadonlySet<string> = new Set(["ok", "backfilled"]);
 
 const CODE_SET: ReadonlySet<string> = new Set(CODES);
+const STATUS_READ_SET: ReadonlySet<string> = new Set(STATUS_READ_CODES);
 const CHANNEL_SET: ReadonlySet<string> = new Set(CHANNELS);
 const SENTIMENT_SET: ReadonlySet<string> = new Set(SENTIMENTS);
 const OUTCOME_SET: ReadonlySet<string> = new Set(ANALYSIS_OUTCOMES);
@@ -457,6 +459,12 @@ function transferred(message: VapiMessage, raw: unknown[] | null): boolean {
   return raw?.some((m) => isObj(m) && m.role === "tool_call_result" && m.name === "transferCall") ?? false;
 }
 
+/** A get_claim_status answer that read the caller's claims: the summary, the documents, one claim's
+ *  details, or that there are none (verify_identity's chained read is recorded as one of these too). */
+function readClaims(attempts: AttemptRow[]): boolean {
+  return attempts.some((a) => a.tool_name === "get_claim_status" && a.code !== null && STATUS_READ_SET.has(a.code));
+}
+
 function serverOutcome(facts: PostCallFacts, escalatedByTransfer: boolean, everVerified: boolean): Outcome | null {
   const escalations = facts.escalations ?? [];
   const attempts = facts.attempts ?? [];
@@ -467,10 +475,7 @@ function serverOutcome(facts: PostCallFacts, escalatedByTransfer: boolean, everV
   if (facts.intake?.confirmed === true) return "resolved";
   if (facts.session?.level === "locked") return "auth_failed";
   if (!everVerified && attempts.some((a) => a.kind === "lookup_miss")) return "not_found";
-  const statusRead = attempts.some((a) =>
-    a.tool_name === "get_claim_status" && (a.code === "ok" || a.code === "no_claims")
-  );
-  if (everVerified && statusRead) return "resolved";
+  if (everVerified && readClaims(attempts)) return "resolved";
   return null;
 }
 
@@ -498,9 +503,7 @@ export function callReasonOf(
   const attempts = facts.attempts ?? [];
   const sent = (kind: string) => (facts.emails ?? []).some((e) => e.kind === kind && e.status === "sent");
   // verify_identity's chained read is recorded as a get_claim_status of its own, so it counts here
-  if (attempts.some((a) => a.tool_name === "get_claim_status" && (a.code === "ok" || a.code === "no_claims"))) {
-    return { reason: "claim_status", source: "derived" };
-  }
+  if (readClaims(attempts)) return { reason: "claim_status", source: "derived" };
   if (sent("document_checklist")) return { reason: "documents", source: "derived" };
   if (escalations.some((e) => e.kind === "representative")) return { reason: "speak_to_agent", source: "derived" };
   if (facts.contact?.kind === "email_update") return { reason: "update_details", source: "derived" };

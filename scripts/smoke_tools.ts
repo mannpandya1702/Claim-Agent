@@ -17,10 +17,21 @@
 
 import { maskEmail } from "../supabase/functions/vapi-webhook/email.ts";
 import { CLAIM_DOCUMENTS, type Code, type Level, TIMEZONE } from "../supabase/functions/vapi-webhook/enums.ts";
+import { demoSeed } from "../supabase/functions/vapi-webhook/fake_store.ts";
 import { normaliseEmail } from "../supabase/functions/vapi-webhook/identity.ts";
 import { parseLossDate } from "../supabase/functions/vapi-webhook/loss_date.ts";
 import { MASKED_ANSWER } from "../supabase/functions/vapi-webhook/redact.ts";
-import { assertSpeakable, sentenceFor, verifiedFileClaimSentence } from "../supabase/functions/vapi-webhook/speak.ts";
+import {
+  assertSpeakable,
+  claimDetailSentence,
+  claimsSentence,
+  documentsSentence,
+  MAX_TURN_WORDS,
+  sentenceFor,
+  spokenWords,
+  verifiedFileClaimSentence,
+} from "../supabase/functions/vapi-webhook/speak.ts";
+import type { Claim } from "../supabase/functions/vapi-webhook/types.ts";
 import {
   endOfCallReportEnvelope,
   type EnvelopeRef,
@@ -48,6 +59,7 @@ const TOBIAS = {
   dob: { dob_month: 3, dob_day: 14, dob_year: 1986 },
 };
 const RONAN_PHONE = "6025550102";
+const RONAN_DOB = { dob_month: 11, dob_day: 2, dob_year: 1979 }; // one claim, under review: no documents due
 const TEAGUE = {
   phone: "6025550104",
   dob: { dob_month: 1, dob_day: 30, dob_year: 1965 },
@@ -261,11 +273,6 @@ function sentenceProblem(sentence: string, expect: Expect): string | null {
   return expect(sentence);
 }
 
-const contains = (...parts: string[]) => (s: string) => {
-  const missing = parts.filter((p) => !s.includes(p));
-  return missing.length ? `sentence lacks ${missing.map((p) => `"${p}"`).join(", ")}` : null;
-};
-
 const notVerified = (level: Level) => sentenceFor("not_verified", { level });
 
 /** Today in New York (the day loss dates are read against), as YYYY-MM-DD. */
@@ -278,6 +285,24 @@ function newYorkToday(now: Date): string {
   }).formatToParts(now);
   const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+/** Tobias's seeded claims (0002_seed.sql, mirrored by fake_store.demoSeed): what every status answer reads. */
+function tobiasClaims(): Claim[] {
+  return demoSeed().claims.filter((c) => c.customer_id === TOBIAS.id);
+}
+
+function tobiasClaim(number: string): Claim {
+  const claim = tobiasClaims().find((c) => c.claim_number === number);
+  if (!claim) throw new Error(`seed claim ${number} is missing`);
+  return claim;
+}
+
+/** The claims summary Tobias hears today, alone or after verify_identity's chained opening. */
+function tobiasSummary(c: CaseCtx, opening = ""): string {
+  const today = newYorkToday(c.cfg.now?.() ?? new Date());
+  const status = claimsSentence(tobiasClaims(), today, MAX_TURN_WORDS - spokenWords(opening));
+  return opening ? `${opening} ${status}` : status;
 }
 
 /** The read-back start_claim gives for these arguments today. */
@@ -434,11 +459,8 @@ export function smokeCases(): SmokeCase[] {
           name: "get_claim_status",
           id: claimsId,
           code: "ok",
-          sentence: contains(
-            "four thousand eight hundred twenty dollars",
-            "contractor estimate",
-            "ending in one one five",
-          ),
+          // the short summary, within one turn: the documents and how to send them wait for a detail
+          sentence: tobiasSummary(c),
           check: (r) => {
             const claims = r.data?.claims;
             if (!Array.isArray(claims) || claims.length !== 2) return "data.claims should list both claims";
@@ -863,12 +885,11 @@ export function smokeCases(): SmokeCase[] {
           id: verifyId,
           args,
           code: "verified",
-          // with PRIOR_CONTACTS_ENABLED the welcome-back opening may come first
+          // with PRIOR_CONTACTS_ENABLED the opening adds "Welcome back."; either way, one turn
           sentence: (s) =>
-            s.startsWith(VERIFIED_PREFIX)
-              ? contains("four thousand eight hundred twenty dollars", "ending in one one five", "contractor estimate")(
-                s,
-              )
+            [tobiasSummary(c, VERIFIED_PREFIX), tobiasSummary(c, `${VERIFIED_PREFIX} Welcome back.`)].includes(s) &&
+              spokenWords(s) <= MAX_TURN_WORDS
+              ? null
               : `sentence was "${s}"`,
           check: (r) => {
             const claims = r.data?.claims;
@@ -895,6 +916,90 @@ export function smokeCases(): SmokeCase[] {
             return trail === "lookup_customer:needs_dob,verify_identity:verified,get_claim_status:ok"
               ? null
               : `attempts ledger was [${trail}] (the chained read is one get_claim_status row)`;
+          });
+          if (problem) c.fail(problem);
+        }
+      },
+    },
+    {
+      name: "status-details",
+      async run(c) {
+        // The details the summary leaves out, each on request: the documents, one claim by its ending or
+        // its type, and the question back when the words name no single claim.
+        const today = newYorkToday(c.cfg.now?.() ?? new Date());
+        const ref = c.ref();
+        await c.tool(ref, { name: "lookup_customer", args: { phone: TOBIAS.phone }, code: "needs_dob" });
+        await c.tool(ref, {
+          name: "verify_identity",
+          args: TOBIAS.dob,
+          code: "verified",
+          sentence: (s) => s.startsWith(VERIFIED_PREFIX) ? null : `sentence was "${s}"`,
+        });
+        const status = (args: Record<string, unknown>, code: Code, sentence: string) =>
+          c.tool(ref, {
+            name: "get_claim_status",
+            args,
+            code,
+            sentence: (s) => s === sentence && spokenWords(s) <= MAX_TURN_WORDS ? null : `sentence was "${s}"`,
+            check: (r) =>
+              /4820|Halvorsen|Fairbanks|CLM-/.test(JSON.stringify(r.data ?? {}))
+                ? "data carries more than last3 + status"
+                : null,
+          });
+        await status({ detail: "documents" }, "claim_documents", documentsSentence(tobiasClaims(), today));
+        await status(
+          { detail: "claim", claim_ending: "115" },
+          "claim_detail",
+          claimDetailSentence(tobiasClaim("CLM-240115"), today),
+        );
+        await status(
+          { detail: "claim", claim_ending: "home" },
+          "claim_detail",
+          claimDetailSentence(tobiasClaim("CLM-240198"), today),
+        );
+        // no claim ends in seven seven seven, and two endings name neither: the claims are offered by type
+        // and ending, in the order the summary read them
+        const which = sentenceFor("claim_not_identified", {
+          claims: [
+            { claim_number_last3: "198", claim_type: "home", status: "awaiting_documents" },
+            { claim_number_last3: "115", claim_type: "auto", status: "payment_issued" },
+          ],
+        });
+        await status({ detail: "claim", claim_ending: "777" }, "claim_not_identified", which);
+        await status({ detail: "claim", claim_ending: "198 or 115" }, "claim_not_identified", which);
+        await status({ detail: "claim" }, "claim_not_identified", which);
+        // Ronan's one claim is under review: nothing to send
+        const ronan = c.ref("ronan");
+        await c.tool(ronan, { name: "lookup_customer", args: { phone: RONAN_PHONE }, code: "needs_dob" });
+        await c.tool(ronan, {
+          name: "verify_identity",
+          args: RONAN_DOB,
+          code: "verified",
+          sentence: (s) => s.startsWith("Thank you, Ronan, you're verified.") ? null : `sentence was "${s}"`,
+        });
+        await c.tool(ronan, { name: "get_claim_status", args: { detail: "documents" }, code: "no_documents_needed" });
+        // his only claim is the one he means, even by a type it is not
+        await c.tool(ronan, {
+          name: "get_claim_status",
+          args: { detail: "claim", claim_ending: "home" },
+          code: "claim_detail",
+          sentence: (s) => s.startsWith("Your auto claim ending in two one one") ? null : `sentence was "${s}"`,
+        });
+        const db = c.cfg.db;
+        if (db) {
+          const problem = await c.rows(() => db.attempts(ref.callKey), (rows) => {
+            const trail = rows.map((r) => `${r.tool_name}:${r.code}`).join(",");
+            const want = [
+              "lookup_customer:needs_dob",
+              "verify_identity:verified",
+              "get_claim_status:claim_documents",
+              "get_claim_status:claim_detail",
+              "get_claim_status:claim_detail",
+              "get_claim_status:claim_not_identified",
+              "get_claim_status:claim_not_identified",
+              "get_claim_status:claim_not_identified",
+            ].join(",");
+            return trail === want ? null : `attempts ledger was [${trail}]`;
           });
           if (problem) c.fail(problem);
         }

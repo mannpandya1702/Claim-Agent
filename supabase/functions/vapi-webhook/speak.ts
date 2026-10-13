@@ -122,8 +122,6 @@ const CLAIM_RETRY = "No problem. What should I change?";
 const CLAIM_READBACK_PLAIN = "Let me make sure I have this right. Did I get the details of your claim correct?";
 const WEEKDAY_NAMES = "Sunday Monday Tuesday Wednesday Thursday Friday Saturday".split(" ");
 const MAX_READBACK_SUMMARY_CHARS = 80;
-const DOCUMENT_INSTRUCTIONS =
-  `You can upload them at ${CLAIMS_URL_SPOKEN}, email them to claims docs at observeinsurance dot com, or mail them to our claims department, and please include your claim number.`;
 
 // ---------------------------------------------------------------------------------------------
 // Number and date words.
@@ -397,119 +395,526 @@ function listWords(items: string[]): string {
 }
 
 // ---------------------------------------------------------------------------------------------
-// get_claim_status.
+// get_claim_status: a short summary by default, the details on request.
 // ---------------------------------------------------------------------------------------------
+/** One spoken turn's ceiling (style.md: short turns; rule 19: never more than 60 words). Every claims
+ *  answer is composed to fit it. */
+export const MAX_TURN_WORDS = 60;
+// The summary reads at most this many clauses (claims read together count as one); the rest are counted.
+const MAX_SUMMARY_ITEMS = 4;
+// The documents answer lists at most this many claims; any other is mentioned, and the email lists it.
+const MAX_DOCUMENT_CLAIMS = 2;
+
+/** Spoken words in a finished sentence: every whitespace-separated token (figures are already words). */
+export function spokenWords(text: string): number {
+  const t = typeof text === "string" ? text.trim() : "";
+  return t ? t.split(/\s+/).length : 0;
+}
+
 function amountOf(v: unknown): number | null {
   const n = typeof v === "string" && v.trim() !== "" ? Number(v) : v;
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : null;
 }
 
-function claimLine(c: Claim, refYear: number | undefined, withInstructions: boolean): string {
-  const type = (CLAIM_TYPES as readonly string[]).includes(c.claim_type) ? `${c.claim_type} claim` : "claim";
-  const last3 = digitsOf(c.claim_number).slice(-3);
-  const head = last3 ? `Your ${type} ending in ${speakDigits(last3)}` : `Your ${type}`;
+function refYearOf(refDate: string): number | undefined {
+  const m = typeof refDate === "string" ? ISO_DATE.exec(refDate.trim()) : null;
+  return m ? Number(m[1]) : undefined;
+}
+
+function capitalised(t: string): string {
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+// What needs the caller first (documents, a denial), then money, then claims in progress, then closed.
+const STATUS_RANK: Readonly<Record<string, number>> = {
+  awaiting_documents: 0,
+  denied: 1,
+  payment_issued: 2,
+  approved: 2,
+  under_review: 3,
+  received: 4,
+  closed: 5,
+};
+
+/** Two claims awaiting documents: the earlier due date first (it is the one that pauses a claim
+ *  soonest), a claim with no due date after any that has one. 0 for any other pair. */
+function dueOrder(a: Claim, b: Claim): number {
+  if (a.status !== "awaiting_documents" || b.status !== "awaiting_documents") return 0;
+  const due = (c: Claim) => (typeof c.documents_due === "string" ? c.documents_due : "");
+  const [x, y] = [due(a), due(b)];
+  if (x === y) return 0;
+  if (!x || !y) return x ? -1 : 1;
+  return x.localeCompare(y);
+}
+
+/** Reading order for claims: by what the caller has to act on first (among claims awaiting
+ *  documents, the earliest due date first), then the newest filed. */
+export function byReadingPriority(a: Claim, b: Claim): number {
+  return (STATUS_RANK[a.status] ?? 9) - (STATUS_RANK[b.status] ?? 9) ||
+    dueOrder(a, b) ||
+    String(b.filed_on).localeCompare(String(a.filed_on)) ||
+    String(b.claim_number).localeCompare(String(a.claim_number));
+}
+
+/** "auto claim", or plain "claim" for a type off the list. */
+function typeWords(c: Claim): string {
+  return (CLAIM_TYPES as readonly string[]).includes(c.claim_type) ? `${c.claim_type} claim` : "claim";
+}
+
+/** The claim number's last three digits as words ("one one five"), or "" without three digits. */
+function endingWords(c: Claim): string {
+  return speakDigits(claimLast3(c.claim_number));
+}
+
+/** "Your auto claim ending in one one five". */
+function claimHead(c: Claim): string {
+  const ending = endingWords(c);
+  return ending ? `Your ${typeWords(c)} ending in ${ending}` : `Your ${typeWords(c)}`;
+}
+
+const SORRY = "I'm sorry to say.";
+
+/** One claim of the summary: where it stands, in a few words. Amounts and dates only where they are
+ *  the status; the reason for a denial, the adjuster's note and the document list wait for a detail.
+ *  sorry: whether a denial still says it is sorry (once a turn, rule 16). */
+function summaryClause(c: Claim, refYear: number | undefined, sorry: boolean): string {
   const amount = amountOf(c.amount_approved);
   let body: string;
   switch (c.status) {
     case "received":
-      body = `was received on ${speakDate(c.filed_on, refYear)} and is waiting for an adjuster to be assigned.`;
+      body = `was received on ${speakDate(c.filed_on, refYear)} and is waiting for an adjuster.`;
       break;
     case "under_review": {
       const adjuster = speakableName(c.adjuster_name);
-      const detail = claimText(c.status_detail);
       body = adjuster ? `is under review with your adjuster, ${adjuster}.` : "is under review.";
-      if (detail) body += ` ${sentenceCase(detail)}`;
       break;
     }
-    case "awaiting_documents": {
-      const docs = (Array.isArray(c.documents_required) ? c.documents_required : []).map(speakableText);
-      // A partial list would tell the caller they are done when they are not; drop it whole.
-      const whole = docs.length > 0 && docs.every((d): d is string => d !== null) ? listWords(docs) : "";
-      const list = whole && whole.length <= MAX_DOCUMENT_LIST_CHARS ? `: ${whole}` : "";
-      body = `needs a few documents from you before review can continue${list}.`;
-      if (c.documents_due) body += ` Please send them by ${speakDate(c.documents_due, refYear)}.`;
-      if (withInstructions) body += ` ${DOCUMENT_INSTRUCTIONS}`;
+    case "awaiting_documents":
+      body = c.documents_due
+        ? `needs documents from you by ${speakDate(c.documents_due, refYear)}.`
+        : "needs documents from you.";
       break;
-    }
     case "approved":
       body = amount !== null ? `was approved for ${speakMoney(amount)}.` : "was approved.";
       break;
     case "payment_issued": {
-      const payment = amount !== null ? `a payment of ${speakMoney(amount)}` : "a payment";
-      body = `was approved, and ${payment} was issued on ${speakDate(c.updated_on, refYear)}.`;
+      const on = speakDate(c.updated_on, refYear);
+      body = amount !== null ? `was paid, ${speakMoney(amount)} on ${on}.` : `was paid on ${on}.`;
       break;
     }
-    case "denied": {
-      const reason = claimText((c.status_detail ?? "").split(";")[0]);
-      body = "was denied, and I'm sorry about that.";
-      if (reason) {
-        // Lower-case the first letter so the reason reads as a clause, but keep an acronym intact.
-        const clause = /^[A-Z][A-Z]/.test(reason) ? reason : reason.charAt(0).toLowerCase() + reason.slice(1);
-        body += ` The reason given is that ${clause.replace(/[\s.,:!?-]+$/, "")}.`;
-      }
-      body += " You have thirty days to appeal.";
+    case "denied":
+      body = sorry ? `was denied, ${SORRY}` : "was denied.";
       break;
-    }
     case "closed":
       body = "is closed.";
       break;
     default:
       throw new Error("claimsSentence: unknown claim status");
   }
-  const line = `${head} ${body}`;
-  assertSpeakable(line);
-  return line;
+  return `${claimHead(c)} ${body}`;
 }
 
-/** Reading priority when not every claim fits: open claims before closed ones, then the newest. */
-function readingOrder(claims: Claim[]): number[] {
-  const closed = (c: Claim) => (c.status === "closed" ? 1 : 0);
-  return claims.map((_, i) => i).sort((a, b) =>
-    closed(claims[a]) - closed(claims[b]) ||
-    String(claims[b].filed_on).localeCompare(String(claims[a].filed_on)) ||
-    b - a
-  );
+// Statuses whose claims are read in one clause when two or more share them: nothing in the clause
+// differs from claim to claim (a claim under review with a named adjuster is read on its own). The
+// first form is a pair ("Your claims ending in X and Y were both ..."), the second any other group.
+const GROUP_CLAUSES: Readonly<Record<string, readonly [two: string, more: string]>> = {
+  received: ["were both received and are waiting for an adjuster.", "were received and are waiting for an adjuster."],
+  under_review: ["are both under review.", "are under review."],
+  denied: [`were both denied, ${SORRY}`, `were denied, ${SORRY}`],
+  closed: ["are both closed.", "are closed."],
+};
+
+function groupKey(c: Claim): string | null {
+  if (!(c.status in GROUP_CLAUSES) || !endingWords(c)) return null;
+  return c.status === "under_review" && speakableName(c.adjuster_name) ? null : c.status;
 }
 
-/** The full get_claim_status sentence for a verified caller's claims (non-empty list). refDate = today
- *  (YYYY-MM-DD) in America/New_York. maxChars bounds the sentence (verify_identity's chained read
- *  leaves room for the verified opening in front of it). */
-export function claimsSentence(claims: Claim[], refDate: string, maxChars: number = MAX_SPOKEN_CHARS): string {
-  if (!Array.isArray(claims) || claims.length === 0) throw new Error("claimsSentence: no claims");
-  const refMatch = typeof refDate === "string" ? ISO_DATE.exec(refDate.trim()) : null;
-  const refYear = refMatch ? Number(refMatch[1]) : undefined;
-  const n = claims.length;
-  const lead = n > 1 ? `You have ${numberToWords(n)} claims on file. ` : "";
-  const which = n === 1 ? "that claim" : n === 2 ? "either claim" : "any of them";
-  // Every line is built (and checked) once; a busy account then reads only what fits.
-  const lines = claims.map((c) => claimLine(c, refYear, false));
-  const withInstructions = claims.map((c) => (c.status === "awaiting_documents" ? claimLine(c, refYear, true) : ""));
-  const compose = (picked: number[]): string => {
-    // How to send documents is said once, after the last claim read that needs them.
-    const lastAwaiting = picked.filter((i) => claims[i].status === "awaiting_documents").at(-1);
-    const read = picked.map((i) => (i === lastAwaiting ? withInstructions[i] : lines[i])).join(" ");
-    const rest = n - picked.length;
-    const unread = rest === 0
-      ? ""
-      : ` ${rest === 1 ? "There is one more claim" : `There are ${numberToWords(rest)} more claims`} on file, and ` +
-        `you can find every claim at ${CLAIMS_URL_SPOKEN}.`;
-    return `${lead}${read}${unread} Do you have any questions about ${which}?`;
-  };
-  const all = claims.map((_, i) => i);
-  let text = compose(all);
-  if (text.length > maxChars) {
-    // VAPI refuses a longer spoken tool message, so the claims that matter most are read (in filing
-    // order) and the caller is told the rest are on file.
-    const picked: number[] = [];
-    for (const i of readingOrder(claims)) {
-      const next = [...picked, i].sort((a, b) => a - b);
-      if (picked.length > 0 && compose(next).length > maxChars) break;
-      picked.splice(0, picked.length, ...next);
-    }
-    text = compose(picked);
+/** "Your claims ending in zero nine zero and eight four nine were both received and ..."; three or
+ *  more: "Three of your claims, ending in ..., were received and ...". A group that is every claim on
+ *  the account says so instead ("Both of your claims, ending in ...", "All three of your claims, ...")
+ *  and stands in for the count. */
+function groupClause(group: Claim[], total: number): string {
+  const [two, more] = GROUP_CLAUSES[group[0].status];
+  const endings = listWords(group.map(endingWords));
+  const count = numberToWords(group.length);
+  if (group.length === total) {
+    return `${group.length === 2 ? "Both" : `All ${count}`} of your claims, ending in ${endings}, ${more}`;
   }
+  if (group.length === 2) return `Your claims ending in ${endings} ${two}`;
+  return `${capitalised(count)} of your claims, ending in ${endings}, ${more}`;
+}
+
+interface SummaryItem {
+  claims: Claim[];
+  text: string;
+}
+
+/** The summary's clauses in reading order; a group stands where its newest claim would. Only the
+ *  first denial says it is sorry. */
+function summaryItems(claims: Claim[], refYear: number | undefined): SummaryItem[] {
+  const ordered = [...claims].sort(byReadingPriority);
+  const groups = new Map<string, Claim[]>();
+  for (const c of ordered) {
+    const key = groupKey(c);
+    if (key) groups.set(key, [...(groups.get(key) ?? []), c]);
+  }
+  const items: SummaryItem[] = [];
+  const read = new Set<string>();
+  let sorry = true;
+  for (const c of ordered) {
+    const key = groupKey(c);
+    const group = key ? groups.get(key) ?? [] : [];
+    if (key && group.length >= 2) {
+      if (read.has(key)) continue;
+      read.add(key);
+      items.push({ claims: group, text: groupClause(group, claims.length) });
+      if (key === "denied") sorry = false;
+    } else {
+      items.push({ claims: [c], text: summaryClause(c, refYear, sorry) });
+      if (c.status === "denied") sorry = false;
+    }
+  }
+  for (const item of items) assertSpeakable(item.text);
+  return items;
+}
+
+/** The one question the summary ends on: what the claims read lead to next. */
+function summaryQuestion(read: Claim[], total: number): string {
+  if (read.some((c) => c.status === "awaiting_documents")) {
+    return "Would you like me to go over what's needed, or email you the list?";
+  }
+  if (read.some((c) => c.status === "denied")) return "Would you like to hear the reason and how to appeal?";
+  return `Do you have any questions about ${total === 1 ? "it" : total === 2 ? "either one" : "any of them"}?`;
+}
+
+/** The summary as spoken, and the claims it named (in reading order); the rest were only counted. */
+function summaryPlan(claims: Claim[], refDate: string, maxWords: number): { text: string; read: Claim[] } {
+  if (!Array.isArray(claims) || claims.length === 0) throw new Error("claimsSentence: no claims");
+  const total = claims.length;
+  const items = summaryItems(claims, refYearOf(refDate));
+  // A group that is every claim already says how many there are.
+  const lead = total > 1 && items[0].claims.length < total ? `You have ${numberToWords(total)} claims.` : "";
+  const compose = (count: number) => {
+    const read = items.slice(0, count).flatMap((item) => item.claims);
+    const rest = total - read.length;
+    const more = rest === 0
+      ? ""
+      : rest === 1
+      ? "There is one more claim on file."
+      : `There are ${numberToWords(rest)} more claims on file.`;
+    const text = [lead, ...items.slice(0, count).map((item) => item.text), more, summaryQuestion(read, total)]
+      .filter(Boolean)
+      .join(" ");
+    return { text, read };
+  };
+  let count = Math.min(MAX_SUMMARY_ITEMS, items.length);
+  let plan = compose(count);
+  while (count > 1 && spokenWords(plan.text) > maxWords) plan = compose(--count);
+  assertSpeakable(plan.text);
+  return plan;
+}
+
+/** get_claim_status's summary (code ok) for a verified caller's claims (non-empty list): "You have two
+ *  claims." when there are several, one short clause per claim (or per group of claims that read the
+ *  same) in reading priority, and one closing question. At most four clauses, and only as many as fit
+ *  maxWords; the claims left over are counted ("There is one more claim on file."), never dropped
+ *  silently, and a question about which claim offers them first (claimsUnread). refDate = today
+ *  (YYYY-MM-DD) in America/New_York. verify_identity's chained read passes what is left of the turn
+ *  after its opening. */
+export function claimsSentence(claims: Claim[], refDate: string, maxWords: number = MAX_TURN_WORDS): string {
+  return summaryPlan(claims, refDate, maxWords).text;
+}
+
+/** The claims the default summary (a whole turn's words) only counted, in reading order. */
+export function claimsUnread(claims: Claim[], refDate: string): Claim[] {
+  const { read } = summaryPlan(claims, refDate, MAX_TURN_WORDS);
+  return [...claims].sort(byReadingPriority).filter((c) => !read.includes(c));
+}
+
+const DOCUMENT_HOW =
+  `You can upload them at ${CLAIMS_URL_SPOKEN}, or email them to claims docs at observeinsurance dot com.`;
+const DOCUMENTS_QUESTION = "Would you like me to email you this list too?";
+// A list too long to say, or a claim only mentioned: the email carries what was not read.
+const DOCUMENTS_QUESTION_FULL = "Would you like me to email you the full list?";
+// One claim's details when the adjuster's name leaves no room for how to send them: the documents
+// answer (detail documents) says how, and the email carries the list.
+const DOCUMENTS_HOW_QUESTION = "Would you like to hear how to send them, or have me email you this list?";
+const DOCUMENTS_HOW_QUESTION_FULL = "Would you like to hear how to send them, or have me email you the full list?";
+const NO_DOCUMENTS_NEEDED = "None of your claims needs documents right now. Is there anything else I can help with?";
+
+/** The documents a claim still needs as one spoken list, or "" when there are none, any of them
+ *  cannot be said (a partial list would tell the caller they are done when they are not), or the
+ *  list is too long to read out. */
+function documentList(c: Claim): string {
+  const docs = (Array.isArray(c.documents_required) ? c.documents_required : []).map(speakableText);
+  if (docs.length === 0 || !docs.every((d): d is string => d !== null)) return "";
+  const list = listWords(docs);
+  return list.length <= MAX_DOCUMENT_LIST_CHARS ? list : "";
+}
+
+/** "October twenty-fourth" for a claim's documents due date, or "" without one. */
+function dueWords(c: Claim, refYear: number | undefined): string {
+  return c.documents_due ? speakDate(c.documents_due, refYear) : "";
+}
+
+/** "For your home claim ending in one nine eight, we need photos of the damage, ..., by October
+ *  twenty-fourth." Unlisted (or with nothing speakable to list): "a few documents". */
+function documentsLine(c: Claim, refYear: number | undefined, withList: boolean): { text: string; listed: boolean } {
+  const list = withList ? documentList(c) : "";
+  const ending = endingWords(c);
+  const due = dueWords(c, refYear);
+  return {
+    text: `For your ${typeWords(c)}${ending ? ` ending in ${ending}` : ""}, we need ${list || "a few documents"}${
+      due ? `, by ${due}` : ""
+    }.`,
+    listed: list !== "",
+  };
+}
+
+/** The claims awaiting documents that get no line of their own: mentioned, so none is missed. One is
+ *  named by its ending (and its due date, when given) while that fits the turn. */
+function documentsToo(rest: Claim[], named: boolean, due: string): string {
+  if (rest.length === 0) return "";
+  if (rest.length === 1) {
+    if (!named) return "One more claim needs documents too.";
+    return due ? `${claimHead(rest[0])} needs documents by ${due}.` : `${claimHead(rest[0])} needs documents too.`;
+  }
+  return `${capitalised(numberToWords(rest.length))} more claims need documents too.`;
+}
+
+/** claim_documents: what the claims awaiting documents need, by when, and how to send them, in one
+ *  turn. At most two claims get a line (reading order: the earliest due date first); a list that does
+ *  not fit becomes "a few documents", and a claim that does not fit is only mentioned (by its ending
+ *  and due date while they fit). The closing offer of the email (which carries every list) says "the
+ *  full list" whenever something was not read out. */
+export function documentsSentence(claims: Claim[], refDate: string, maxWords: number = MAX_TURN_WORDS): string {
+  const awaiting = (Array.isArray(claims) ? claims : []).filter((c) => c.status === "awaiting_documents")
+    .sort(byReadingPriority);
+  if (awaiting.length === 0) throw new Error("documentsSentence: no claim awaits documents");
+  const refYear = refYearOf(refDate);
+  const [first, second] = awaiting;
+  const beyond = awaiting.slice(MAX_DOCUMENT_CLAIMS);
+  const rest = awaiting.slice(1);
+  const full = (c: Claim) => documentsLine(c, refYear, true);
+  const brief = (c: Claim) => documentsLine(c, refYear, false);
+  const secondDue = second ? dueWords(second, refYear) : "";
+  type Plan = [lines: ReturnType<typeof documentsLine>[], mentioned: Claim[], named: boolean, due: string];
+  // The most the turn can hold first: every list, then fewer lists, then the second claim only
+  // mentioned (with its due date, then without), then not even named.
+  const plans: Plan[] = second
+    ? [
+      [[full(first), full(second)], beyond, true, ""],
+      [[full(first), brief(second)], beyond, true, ""],
+      [[full(first)], rest, true, secondDue],
+      [[full(first)], rest, true, ""],
+      [[brief(first), brief(second)], beyond, true, ""],
+      [[brief(first)], rest, true, secondDue],
+      [[brief(first)], rest, true, ""],
+      [[brief(first)], rest, false, ""],
+    ]
+    : [[[full(first)], [], true, ""], [[brief(first)], [], true, ""]];
+  const texts = plans.map(([lines, mentioned, named, due]) => {
+    const everyList = mentioned.length === 0 && lines.every((l) => l.listed);
+    return [
+      ...lines.map((l) => l.text),
+      documentsToo(mentioned, named, due),
+      DOCUMENT_HOW,
+      everyList ? DOCUMENTS_QUESTION : DOCUMENTS_QUESTION_FULL,
+    ].filter(Boolean).join(" ");
+  });
+  const text = texts.find((t) => spokenWords(t) <= maxWords) ?? texts[texts.length - 1];
   assertSpeakable(text);
   return text;
+}
+
+/** claim_detail for a claim awaiting documents: its list and due date, its adjuster, and how to send
+ *  them, while they fit. When the adjuster and the instructions do not both fit, the adjuster is said
+ *  and the question offers how to send them (the documents answer) or the email. */
+function awaitingDetailSentence(c: Claim, refDate: string, maxWords: number): string {
+  const refYear = refYearOf(refDate);
+  const adjuster = speakableName(c.adjuster_name);
+  const adjusterLine = adjuster ? `Your adjuster is ${adjuster}.` : "";
+  const texts = [documentsLine(c, refYear, true), documentsLine(c, refYear, false)].flatMap(({ text, listed }) =>
+    [
+      [text, adjusterLine, DOCUMENT_HOW, listed ? DOCUMENTS_QUESTION : DOCUMENTS_QUESTION_FULL],
+      ...(adjusterLine ? [[text, adjusterLine, listed ? DOCUMENTS_HOW_QUESTION : DOCUMENTS_HOW_QUESTION_FULL]] : []),
+      [text, DOCUMENT_HOW, listed ? DOCUMENTS_QUESTION : DOCUMENTS_QUESTION_FULL],
+    ].map((parts) => parts.filter(Boolean).join(" "))
+  );
+  const text = texts.find((t) => spokenWords(t) <= maxWords) ?? texts[texts.length - 1];
+  assertSpeakable(text);
+  return text;
+}
+
+/** One part of a claim's details. A required part is always said, in its short form when its full
+ *  form does not fit; an optional one only while it fits. Parts are tried by rank (then in order) and
+ *  spoken in order. */
+interface DetailPart {
+  text: string;
+  full?: string;
+  optional?: boolean;
+  rank?: number;
+}
+
+function fitParts(parts: DetailPart[], closing: string, maxWords: number): string {
+  const chosen = parts.map((p) => (p.optional ? "" : p.text));
+  const compose = (said: string[]) => [...said.filter(Boolean), closing].join(" ");
+  const tries = parts.map((p, i) => ({ p, i }))
+    .filter(({ p }) => (p.optional ? p.text : p.full))
+    .sort((a, b) => (a.p.rank ?? 0) - (b.p.rank ?? 0) || a.i - b.i);
+  for (const { p, i } of tries) {
+    const said = chosen.map((t, j) => (j === i ? (p.optional ? p.text : p.full!) : t));
+    if (spokenWords(compose(said)) <= maxWords) chosen[i] = said[i];
+  }
+  return compose(chosen);
+}
+
+// The appeal: the window always; how to appeal (faq.json "Appeals") in the same sentence when it fits.
+const APPEAL_WINDOW = "You have thirty days to appeal.";
+const APPEAL_HOW =
+  "To appeal, send us a short letter within thirty days, saying why you disagree, with any new photos or estimates.";
+
+/** "direct deposit" from a payment note such as "Payment issued by direct deposit": how the payment
+ *  went out, said in the payment's own clause rather than as a second sentence repeating it. */
+function paymentMethod(note: string | null): string {
+  const m = note ? /^payment (?:was )?issued\s+(?:by|via)\s+(.+?)[\s.]*$/i.exec(note) : null;
+  return m && spokenWords(m[1]) <= 6 ? m[1] : "";
+}
+
+/** claim_detail: the whole story of one claim (its status, the adjuster, the claims system's note, a
+ *  denial's reason and how to appeal) in one turn. A claim awaiting documents is told by its documents
+ *  and its adjuster. The optional parts are said while they fit; the status and the appeal window
+ *  always are. */
+export function claimDetailSentence(c: Claim, refDate: string, maxWords: number = MAX_TURN_WORDS): string {
+  if (typeof c !== "object" || c === null) throw new Error("claimDetailSentence: no claim");
+  if (c.status === "awaiting_documents") return awaitingDetailSentence(c, refDate, maxWords);
+  const refYear = refYearOf(refDate);
+  const amount = amountOf(c.amount_approved);
+  const adjuster = speakableName(c.adjuster_name);
+  const note = claimText(c.status_detail);
+  const noteLine = note ? sentenceCase(note) : "";
+  const adjusterLine = adjuster ? `Your adjuster is ${adjuster}.` : "";
+  let parts: DetailPart[];
+  switch (c.status) {
+    case "received":
+      parts = [{
+        text: `was received on ${speakDate(c.filed_on, refYear)} and is waiting for an adjuster to be assigned.`,
+      }];
+      break;
+    case "under_review":
+      parts = [
+        { text: adjuster ? `is under review with your adjuster, ${adjuster}.` : "is under review." },
+        { text: noteLine, optional: true },
+      ];
+      break;
+    case "approved":
+      parts = [
+        { text: amount !== null ? `was approved for ${speakMoney(amount)}.` : "was approved." },
+        { text: noteLine, optional: true },
+        { text: adjusterLine, optional: true },
+      ];
+      break;
+    case "payment_issued": {
+      const payment = amount !== null ? `a payment of ${speakMoney(amount)}` : "a payment";
+      const on = speakDate(c.updated_on, refYear);
+      const method = paymentMethod(note);
+      parts = [
+        {
+          text: `was approved, and ${payment} was issued on ${on}.`,
+          full: method ? `was approved, and ${payment} was issued by ${method} on ${on}.` : undefined,
+        },
+        // a note that only says how the payment went is said in the clause above, never again
+        { text: method ? "" : noteLine, optional: true, rank: 1 },
+        { text: adjusterLine, optional: true, rank: 2 },
+      ];
+      break;
+    }
+    case "denied": {
+      // The reason is the note's first clause (the seeded note goes on to the appeal window).
+      const reason = claimText((c.status_detail ?? "").split(";")[0]);
+      // Lower-case the first letter so the reason reads as a clause, but keep an acronym intact.
+      const clause = reason && (/^[A-Z][A-Z]/.test(reason) ? reason : reason.charAt(0).toLowerCase() + reason.slice(1));
+      // The summary already said it was sorry (rule 16): the details lead with the reason.
+      parts = [
+        {
+          text: "was denied.",
+          full: clause ? `was denied because ${clause.replace(/[\s.,:!?-]+$/, "")}.` : undefined,
+          rank: 0,
+        },
+        { text: adjusterLine, optional: true, rank: 2 },
+        { text: APPEAL_WINDOW, full: APPEAL_HOW, rank: 1 },
+      ];
+      break;
+    }
+    case "closed":
+      parts = [
+        { text: "is closed." },
+        { text: noteLine, optional: true },
+        { text: adjusterLine, optional: true },
+      ];
+      break;
+    default:
+      throw new Error("claimDetailSentence: unknown claim status");
+  }
+  const head = claimHead(c);
+  parts[0] = { ...parts[0], text: `${head} ${parts[0].text}`, full: parts[0].full && `${head} ${parts[0].full}` };
+  const text = fitParts(parts, ANYTHING_ELSE_SHORT, maxWords);
+  assertSpeakable(text);
+  return text;
+}
+
+/** The most claims a question about which claim offers (the rest stay on file for a later turn). */
+export const MAX_WHICH_CLAIMS = 4;
+// Only when no claim on offer has an ending to say: by type, never by a number (rule 11).
+const NOT_IDENTIFIED = "Which claim do you mean, your auto, home or property claim?";
+// Two claims of the same type with the same ending are told apart by where they stand.
+const WHICH_STATUS: Readonly<Record<string, string>> = {
+  received: "that was received",
+  under_review: "that's under review",
+  awaiting_documents: "that needs documents",
+  approved: "that was approved",
+  payment_issued: "that was paid",
+  denied: "that was denied",
+  closed: "that's closed",
+};
+
+function orWords(items: string[]): string {
+  if (items.length <= 2) return items.join(" or ");
+  return `${items.slice(0, -1).join(", ")}, or ${items[items.length - 1]}`;
+}
+
+/** claim_not_identified from {claims: [{claim_number_last3, claim_type?, status?}]}: the claims the
+ *  caller's words matched, or every claim with the ones the summary only counted first. The first
+ *  four with an ending are offered by type and ending ("Which claim do you mean, your home claim
+ *  ending in one nine eight or your auto claim ending in one one five?"; "Which auto claim do you
+ *  mean, the one ending in ...?" when they share a type), and by where they stand when type and
+ *  ending are the same. Without two endings to offer it asks by type. */
+function notIdentified(d: Record<string, unknown>): string {
+  const offered = (Array.isArray(d.claims) ? d.claims : [])
+    .map((raw) => {
+      const c = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : {};
+      const type = typeof c.claim_type === "string" && (CLAIM_TYPES as readonly string[]).includes(c.claim_type)
+        ? c.claim_type
+        : "";
+      const status = typeof c.status === "string" && c.status in WHICH_STATUS ? c.status : "";
+      return { last3: claimLast3(c.claim_number_last3), type, status };
+    })
+    .filter((c) => c.last3 !== "")
+    .slice(0, MAX_WHICH_CLAIMS);
+  if (offered.length < 2) return NOT_IDENTIFIED;
+  const typed = offered.every((c) => c.type !== "");
+  const sameType = typed && offered.every((c) => c.type === offered[0].type);
+  const twin = (c: typeof offered[number]) =>
+    offered.filter((o) => o.last3 === c.last3 && (!typed || o.type === c.type)).length > 1;
+  const status = (c: typeof offered[number]) => (twin(c) && c.status ? ` ${WHICH_STATUS[c.status]}` : "");
+  if (!typed || sameType) {
+    const which = sameType ? `Which ${offered[0].type} claim do you mean` : "Which claim do you mean";
+    if (!offered.some(twin)) return `${which}, the one ending in ${orWords(offered.map((c) => speakDigits(c.last3)))}?`;
+    return `${which}, ${orWords(offered.map((c) => `the one ending in ${speakDigits(c.last3)}${status(c)}`))}?`;
+  }
+  return `Which claim do you mean, ${
+    orWords(offered.map((c) => `your ${c.type} claim ending in ${speakDigits(c.last3)}${status(c)}`))
+  }?`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -518,6 +923,17 @@ export function claimsSentence(claims: Claim[], refDate: string, maxChars: numbe
 function isClaimList(v: unknown): v is Claim[] {
   return Array.isArray(v) && v.length > 0 &&
     v.every((c) => typeof c === "object" && c !== null && "claim_number" in c && "status" in c && "filed_on" in c);
+}
+
+/** A claims sentence from {claims, refDate}. Tools compose these directly; without the claims there is
+ *  nothing true to say, so the honest fallback is the trouble line that offers a representative. */
+function fromClaims(d: Record<string, unknown>, compose: (claims: Claim[], refDate: string) => string): string {
+  if (!isClaimList(d.claims)) return SYSTEM_ERROR;
+  try {
+    return compose(d.claims, typeof d.refDate === "string" ? d.refDate : "");
+  } catch {
+    return SYSTEM_ERROR;
+  }
 }
 
 function repQueued(d: Record<string, unknown>): string {
@@ -691,18 +1107,21 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
       return NO_LOOKUP_YET;
     case "dob_unreadable":
       return DOB_UNREADABLE;
-    case "ok": {
-      // Tools compose this with claimsSentence directly; without the claims there is nothing true
-      // to say, so the honest fallback is the trouble line that offers a representative.
-      if (!isClaimList(d.claims)) return SYSTEM_ERROR;
-      try {
-        return claimsSentence(d.claims, typeof d.refDate === "string" ? d.refDate : "");
-      } catch {
-        return SYSTEM_ERROR;
-      }
-    }
+    case "ok":
+      return fromClaims(d, claimsSentence);
     case "no_claims":
       return NO_CLAIMS;
+    case "claim_documents":
+      return fromClaims(d, documentsSentence);
+    case "no_documents_needed":
+      return NO_DOCUMENTS_NEEDED;
+    case "claim_detail":
+      return fromClaims(d, (claims, refDate) => {
+        if (claims.length !== 1) throw new Error("claim_detail: expected one claim");
+        return claimDetailSentence(claims[0], refDate);
+      });
+    case "claim_not_identified":
+      return notIdentified(d);
     case "not_verified":
       if (d.level === "phone_found") return NOT_VERIFIED_PHONE_FOUND;
       if (d.level === "locked") return LOCKED;

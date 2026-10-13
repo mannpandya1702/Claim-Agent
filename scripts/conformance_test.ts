@@ -6,6 +6,7 @@ import { assert, assertEquals, assertMatch, assertThrows } from "@std/assert";
 import {
   ANALYSIS_OUTCOMES,
   CALL_REASONS,
+  CLAIM_STATUS_DETAILS,
   CLAIM_TYPES,
   INFO_EMAIL_TOPICS,
   MODEL_ESCALATION_REASONS,
@@ -506,7 +507,9 @@ Deno.test("function tools: the server tools, flat non-strict schemas, Bearer ser
   });
   // the intent is optional: an unstated reason verifies exactly as before
   assertEquals(withRep.tools.verify_identity.function.parameters.required, ["dob_month", "dob_day", "dob_year"]);
-  assertEquals(props("get_claim_status"), {});
+  // which detail and which claim only; the account still comes from the verified call
+  assertEquals(props("get_claim_status"), { detail: "string", claim_ending: "string" });
+  assertEquals(withRep.tools.get_claim_status.function.parameters.required, undefined);
   assertEquals(props("escalate"), { reason: "string", details: "string", callback_phone: "string" });
   assertEquals(props("report_emergency"), { note: "string" });
   assertEquals(props("send_info_email"), { topic: "string" });
@@ -539,6 +542,7 @@ Deno.test("tool enums match enums.ts", () => {
   assertEquals(p("escalate").reason.enum, [...MODEL_ESCALATION_REASONS]);
   assertEquals(p("send_info_email").topic.enum, [...INFO_EMAIL_TOPICS]);
   assertEquals(p("verify_identity").intent.enum, [...VERIFY_INTENTS]);
+  assertEquals(p("get_claim_status").detail.enum, [...CLAIM_STATUS_DETAILS]);
   assertEquals(p("start_claim").claim_type.enum, [...CLAIM_TYPES]);
 });
 
@@ -691,7 +695,27 @@ Deno.test("reporting a loss: the contact assistants carry both claim tools and t
       /intent set from what the caller has asked for: claim_status .*, file_claim .*, and other /,
       key,
     );
-    assertMatch(prompt, /never call get_claim_status for that same request/, key);
+    assertMatch(prompt, /never call get_claim_status with no detail for that same request/, key);
+    // the summary first; each detail on request from a new call, never from memory
+    assertMatch(prompt, /call get_claim_status with no detail\./, key);
+    assertMatch(prompt, /or ask what they need to send, call get_claim_status with detail documents\./, key);
+    assertMatch(
+      prompt,
+      /call get_claim_status with detail claim and claim_ending set to the last digits they said/,
+      key,
+    );
+    assertMatch(prompt, /If they didn't say which claim, leave claim_ending out: the tool asks them/, key);
+    // the claims the summary only counted are reached through the question about which claim
+    assertMatch(
+      prompt,
+      /When they ask about the other claims on file, call get_claim_status with detail claim and leave claim_ending out\./,
+      key,
+    );
+    // rule 11 never claims that the summary names every claim
+    assertMatch(prompt, /names the claims it reads by their last three digits and says how many more are on file/, key);
+    assert(!/names every claim|summary of every claim/.test(prompt), key);
+    assertMatch(prompt, /call send_info_email as rule 18 says: document_checklist for the documents/, key);
+    assertMatch(prompt, /Never say a claim's details from memory or from an earlier tool result/, key);
     // only a read that happened stops the separate one: a failed chained read leaves get_claim_status open
     assertMatch(prompt, /When verify_identity's verified sentence has already read the caller's claims, or said/, key);
     assertMatch(

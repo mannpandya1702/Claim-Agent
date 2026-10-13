@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertFalse } from "@std/assert";
-import { verifiedSentence } from "./prior_contacts.ts";
+import { statusOpening, verifiedSentence } from "./prior_contacts.ts";
 import { sentenceFor } from "./speak.ts";
 import type { PriorInteraction } from "./types.ts";
 
@@ -123,4 +123,14 @@ Deno.test("verifiedSentence: the plain sentence is speak.ts's verified sentence,
   assert(
     s.startsWith(sentenceFor("verified", { first_name: "Tobias" }).replace(" What can I help you with today?", "")),
   );
+});
+
+Deno.test("statusOpening: the chained claims read opens with the thanks, plus welcome back without the date", () => {
+  const history = [row("2026-10-11T02:30:00Z")];
+  assertEquals(statusOpening("Tobias", history, true), "Thank you, Tobias, you're verified. Welcome back.");
+  // exactly when verifiedSentence would welcome the caller back
+  assertEquals(statusOpening("Tobias", history, false), "Thank you, Tobias, you're verified.");
+  assertEquals(statusOpening("Tobias", [], true), "Thank you, Tobias, you're verified.");
+  assertEquals(statusOpening("Tobias", [row("not a timestamp")], true), "Thank you, Tobias, you're verified.");
+  assertEquals(statusOpening("", history, true), "Thank you, you're verified. Welcome back.");
 });

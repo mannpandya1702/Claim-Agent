@@ -577,6 +577,31 @@ Deno.test("outcome: server facts first (emergency > escalated > auth_failed > no
       (m) => withLlmOutcome(m, "unsupported"),
       "resolved",
     ],
+    ...(["claim_documents", "no_documents_needed", "claim_detail"] as const).map((code): [
+      string,
+      CallFacts,
+      (m: VapiMessage) => VapiMessage,
+      Outcome,
+    ] => [
+      `${code} counts as a status read`,
+      facts({
+        session: session(K, "verified", TOBIAS.id),
+        verifiedCustomer: TOBIAS,
+        attempts: [attempt(K, "get_claim_status", "other", code)],
+      }),
+      (m) => withLlmOutcome(m, "unsupported"),
+      "resolved",
+    ]),
+    [
+      "asking which claim is not a status read: the LLM decides",
+      facts({
+        session: session(K, "verified", TOBIAS.id),
+        verifiedCustomer: TOBIAS,
+        attempts: [attempt(K, "get_claim_status", "other", "claim_not_identified")],
+      }),
+      (m) => withLlmOutcome(m, "unsupported"),
+      "unsupported",
+    ],
     [
       "verified without a status read: the LLM decides",
       facts({ session: session(K, "verified", TOBIAS.id), verifiedCustomer: TOBIAS }),
@@ -1234,7 +1259,11 @@ Deno.test("call log: a completed report is queued in the request and the fast pa
   await settle();
   assertEquals(calls.map((c) => c.url), ["https://api.airtable.com/v0/appPOSTCALL/Call%20Log"]);
   const fields = JSON.parse(String(calls[0].init.body)).records[0].fields;
-  assertEquals([fields["Call ID"], fields["Caller Name"], fields["Outcome"]], [FULL_ID, "Tobias Halvorsen", "resolved"]);
+  assertEquals([fields["Call ID"], fields["Caller Name"], fields["Outcome"]], [
+    FULL_ID,
+    "Tobias Halvorsen",
+    "resolved",
+  ]);
   assertEquals(fields["Analysis Status"], "ok");
   assertFalse(JSON.stringify(fields).includes("6025550101"), "the caller's number never crosses whole");
   assertEquals([queued.attempts, queued.external_id, queued.last_error], [1, "recFULL", null]);
@@ -1714,7 +1743,13 @@ Deno.test("name chain: a new caller's confirmed name comes before the analysis' 
 Deno.test("name chain: the verified name wins; a pending email update is the record's email, never the account's", () => {
   const verified: PostCallFacts = {
     ...verifiedFacts(),
-    contact: contact(FULL_ID, { kind: "email_update", first_name: "Tobias", last_name: "Halvorsen", customer_id: TOBIAS.id, email: "tobias.new@gmail.com" }),
+    contact: contact(FULL_ID, {
+      kind: "email_update",
+      first_name: "Tobias",
+      last_name: "Halvorsen",
+      customer_id: TOBIAS.id,
+      email: "tobias.new@gmail.com",
+    }),
   };
   const row = buildInteractionRow(fixture("full"), verified);
   assertEquals([row.caller_name, row.caller_type, row.caller_email, row.caller_phone], [

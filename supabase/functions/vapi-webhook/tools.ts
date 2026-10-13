@@ -19,7 +19,9 @@ import {
 import {
   type CallbackSource,
   CLAIM_DOCUMENTS,
+  CLAIM_STATUS_DETAILS,
   CLAIM_TYPES,
+  type ClaimStatusDetail,
   type ClaimType,
   type Code,
   CODES,
@@ -46,17 +48,23 @@ import {
 } from "./identity.ts";
 import { parseLossDate } from "./loss_date.ts";
 import { parseToolRequest } from "./parse_tool_request.ts";
-import { verifiedSentence } from "./prior_contacts.ts";
+import { statusOpening, verifiedSentence } from "./prior_contacts.ts";
 import { redactPII } from "./redact.ts";
 import {
   assertSpeakable,
+  byReadingPriority,
+  claimDetailSentence,
   claimsSentence,
+  claimsUnread,
+  documentsSentence,
   MAX_SPOKEN_CHARS,
+  MAX_TURN_WORDS,
+  MAX_WHICH_CLAIMS,
   sentenceFor,
   spokenName,
+  spokenWords,
   verifiedFileClaimSentence,
   verifiedStatusSentence,
-  withoutTrailingQuestion,
 } from "./speak.ts";
 import type {
   AttemptRow,
@@ -300,15 +308,16 @@ function claimsData(claims: Claim[]): Record<string, unknown>[] {
   }));
 }
 
-/** verify_identity with intent claim_status reads the claims in the same call. The read is recorded in
- *  the ledger as a get_claim_status of its own (toolCallId "<id>:status"), so the post-call outcome
- *  and the flags see a status read exactly as they would for the separate tool. A replay finds that
- *  row and records nothing again (the claims are simply read again, as a get_claim_status replay
- *  does); a failed read gives the plain verified answer. */
+/** verify_identity with intent claim_status reads the claims summary in the same call, after a short
+ *  opening (statusOpening), within one turn's words. The read is recorded in the ledger as a
+ *  get_claim_status of its own (toolCallId "<id>:status"), so the post-call outcome and the flags see
+ *  a status read exactly as they would for the separate tool. A replay finds that row and records
+ *  nothing again (the claims are simply read again, as a get_claim_status replay does); a failed read
+ *  gives the plain verified answer. */
 async function chainedStatus(
   ctx: Run,
   customerId: string,
-  verified: string,
+  opening: string,
 ): Promise<{ sentence: string; claims: Claim[] } | null> {
   const { store } = ctx.deps;
   const statusId = `${ctx.toolCallId}:status`;
@@ -324,12 +333,11 @@ async function chainedStatus(
   };
   try {
     const claims = await store.getClaims(customerId);
-    // The status read follows the verified opening, so it gets what is left of VAPI's limit.
-    const room = MAX_SPOKEN_CHARS - withoutTrailingQuestion(verified).length - 1;
+    // The summary follows the opening in the same turn, so it gets the words the opening leaves.
     const status = claims.length === 0
       ? sentenceFor("no_claims")
-      : claimsSentence(claims, todayInNewYork(ctx.deps.now()), room);
-    const sentence = verifiedStatusSentence(verified, status);
+      : claimsSentence(claims, todayInNewYork(ctx.deps.now()), MAX_TURN_WORDS - spokenWords(opening));
+    const sentence = verifiedStatusSentence(opening, status);
     if (!isSpeakable(sentence) || sentence.length > MAX_SPOKEN_CHARS) throw new Error("chained status not speakable");
     record(claims.length === 0 ? "no_claims" : "ok");
     return { sentence, claims };
@@ -380,7 +388,7 @@ async function verifyIdentity(args: Args, ctx: Run): Promise<ToolResult> {
     return verified(verifiedFileClaimSentence(sentence, resume));
   }
   if (intent === "claim_status" && customerId) {
-    const chained = await chainedStatus(ctx, customerId, sentence);
+    const chained = await chainedStatus(ctx, customerId, statusOpening(firstName, rows, enabled));
     if (chained) {
       data.status_read = true;
       data.claims = claimsData(chained.claims);
@@ -391,21 +399,179 @@ async function verifyIdentity(args: Args, ctx: Run): Promise<ToolResult> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// get_claim_status {}
+// get_claim_status {detail?, claim_ending?}
 // ---------------------------------------------------------------------------------------------
-async function getClaimStatus(_args: Args, ctx: Run): Promise<ToolResult> {
+/** What claim_ending names, as a key of up to three space-separated parts in this order: a claim
+ *  type ("auto", "home", "property"), a status ("denied", "payment_issued", "approved", ...) and the
+ *  last digits ("198"). "home 198" for "the home one ending in 198"; "" when it names nothing.
+ *  Digits are a numeral group ("198", "CLM-240198", or single digits said apart, "1 9 8") or digit
+ *  words ("one nine eight", or one after "ending in"); dates and amounts are never read as an ending
+ *  ("the one paid October 8" is the paid claim), and two different endings ("198 or 115") name no
+ *  digits at all, so the tool asks which. Self-contained (no module references), so the battery's
+ *  VAPI code tool runs this same reading from its source. */
+export function claimEndingKey(v: unknown): string {
+  if (typeof v !== "string" && typeof v !== "number") return "";
+  const month =
+    "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
+  const text = ` ${String(v).toLowerCase()} `
+    .replace(new RegExp(`\\b(?:${month})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b(?:,?\\s*\\d{4}\\b)?`, "g"), " ")
+    .replace(new RegExp(`\\b\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?(?:${month})\\b`, "g"), " ")
+    .replace(/\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, " ")
+    .replace(/\$\s*\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s*(?:dollars?|bucks|cents?)\b/g, " ")
+    .replace(/\b\d+(?:st|nd|rd|th)\b|\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b|\b\d+\.\d+\b/g, " ");
+  const tokens = text.split(/[^a-z0-9]+/).filter((t) => t !== "");
+  const digitWords: Record<string, string> = {
+    zero: "0",
+    oh: "0",
+    one: "1",
+    two: "2",
+    three: "3",
+    four: "4",
+    five: "5",
+    six: "6",
+    seven: "7",
+    eight: "8",
+    nine: "9",
+  };
+  const types: Record<string, string> = {
+    auto: "auto",
+    car: "auto",
+    vehicle: "auto",
+    home: "home",
+    house: "home",
+    property: "property",
+  };
+  const statuses: Record<string, string> = {
+    received: "received",
+    review: "under_review",
+    documents: "awaiting_documents",
+    document: "awaiting_documents",
+    docs: "awaiting_documents",
+    paperwork: "awaiting_documents",
+    approved: "approved",
+    paid: "payment_issued",
+    payment: "payment_issued",
+    denied: "denied",
+    denial: "denied",
+    closed: "closed",
+  };
+  // Runs of adjacent numerals and digit words. Single digits said apart join into one ending; a
+  // longer numeral is an ending of its own. Digit words alone count only as two or more, after
+  // "ending in", or as the whole answer: "the home one" names a type, not a claim ending in one.
+  const groups: string[] = [];
+  let run: string[] = [];
+  const flush = (end: number) => {
+    if (run.length === 0) return;
+    const words = run.every((t) => t in digitWords);
+    const before = tokens[end - run.length - 1] ?? "";
+    const cue = before === "in" || before === "ending" || before === "ends";
+    if (words && !(run.length >= 2 || cue || run.length === tokens.length)) {
+      run = [];
+      return;
+    }
+    const digits = run.map((t) => digitWords[t] ?? t);
+    if (digits.every((d) => d.length === 1)) groups.push(digits.join(""));
+    else groups.push(...digits.filter((d) => d.length > 1));
+    run = [];
+  };
+  tokens.forEach((t, i) => {
+    if (/^[0-9]+$/.test(t) || t in digitWords) run.push(t);
+    else flush(i);
+  });
+  flush(tokens.length);
+  // One ending, or several that agree ("CLM-240198, ending 198"); anything else names no digits.
+  const longest = groups.reduce((a, b) => (b.length > a.length ? b : a), "");
+  const digits = groups.every((g) => longest.endsWith(g)) ? longest : "";
+  const one = (found: string[]) => (new Set(found).size === 1 ? found[0] : "");
+  const type = one(tokens.filter((t) => t in types).map((t) => types[t]));
+  const status = one(tokens.filter((t) => t in statuses).map((t) => statuses[t]));
+  return [type, status, digits].filter(Boolean).join(" ");
+}
+
+/** Whether a claim (its number's digits, type and status) is the one a claimEndingKey key names:
+ *  every part of the key must fit ("approved" fits a claim that has since been paid). Self-contained,
+ *  like claimEndingKey, so the battery's mock matches claims exactly as the server does. */
+export function claimMatchesKey(digits: string, type: string, status: string, key: string): boolean {
+  if (!key) return false;
+  return key.split(" ").every((part) =>
+    /^[0-9]+$/.test(part)
+      ? digits.endsWith(part)
+      : part === "auto" || part === "home" || part === "property"
+      ? type === part
+      : part === "approved"
+      ? status === "approved" || status === "payment_issued"
+      : status === part
+  );
+}
+
+/** The claims claim_ending names (claimMatchesKey), in the order given. */
+function claimsNamed(claims: Claim[], key: string): Claim[] {
+  return claims.filter((c) =>
+    claimMatchesKey(String(c.claim_number ?? "").replace(/\D/g, ""), c.claim_type, c.status, key)
+  );
+}
+
+/** claim_not_identified's data: the claims offered, by ending, type and status (ids and enums only). */
+export function claimChoicesData(claims: Claim[]): Record<string, unknown>[] {
+  return claims.map((c) => ({
+    claim_number_last3: String(c.claim_number ?? "").replace(/\D/g, "").slice(-3),
+    claim_type: c.claim_type,
+    status: c.status,
+  }));
+}
+
+/** The claims a question about which claim offers, at most MAX_WHICH_CLAIMS: the ones the caller's
+ *  words matched (named, two or more) in reading order; otherwise every claim, the ones the summary
+ *  only counted ("There are two more claims on file.") first, so the caller hears their endings. */
+export function claimsToOffer(claims: Claim[], named: Claim[], today: string): Claim[] {
+  if (named.length > 1) return [...named].sort(byReadingPriority).slice(0, MAX_WHICH_CLAIMS);
+  const unread = claimsUnread(claims, today);
+  const read = [...claims].sort(byReadingPriority).filter((c) => !unread.includes(c));
+  return [...unread, ...read].slice(0, MAX_WHICH_CLAIMS);
+}
+
+function statusDetailOf(v: unknown, key: string): ClaimStatusDetail {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+  if ((CLAIM_STATUS_DETAILS as readonly string[]).includes(s)) return s as ClaimStatusDetail;
+  // An off-list or missing detail never refuses: a named claim means that claim, else the summary.
+  return key ? "claim" : "summary";
+}
+
+async function getClaimStatus(args: Args, ctx: Run): Promise<ToolResult> {
   const { store } = ctx.deps;
   const session = await store.getSession(ctx.callKey);
   if (session?.level !== "verified") return answer("not_verified", { level: session?.level ?? "none" });
-  // The customer comes from the session only; the tool takes no customer or claim argument.
+  // The customer comes from the session only; claim_ending only picks among that customer's claims.
   if (!session.verified_customer_id) throw new Error("verified session without a verified customer");
   const claims = await store.getClaims(session.verified_customer_id);
   if (claims.length === 0) return answer("no_claims");
-  return {
-    code: "ok",
-    sentence: claimsSentence(claims, todayInNewYork(ctx.deps.now())),
-    data: { claims: claimsData(claims) },
-  };
+  const today = todayInNewYork(ctx.deps.now());
+  const key = claimEndingKey(args.claim_ending);
+  const read = (code: Code, sentence: string, which: Claim[]): ToolResult => ({
+    code,
+    sentence,
+    data: { claims: claimsData(which) },
+  });
+  switch (statusDetailOf(args.detail, key)) {
+    case "documents": {
+      const awaiting = claims.filter((c) => c.status === "awaiting_documents");
+      if (awaiting.length === 0) return answer("no_documents_needed");
+      // A claim the caller named narrows the list only when it is one of those awaiting documents.
+      const named = claimsNamed(awaiting, key);
+      const which = named.length === 1 ? named : awaiting;
+      return read("claim_documents", documentsSentence(which, today), which);
+    }
+    case "claim": {
+      const named = claimsNamed(claims, key);
+      // An account's only claim is the one they mean, whatever words came with it (a misheard ending,
+      // a type it is not): its details say its type and ending, so a wrong guess is plain to hear.
+      const one = named.length === 1 ? named[0] : claims.length === 1 ? claims[0] : null;
+      if (one) return read("claim_detail", claimDetailSentence(one, today), [one]);
+      return answer("claim_not_identified", { claims: claimChoicesData(claimsToOffer(claims, named, today)) });
+    }
+    default:
+      return read("ok", claimsSentence(claims, today), claims);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
