@@ -55,21 +55,15 @@
           "type": "both",
           "assistantRegex": "(phone number|best number|reach you|right number|that number|another number|number on)",
           "assistantRegexOptions": [{ "type": "ignore-case", "enabled": true }],
-          "customerRegex": "^(?:(?!\\b(?:double|triple)\\s+\\d)\\D)*(?:(?:\\d|\\b(?:double|triple)(?=\\s+\\d))(?:(?!\\b(?:double|triple)\\s+\\d)\\D)*){1,9}$",
-          "customerRegexOptions": [{ "type": "ignore-case", "enabled": true }],
+          "customerRegex": "^[^0-9]*(?:[0-9][^0-9]*){1,9}$",
           "timeoutSeconds": 1.6
-        },
-        {
-          "type": "customer",
-          "regex": "^(?!.*\\b(?:19|20) ?\\d\\d\\b)(?=.*(?:\\d|\\b(?:double|triple))[\\s.,!?]*$)(?:(?!\\b(?:double|triple)\\s+\\d)\\D)*(?:(?:\\d|\\b(?:double|triple)(?=\\s+\\d))(?:(?!\\b(?:double|triple)\\s+\\d)\\D)*){3,9}$",
-          "regexOptions": [{ "type": "ignore-case", "enabled": true }],
-          "timeoutSeconds": 1.4
         },
         {
           "type": "both",
           "assistantRegex": "(date of birth|day and year)",
           "assistantRegexOptions": [{ "type": "ignore-case", "enabled": true }],
-          "customerRegex": "^(?!.*\\b(?:19|20) ?\\d\\d\\b)",
+          "customerRegex": "(?:(?:january|february|march|april|may|june|july|august|september|october|november|december)(?:[\\s-]+(?:[a-z]+|[0-9]{1,2}(?:st|nd|rd|th)?)){0,2}|^\\s*[0-9]{1,2}(?:[\\s/.-]+[0-9]{1,2})?|\\b(?:19|20))[\\s.,!?]*$",
+          "customerRegexOptions": [{ "type": "ignore-case", "enabled": true }],
           "timeoutSeconds": 1.6
         },
         {

@@ -845,14 +845,14 @@ function endpointingWait(assistant: string, customer: string): number | null {
   return RULES.find((r) => r.matches(assistant, customer))?.timeoutSeconds ?? null;
 }
 
-Deno.test("endpointing: a short base wait, smart endpointing, then five ordered rules that only wait when needed", () => {
+Deno.test("endpointing: a short base wait, smart endpointing, then four ordered rules that only wait when needed", () => {
   for (const key of ASSISTANT_KEYS) {
     const plan = withRep.assistants[key].payload.startSpeakingPlan;
     assertEquals(plan.waitSeconds, 0.4, key);
     assertEquals(plan.smartEndpointingPlan, { provider: "livekit" }, key);
     assertEquals(
       plan.customEndpointingRules.map((r: any) => [r.type, r.timeoutSeconds]),
-      [["both", 2.5], ["both", 1.6], ["customer", 1.4], ["both", 1.6], ["assistant", 1.2]],
+      [["both", 2.5], ["both", 1.6], ["both", 1.6], ["assistant", 1.2]],
       key,
     );
     for (const r of plan.customEndpointingRules) {
@@ -877,9 +877,10 @@ const ENDPOINTING_CASES: [string, string, string, number | null][] = [
   ["phone, digit by digit in full", PHONE_ASK, "It's 6 0 2 5 5 5 0 1 0 1.", null],
   ["phone, a whole number with a 960 area code", PHONE_ASK, "9 6 0 1 5 5 0 1 2 3", null],
   ["phone, nine of ten digits", PHONE_ASK, "9 6 0 1 5 5 0 1 2", 1.6],
-  // "double 6" is two digits, so a full number said with one is still ten
+  // only digits are counted (RE2, which VAPI validates rules with, has no lookahead to count "double 6"
+  // as two), so a full number said with one "double" has nine digits and still waits: a short pause
   ["phone, double in progress", PHONE_ASK, "9 6 0 1 double 5", 1.6],
-  ["phone, double in full", PHONE_ASK, "9 6 0 1 double 5 0 1 2 3", null],
+  ["phone, double in full", PHONE_ASK, "9 6 0 1 double 5 0 1 2 3", 1.6],
   ["phone, double at the start", PHONE_ASK, "Double 6 0 2", 1.6],
   ["phone, a double still to come", PHONE_ASK, "6 0 2 double", 1.6],
   ["phone, no digits yet", PHONE_ASK, "Sure, give me a second", null],
@@ -887,20 +888,22 @@ const ENDPOINTING_CASES: [string, string, string, number | null][] = [
   ["read-back, a new number in progress", READ_BACK_NUMBER, "No, can you please try this number? 6 4 2", 1.6],
   ["read-back, yes", READ_BACK_NUMBER, "Yes, that's right.", null],
   ["read-back, a new number in full", READ_BACK_NUMBER, "No, it's 602 555 0198", null],
-  // digits trailing off after any other question
-  ["any question, digits trailing off", ANYTHING_ELSE, "Yes, can you try 6 0 2 5", 1.4],
-  ["any question, digits and a full stop", ANYTHING_ELSE, "Can you try 6 4 2.", 1.4],
+  // after a question that asks for no number, digits get no extra wait (smart endpointing decides)
+  ["any question, digits trailing off", ANYTHING_ELSE, "Yes, can you try 6 0 2 5", null],
   ["any question, a number mentioned in passing", ANYTHING_ELSE, "My claim ends in 4 7 2, can you check it", null],
-  ["any question, one digit", ANYTHING_ELSE, "I have 2 claims", null],
   ["any question, a full number", ANYTHING_ELSE, "602 555 0101", null],
   ["any question, a plain answer", ANYTHING_ELSE, "No, that's all, thanks", null],
-  // a date of birth waits until it has a four-digit year (said as one number or as two)
+  // a date of birth waits while it ends in a month, a month and day, or the start of a year
+  ["DOB, month only", DOB_ASK, "March", 1.6],
   ["DOB, month and day", DOB_ASK, "March fourteenth", 1.6],
   ["DOB, month and day in digits", DOB_ASK, "March 14", 1.6],
-  ["DOB, three digits trailing off", DOB_ASK, "3 14", 1.4],
-  ["DOB, year started", DOB_ASK, "March 14 19", 1.4],
+  ["DOB, month and ordinal day", DOB_ASK, "March 14th", 1.6],
+  ["DOB, two short numbers", DOB_ASK, "3 14", 1.6],
+  ["DOB, year started", DOB_ASK, "March 14 19", 1.6],
+  ["DOB, year started in words", DOB_ASK, "March fourteenth nineteen", 1.6],
   ["DOB, year as two numbers", DOB_ASK, "March fourteenth 19 86.", null],
   ["DOB, year as one number", DOB_ASK, "3 14 1986", null],
+  ["DOB, year in words", DOB_ASK, "March fourteenth nineteen eighty six", null],
   ["DOB, after a wrong one", sentenceFor("auth_failed"), "June third", 1.6],
   ["DOB, after an unreadable one", sentenceFor("dob_unreadable"), "June", 1.6],
   ["DOB, a 2000s year", DOB_ASK, "July 4 2001", null],
@@ -927,6 +930,19 @@ const ENDPOINTING_CASES: [string, string, string, number | null][] = [
 Deno.test("endpointing: realistic transcripts get the wait each rule is for, first match wins", () => {
   for (const [note, assistant, customer, want] of ENDPOINTING_CASES) {
     assertEquals(endpointingWait(assistant, customer), want, `${note}: "${customer}" after "${assistant}"`);
+  }
+});
+
+Deno.test("endpointing: every rule regex is RE2-compatible (VAPI rejects lookarounds and backreferences)", () => {
+  // VAPI validates rule regexes with RE2 and answers 400 on a PATCH otherwise ("invalid perl operator:
+  // (?!"), which a JavaScript RegExp test alone never shows.
+  const unsupported = /\(\?(?:[=!]|<[=!]|>)|\\[1-9]|\\k</;
+  for (const key of ASSISTANT_KEYS) {
+    for (const r of withRep.assistants[key].payload.startSpeakingPlan.customEndpointingRules) {
+      for (const f of ["regex", "assistantRegex", "customerRegex"]) {
+        if (typeof r[f] === "string") assert(!unsupported.test(r[f]), `${key}: ${f} uses syntax RE2 rejects: ${r[f]}`);
+      }
+    }
   }
 });
 
