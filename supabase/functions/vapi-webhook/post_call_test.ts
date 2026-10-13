@@ -367,7 +367,7 @@ Deno.test("buildInteractionRow: the answers to the phone and DOB questions are m
 // ---------------------------------------------------------------------------------------------
 // Masking across ASR shapes, in all three stored views.
 // ---------------------------------------------------------------------------------------------
-const DOB_QUESTION = "Got it. And just to keep your account safe, what's the date of birth on the account?";
+const DOB_QUESTION = "Thanks! And just to keep your account safe, what's the date of birth on the account?";
 const PHONE_QUESTION = "I can help with that. What's the phone number on your account?";
 const ASR_ANSWERS: [string, string, string[]][] = [
   [DOB_QUESTION, "march 14th 1986", ["14", "1986"]],

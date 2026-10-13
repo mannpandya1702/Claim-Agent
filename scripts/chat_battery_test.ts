@@ -70,8 +70,8 @@ async function runMock(code: string, args: unknown): Promise<MockResult> {
   return await new AsyncFunction("args", code)(args);
 }
 
-// The mocks' stand-in call key in these tests, and the server's sentence for it: the mocks answer in the
-// phrasing a key picks (speak.ts variantIndex), as the server does for a call.
+// The mocks' stand-in call key in these tests, and the server's sentence for it: the mocks pass the key
+// wherever the server passes its call key (speak.ts variantIndex), so they answer in the server's words.
 const MOCK_KEY = "battery-test";
 const say = (code: Code, data?: Record<string, unknown>, key = MOCK_KEY) => sentenceFor(code, data, key);
 
@@ -707,8 +707,8 @@ Deno.test("start_claim mock: the read-back is the server's sentence, and bad arg
   );
   assertEquals(
     r.message,
-    // the mock's key, this date and this summary pick the read-back's third opener, as the server would
-    "So, to make sure I've got it right. A home claim, for a burst pipe under the sink, from Sunday, October eleventh. Is that correct?",
+    // the one read-back opener, whatever the key, the date and the summary, as the server says it
+    "Let me make sure I have this right. A home claim, for a burst pipe under the sink, from Sunday, October eleventh. Is that correct?",
   );
   // the summary as the server stores and says it: cleaned, lower-cased (an acronym kept), or left out
   const cases: [unknown, string][] = [
@@ -1553,9 +1553,9 @@ Deno.test("the rendered prompt and every tool file the battery reads are present
   assertMatch(base.promptSha256, /^[0-9a-f]{64}$/);
 });
 
-// The personas' checks on what the caller hears accept every phrasing of the server's sentences: each run
-// of a persona has its own stand-in call key (conversationKey), so these runs hear different phrasings.
-Deno.test("variety: compliant conversations pass in every phrasing the mocks answer with", async () => {
+// Each run of a persona has its own stand-in call key (conversationKey), and every sentence has one
+// phrasing, so every run hears the same words, and the personas' checks pass in each of them.
+Deno.test("one phrasing: compliant conversations pass in every run, and every run hears the same words", async () => {
   const cases: [string, Action[][]][] = [
     ["fnol-verified", FNOL_VERIFIED],
     ["fnol-new-caller", FNOL_NEW_CALLER],
@@ -1568,6 +1568,6 @@ Deno.test("variety: compliant conversations pass in every phrasing the mocks ans
       assertEquals(r.problems, [], `${id} run ${run}`);
       heard.add(r.turns.map((t) => t.heard.join(" ")).join(" | "));
     }
-    assert(heard.size > 1, `${id}: every run heard the same words`);
+    assertEquals(heard.size, 1, `${id}: the runs heard different words: ${[...heard].join(" || ")}`);
   }
 });

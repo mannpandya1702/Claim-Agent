@@ -56,12 +56,11 @@ const LOCKED =
   "I'm sorry, but I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?";
 const AUTH_FAILED =
   "That doesn't quite match what we have on file. Could you give me your date of birth one more time?";
-// Plain "I can", not the stock "Happy to" (style.md: no call-center phrases), and no "Sure": the
-// lookup filler that follows the number opens with it.
-const NO_LOOKUP_YET = "I can check that. First, I'll just need the phone number on the account. What's the number?";
+// No "Sure": the lookup filler that follows the number opens with it.
+const NO_LOOKUP_YET = "Happy to check that. First, I'll just need the phone number on the account. What's the number?";
 const DOB_UNREADABLE = "Just to be sure, could you give me the month, day and year?";
-const NOT_VERIFIED_PHONE_FOUND = "I can help with that once you're verified. What's the date of birth?";
-const NOT_VERIFIED_NONE = "I can help with that once I've verified you. What's the phone number on your account?";
+const NOT_VERIFIED_PHONE_FOUND = "Happy to help with that once you're verified. What's the date of birth?";
+const NOT_VERIFIED_NONE = "Happy to help with that once I've verified you. What's the phone number on your account?";
 const NO_CLAIMS = "I'm not seeing any claims on file for your account. Would you like me to explain how to start one?";
 const REP_QUEUED_NO_NUMBER =
   "Done, I've sent your request to our claims team. What's the best number for a representative to reach you?";
@@ -130,18 +129,17 @@ const WEEKDAY_NAMES = "Sunday Monday Tuesday Wednesday Thursday Friday Saturday"
 const MAX_READBACK_SUMMARY_CHARS = 80;
 
 // ---------------------------------------------------------------------------------------------
-// Variety. The sentences a caller hears most come in three phrasings with the same facts, the same
-// honest-result clause and the same kind of closing question, so two calls do not sound alike. Which
-// one a call hears is a pure function of the call key and the code (variantIndex), and for a lookup
-// miss or a claim read-back of what it reads back too, so a second number or a corrected claim is not
-// always framed the same way: a VAPI retry of the same toolCallId, a ledger replay and every later
-// answer on the call with the same facts get the same words. Without a call key (docs, most tests) a
-// sentence is its first phrasing. Each list keeps the cue words the endpointing rules and the
+// Phrasings. Every sentence has one phrasing: the chosen warm script ("Thanks! And just to keep
+// your account safe...", "Thanks, Tobias. You're all verified.", "I've passed this to our claims
+// team..."), so every call hears the same words. The selection plumbing stays (variantIndex picks
+// 0..count-1 from the call key and the code, with no clock or randomness), so adding phrasings to a
+// list rotates them again with the same replay guarantee: a VAPI retry of the same toolCallId and a
+// ledger replay get the same words. Each list keeps the cue words the endpointing rules and the
 // transcript masking key on ("date of birth", "right number", "that number", "your email is", "the
 // best number is").
 // ---------------------------------------------------------------------------------------------
-/** How many phrasings each varied sentence has. */
-export const PHRASINGS = 3;
+/** How many phrasings each sentence list has (one: the warm script). */
+export const PHRASINGS = 1;
 
 /** The phrasing a call hears for one code: 0..count-1 from FNV-1a over the call key and the code.
  *  No clock, no randomness and no runtime hash seed, so every replay of the call picks the same one. */
@@ -161,106 +159,54 @@ function pick<T>(choices: readonly T[], callKey: string | undefined, code: strin
 }
 
 // "the date of birth on the account": a caller may be asking about a spouse's or a client's account.
-// No thanks here: the caller has only given a number, and the verified opening that answers the date
-// of birth thanks them (VERIFIED_OPENINGS), so two turns in a row never both open with it.
+// It opens with a thank-you for the number, and the verified opening thanks them again for the date
+// of birth: that warmth beat a plainer opener.
 const NEEDS_DOB = [
-  "Got it. And just to keep your account safe, what's the date of birth on the account?",
-  "To keep your account safe, what's the date of birth on the account?",
-  "Just to be safe, could you tell me the date of birth on the account?",
+  "Thanks! And just to keep your account safe, what's the date of birth on the account?",
 ] as const;
 // The first lookup miss reads the number back and asks whether it is right ("right number" is the
-// endpointing cue for a corrected number in progress). The lead is picked per number, so a second
-// number that misses is not always framed the same way as the first.
-const NOT_FOUND_LEADS = [
-  "I'm not finding an account under",
-  "I don't see an account under",
-  "I couldn't find an account under",
-] as const;
+// endpointing cue for a corrected number in progress).
+const NOT_FOUND_LEADS = ["I'm not finding an account under"] as const;
 // The new-caller branch starts here: the sentence ends the turn, so it asks for the name itself. It
 // says "if you're new", so a policyholder whose account is under another number can say so and be
 // offered a callback instead of new-claim intake (branches-identity.md NOT FOUND).
 const NOT_FOUND_FINAL = [
   "I'm sorry, I still can't find an account for that number. If you're new with us, I'd be glad to help you get started. Could I get your first and last name?",
-  "I'm sorry, there's still no account under that number. If you're new with us, I can help you get started. Could I get your first and last name?",
-  "Sorry, I still can't find an account for that number. If you're new with us, I can get you started. Could I get your first and last name?",
 ] as const;
 // The verified opening every verified answer shares (verifiedThanks), with the plain answer's question.
-// Each opening has the same number of spoken words, so the chained claims read that follows it gets
-// the same share of the turn and says the same claims whichever phrasing the call hears.
 const VERIFIED_OPENINGS = [
   (name: string) => (name ? `Thanks, ${name}. You're all verified.` : "Thanks. You're all verified."),
-  (name: string) => (name ? `Thank you, ${name}. You're verified.` : "Thank you. You're verified."),
-  (name: string) => (name ? `All right, ${name}, you're verified.` : "All right, you're verified."),
 ] as const;
-const VERIFIED_QUESTIONS = [
-  "What can I help you with today?",
-  "What can I do for you today?",
-  "How can I help you today?",
-] as const;
-// rep_queued: "passed" and "sent" mean Telegram or the team email confirmed delivery (rep_recorded
-// otherwise); the callback, its target and its timeframe are the same in every phrasing.
-const REP_QUEUED_LEADS = [
-  "I've passed this to our claims team.",
-  "Your request is with our claims team now.",
-  "I've sent this to our claims team.",
-] as const;
-const ANYTHING_ELSES = [ANYTHING_ELSE, ANYTHING_ELSE_SHORT, "Can I help with anything else?"] as const;
+const VERIFIED_QUESTIONS = ["What can I help you with today?"] as const;
+// rep_queued: "passed" means Telegram or the team email confirmed delivery (rep_recorded otherwise).
+const REP_QUEUED_LEADS = ["I've passed this to our claims team."] as const;
+const ANYTHING_ELSES = [ANYTHING_ELSE] as const;
 // "emailed" only when Resend returned an id (the honest-result rule). A new caller's copy goes to the
-// address they spelled on this call, not to any account. No phrasing opens the way a rep_queued one
-// does, since the two often come back to back.
+// address they spelled on this call, not to any account.
 const EMAIL_SENT = [
   (to: string) => `There you go, I've emailed that to ${to}. It should arrive within a few minutes. ${ANYTHING_ELSE}`,
-  (to: string) => `Done, I've emailed that to ${to}. It should be there within a few minutes. ${ANYTHING_ELSE_SHORT}`,
-  (to: string) =>
-    `Okay, I've emailed that to ${to}, and it should arrive within a few minutes. Can I help with anything else?`,
 ] as const;
 // Calm, not cheerful: a fire, a flood or an injury is often what was just filed.
-const CLAIM_FILED_OPENERS = [
-  "You're all set.",
-  "Thanks for walking me through that.",
-  "That's taken care of.",
-] as const;
-// The closing question of the claim answers (claim_filed, claim_intake_saved), first phrasing first.
-const CLAIM_CLOSINGS = [ANYTHING_ELSE_SHORT, ANYTHING_ELSE, "Can I help with anything else?"] as const;
+const CLAIM_FILED_OPENERS = ["You're all set."] as const;
+// The closing question of the claim answers (claim_filed, claim_intake_saved).
+const CLAIM_CLOSINGS = [ANYTHING_ELSE_SHORT] as const;
 // claim_intake_saved: the details went to the team (and the confirmation, when Resend took it).
 const INTAKE_SAVED = [
   (thanks: string, mail: boolean) =>
     `${thanks} I've passed your claim details to our claims team${
       mail ? ", and sent a confirmation to your email" : ""
     }.`,
-  (thanks: string, mail: boolean) =>
-    `${thanks} Your claim details are with our claims team now${
-      mail ? ", and I've sent a confirmation to your email" : ""
-    }.`,
-  (thanks: string, mail: boolean) =>
-    `${thanks} I've sent your claim details to our claims team${mail ? ", and a confirmation to your email" : ""}.`,
 ] as const;
-const INTAKE_THANKS = [
-  (name: string) => (name ? `Thanks, ${name}.` : "Thanks."),
-  (name: string) => (name ? `Thank you, ${name}.` : "Thank you."),
-  (name: string) => (name ? `All right, ${name}.` : "All right."),
-] as const;
-// contact_saved_new: the read-back just thanked them, so none of these thanks them again, and none is
-// cheerful ("Perfect", "Great"): a reported loss often comes next (RESUME_CLAIM_QUESTION).
-const CONTACT_SAVED_OPENERS = [
-  "I've saved your details.",
-  "Your details are saved now.",
-  "I've got your details saved.",
-] as const;
-const CHOICE_QUESTIONS = ["Which would you like?", "What would you prefer?", "Which would be best for you?"] as const;
-// start_claim's read-back: only the opener changes; the claim, the date and "Is that correct?" stay.
-// None shares words with a contact read-back opener, since a new caller hears both a few turns apart.
+const INTAKE_THANKS = [(name: string) => (name ? `Thanks, ${name}.` : "Thanks.")] as const;
+// contact_saved_new: the read-back just thanked them, so this doesn't thank them again.
+const CONTACT_SAVED_OPENERS = ["Perfect, I've saved your details."] as const;
+const CHOICE_QUESTIONS = ["Which would you like?"] as const;
+// start_claim's read-back: the opener, then the claim, the date and "Is that correct?".
 // Exported for the battery's start_claim mock, which picks one the way claimReadbackOpener does.
-export const CLAIM_READBACK_OPENERS = [
-  "Let me make sure I have this right.",
-  "Let me check I have this right.",
-  "So, to make sure I've got it right.",
-] as const;
+export const CLAIM_READBACK_OPENERS = ["Let me make sure I have this right."] as const;
 // capture_contact's read-back openers, with an email (spelled after "your email is") and without one.
 const CONTACT_READBACK_OPENERS = [
   { spelled: "Thanks! Let me read that back.", plain: "Thanks! Just to confirm, that's" },
-  { spelled: "Thanks! Here's what I have.", plain: "Thanks! So that's" },
-  { spelled: "Thank you. Let me read that back.", plain: "Thank you. Just to check, that's" },
 ] as const;
 
 /** The variant key of a claim read-back: the date and the summary it reads, so a replay of the same
@@ -734,32 +680,15 @@ function summaryItems(claims: Claim[], refYear: number | undefined): SummaryItem
   return items;
 }
 
-/** The question the summary ends on, in each of its phrasings: what the claims read lead to next. The
- *  options keep their order in every phrasing ("the second one" is always the email), and the denial's
- *  keeps "the reason" and "appeal", which the prompt's yes is about. */
+/** The question the summary ends on (one phrasing, as a list for pick): what the claims read lead to
+ *  next. The documents question keeps its options in order ("the second one" is the email), and the
+ *  denial's says "the reason" and "appeal", which the prompt's yes is about. */
 function summaryQuestions(read: Claim[], total: number): readonly string[] {
   if (read.some((c) => c.status === "awaiting_documents")) {
-    return [
-      "Would you like me to go over what's needed, or email you the list?",
-      "Should I go over what's needed, or email you the list?",
-      "Do you want me to go over what's needed, or email you the list?",
-    ];
+    return ["Would you like me to go over what's needed, or email you the list?"];
   }
-  if (read.some((c) => c.status === "denied")) {
-    return [
-      "Would you like to hear the reason and how to appeal?",
-      "Shall I go over the reason and how to appeal?",
-      "Do you want to hear the reason and how to appeal?",
-    ];
-  }
-  const them = total === 1 ? "it" : total === 2 ? "either one" : "any of them";
-  // "Any questions about any of them?" says "any" twice: the shorter phrasings say "them".
-  const short = total === 1 ? "it" : total === 2 ? "either one" : "them";
-  return [
-    `Do you have any questions about ${them}?`,
-    `Any questions about ${short}?`,
-    `Anything you'd like to know about ${short}?`,
-  ];
+  if (read.some((c) => c.status === "denied")) return ["Would you like to hear the reason and how to appeal?"];
+  return [`Do you have any questions about ${total === 1 ? "it" : total === 2 ? "either one" : "any of them"}?`];
 }
 
 /** The summary as spoken, and the claims it named (in reading order); the rest were only counted.
@@ -1264,7 +1193,8 @@ function contactRetry(d: Record<string, unknown>): string {
 }
 
 /** Code -> sentence. data carries the few dynamic parts (see CONTRACTS); callKey picks the phrasing of
- *  the sentences that have several (variantIndex), and without it every sentence is its first phrasing. */
+ *  a sentence whose list has several (variantIndex). Every list has one today, so a call key changes
+ *  nothing: with or without one, every sentence is the warm script. */
 export function sentenceFor(code: Code, data?: Record<string, unknown>, callKey?: string): string {
   const d = data ?? {};
   switch (code) {

@@ -15,9 +15,7 @@ const SYSTEM_ERROR =
   "Sorry, I'm having trouble on our end right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?";
 const LOCKED =
   "I'm sorry, but I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?";
-// This call key hears the second phrasing of needs_dob (speak.ts variantIndex); sentenceFor without a key
-// is the first.
-const NEEDS_DOB = "To keep your account safe, what's the date of birth on the account?";
+const NEEDS_DOB = "Thanks! And just to keep your account safe, what's the date of birth on the account?";
 
 type Responder = (url: string, init: RequestInit) => Response | Promise<Response>;
 
@@ -135,7 +133,7 @@ Deno.test("happy path: lookup -> needs_dob -> verify -> verified -> get_claim_st
     status.sentence,
     "You have two claims. Your home claim ending in one nine eight needs documents from you by October twenty-fourth. " +
       "Your auto claim ending in one one five was paid, four thousand eight hundred twenty dollars on October eighth. " +
-      "Do you want me to go over what's needed, or email you the list?",
+      "Would you like me to go over what's needed, or email you the list?",
   );
   assertEquals(status.data, {
     claims: [
@@ -179,7 +177,7 @@ Deno.test("smuggled identity fields in get_claim_status arguments are ignored", 
   assertEquals(none.data, { level: "none" });
   assertEquals(
     none.sentence,
-    "I can help with that once I've verified you. What's the phone number on your account?",
+    "Happy to help with that once I've verified you. What's the phone number on your account?",
   );
 
   const found = harness();
@@ -189,7 +187,7 @@ Deno.test("smuggled identity fields in get_claim_status arguments are ignored", 
   assertEquals(phoneFound.data, { level: "phone_found" });
   assertEquals(
     phoneFound.sentence,
-    "I can help with that once you're verified. What's the date of birth?",
+    "Happy to help with that once you're verified. What's the date of birth?",
   );
 
   // Verified as Tobias: another customer's id or phone in the args still reads Tobias's claims only.
@@ -232,41 +230,39 @@ Deno.test("not_found reads the number back; the same number again is not_found_f
   assertEquals(miss.data, { digits: "6025550199" });
   assertEquals(
     miss.sentence,
-    "I couldn't find an account under six zero two, five five five, zero one nine nine. Is that the right number?",
+    "I'm not finding an account under six zero two, five five five, zero one nine nine. Is that the right number?",
   );
   // the caller said yes: the confirmed number is looked up again, written another way
   const final = await h.run("lookup_customer", { phone: "(602) 555-0199" });
   assertEquals(final.code, "not_found_final");
   assertEquals(
     final.sentence,
-    "I'm sorry, there's still no account under that number. If you're new with us, I can help you get started. Could I get your first and last name?",
+    "I'm sorry, I still can't find an account for that number. If you're new with us, I'd be glad to help you get started. Could I get your first and last name?",
   );
   // final for that number only: a different number is still looked up
   assertEquals((await h.run("lookup_customer", { phone: "6025550101" })).code, "needs_dob");
 });
 
-Deno.test("the call key picks each sentence's phrasing, and a retry of the same toolCallId keeps it", async () => {
-  // two calls whose keys pick different phrasings of needs_dob, the verified opening and the summary
+Deno.test("every call hears the one phrasing whatever its call key, and a retry of the same toolCallId keeps it", async () => {
+  // two calls with different keys hear the same needs_dob, verified opening and summary as no key
   const keys = [CALL_KEY, "8d2e3f40-5b6c-4d7e-8f90-a1b2c3d4e5f6"];
   const heard: string[][] = [];
   for (const callKey of keys) {
     const h = harness({ callKey });
     const lookup = await h.run("lookup_customer", { phone: "6025550101" });
-    assertEquals(lookup.sentence, sentenceFor("needs_dob", undefined, callKey));
+    assertEquals(lookup.sentence, sentenceFor("needs_dob"));
     const verify = await h.run("verify_identity", { dob_month: 3, dob_day: 14, dob_year: 1986 });
-    assertEquals(verify.sentence, sentenceFor("verified", { first_name: "Tobias" }, callKey));
+    assertEquals(verify.sentence, sentenceFor("verified", { first_name: "Tobias" }));
     const status = await h.run("get_claim_status", {}, "tc_status");
     // a VAPI retry of the toolCallId is answered from the ledger with the very same words
     assertEquals(await h.run("get_claim_status", {}, "tc_status"), status);
     heard.push([lookup.sentence, verify.sentence, status.sentence]);
   }
-  for (let i = 0; i < 3; i++) assert(heard[0][i] !== heard[1][i], `the two calls sound alike: ${heard[0][i]}`);
-  // the words differ, the facts do not
-  assertStringIncludes(heard[1][1], "Tobias");
-  for (const summary of [heard[0][2], heard[1][2]]) {
-    assertStringIncludes(summary, "ending in one nine eight needs documents from you by October twenty-fourth");
-    assertStringIncludes(summary, "go over what's needed, or email you the list?");
-  }
+  assertEquals(heard[1], heard[0]);
+  assertEquals(heard[0][0], NEEDS_DOB);
+  assertEquals(heard[0][1], "Thanks, Tobias. You're all verified. What can I help you with today?");
+  assertStringIncludes(heard[0][2], "ending in one nine eight needs documents from you by October twenty-fourth");
+  assertStringIncludes(heard[0][2], "Would you like me to go over what's needed, or email you the list?");
 });
 
 Deno.test("up to three different numbers: a misheard second miss still lets the right third one through", async () => {
@@ -302,7 +298,7 @@ Deno.test("verify_identity before a lookup, and three unreadable DOBs give dob_g
   const h = harness();
   assertEquals(await h.run("verify_identity", { dob_month: 3, dob_day: 14, dob_year: 1986 }), {
     code: "no_lookup_yet",
-    sentence: "I can check that. First, I'll just need the phone number on the account. What's the number?",
+    sentence: "Happy to check that. First, I'll just need the phone number on the account. What's the number?",
   });
   assertEquals((await h.run("lookup_customer", { phone: "6025550101" })).code, "needs_dob");
   assertEquals(await h.run("verify_identity", { dob_month: 13, dob_day: 14, dob_year: 1986 }), {

@@ -324,8 +324,8 @@ export interface PlanCtx {
   phones: string[]; // every ten-digit number the persona says, so read-backs use real digits
   requestId: string;
   now: Date;
-  // The conversation's stand-in for a call key: it picks the phrasing of every varied sentence the mocks
-  // answer with (speak.ts variantIndex), the same on every turn, as the server's call key does.
+  // The conversation's stand-in for a call key, passed wherever the server passes its call key (speak.ts
+  // variantIndex), so the mocks answer in the server's words; every sentence has one phrasing today.
   callKey: string;
 }
 
@@ -2011,7 +2011,7 @@ export const PERSONAS: Persona[] = [
         firstToolSilent: "confirm_contact",
         args: { confirm_contact: correctIs(true) },
         heardSays: [
-          /(I've saved your details|Your details are saved now|I've got your details saved)\. I can take down what happened now, email you the steps/,
+          /Perfect, I've saved your details\. I can take down what happened now, email you the steps/,
         ],
       },
       {
@@ -2236,7 +2236,7 @@ export const PERSONAS: Persona[] = [
         firstToolSilent: "start_claim",
         args: { start_claim: all(claimTypeIs("auto"), lossDateAs("last Saturday"), describes(/rear|bumper/i)) },
         heardSays: [
-          /(Let me make sure I have this right|Let me check I have this right|So, to make sure I've got it right)\. An auto claim\b/,
+          /Let me make sure I have this right\. An auto claim\b/,
           /Is that correct\?/,
         ],
       },
@@ -2312,7 +2312,7 @@ export const PERSONAS: Persona[] = [
         firstToolSilent: "confirm_claim",
         args: { confirm_claim: correctIs(true) },
         heardSays: [
-          /claim details (to|are with) our claims team( now)?, and (sent |I've sent )?a confirmation to your email/,
+          /I've passed your claim details to our claims team, and sent a confirmation to your email/,
         ],
       },
     ],
@@ -2692,8 +2692,9 @@ export function personaPhones(persona: Persona): string[] {
   return [...new Set(persona.turns.flatMap((t) => [...phonesIn(t.user), ...phonesIn(t.confirm?.say ?? "")]))];
 }
 
-/** The stand-in call key of one conversation: each run of a persona hears its own phrasings (speak.ts
- *  variantIndex), every turn of it the same ones, and a rerun the same again, so a report reproduces. */
+/** The stand-in call key of one conversation, the same on every turn and on a rerun, so a report
+ *  reproduces. It picks a phrasing as the server's call key does (speak.ts variantIndex); with one
+ *  phrasing per sentence every run hears the same words. */
 export function conversationKey(personaId: string, run: number): string {
   return `battery-${personaId}-${run}`;
 }

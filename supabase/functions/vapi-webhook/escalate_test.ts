@@ -19,10 +19,9 @@ const REP_QUEUED_NO_NUMBER =
 const REP_RECORDED = `Okay, I've recorded your request. ${ANYTHING_ELSE}`;
 const REP_ALREADY_QUEUED =
   `Your request is already with our claims team, so someone will call you back within one business day. ${ANYTHING_ELSE}`;
-// This call key hears rep_queued's second phrasing (speak.ts variantIndex): the same callback, target and
-// timeframe in other words.
+// "passed": Telegram or the team email confirmed delivery (rep_recorded otherwise).
 const queuedAt = (at: string) =>
-  `Your request is with our claims team now. Someone will call you back at ${at} within one business day. Is there anything else I can help with?`;
+  `I've passed this to our claims team. Someone will call you back at ${at} within one business day. ${ANYTHING_ELSE}`;
 
 type Responder = (url: string, init: RequestInit) => Response | Promise<Response>;
 
@@ -499,7 +498,7 @@ Deno.test("a replayed rep_queued speaks the first answer's target, never one a l
   assertEquals(replay, {
     code: "rep_queued",
     sentence:
-      "Your request is with our claims team now. Someone will call you back within one business day. Is there anything else I can help with?",
+      `I've passed this to our claims team. Someone will call you back within one business day. ${ANYTHING_ELSE}`,
   });
 
   // a number given in the first request is rebuilt from the retry's own arguments

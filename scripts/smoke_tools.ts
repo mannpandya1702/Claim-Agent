@@ -80,7 +80,7 @@ const FIRST_MESSAGE =
 const NEW_CALLER = { first_name: "smoke", last_name: "tester" };
 // Spelled the way a caller says it, so the server's spoken-form reading is exercised end to end.
 const SPOKEN_EMAIL = "s m o k e dot t e s t at example dot com";
-// Tobias's verified opening, in the phrasing his call key picks (speak.ts variantIndex).
+// Tobias's verified opening, built for the call key as the server builds it (speak.ts variantIndex).
 const verifiedPrefix = (callKey: string) => verifiedThanks("Tobias", callKey);
 // A loss as a caller reports it; loss_date is replaced per step.
 const BUMPER = {

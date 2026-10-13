@@ -43,12 +43,7 @@ import {
   REP_PHONE_PLACEHOLDER,
   SQUAD_MEMBERS,
 } from "./render.ts";
-import {
-  PHRASINGS,
-  sentenceFor,
-  variantIndex,
-  verifiedFileClaimSentence,
-} from "../supabase/functions/vapi-webhook/speak.ts";
+import { sentenceFor, verifiedFileClaimSentence } from "../supabase/functions/vapi-webhook/speak.ts";
 import { extraKeys, invariantProblems, leafDiff, type LiveView, patchBody } from "./vapi_sync.ts";
 
 const FINAL_TRANSCRIPT = 'transcript[transcriptType="final"]';
@@ -1219,23 +1214,14 @@ Deno.test("endpointing: every question for a date of birth, a spelled email or w
   for (const text of lossAsks) assertEquals(endpointingWait(text, "A pipe burst"), 1.2, text);
 });
 
-/** Every phrasing of a sentence (speak.ts variantIndex picks one per call key and code). */
-function everyPhrasing(code: Parameters<typeof sentenceFor>[0], data?: Record<string, unknown>): string[] {
-  const keyFor = (i: number) => {
-    for (let n = 0; n < 1000; n++) if (variantIndex(`call-${n}`, code) === i) return `call-${n}`;
-    throw new Error(`no call key picks phrasing ${i} of ${code}`);
-  };
-  return Array.from({ length: PHRASINGS }, (_, i) => sentenceFor(code, data, keyFor(i)));
-}
-
-Deno.test("endpointing: every phrasing of a varied sentence keeps the cue its answer needs", () => {
+Deno.test("endpointing: the most-heard sentences keep the cue their answer needs", () => {
   // a number in progress after a number question waits; a whole one and a plain answer do not
   for (
     const text of [
-      ...everyPhrasing("not_found", { digits: "6025550199" }),
-      ...everyPhrasing("not_found"),
-      ...everyPhrasing("not_found_final"),
-      ...everyPhrasing("contact_readback", { first_name: "Jane", last_name: "Doe", callback_phone: "+16025550177" }),
+      sentenceFor("not_found", { digits: "6025550199" }),
+      sentenceFor("not_found"),
+      sentenceFor("not_found_final"),
+      sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe", callback_phone: "+16025550177" }),
     ]
   ) {
     assertEquals(endpointingWait(text, "6 0 2 5 5 5"), 1.6, text);
@@ -1243,22 +1229,20 @@ Deno.test("endpointing: every phrasing of a varied sentence keeps the cue its an
     assertEquals(endpointingWait(text, "Yes"), null, text);
   }
   // a date of birth in progress waits
-  for (const text of everyPhrasing("needs_dob")) {
-    assertEquals(endpointingWait(text, "March fourteenth"), 1.6, text);
-    assertEquals(endpointingWait(text, "March fourteenth nineteen eighty six"), null, text);
-  }
-  // what happened, after any phrasing of the verified opening
-  for (const verified of everyPhrasing("verified", { first_name: "Tobias" })) {
-    assertEquals(endpointingWait(verifiedFileClaimSentence(verified), "A pipe burst"), 1.2, verified);
-  }
-  // an answer to "anything else" never waits for digits, whichever phrasing asked it
+  const needsDob = sentenceFor("needs_dob");
+  assertEquals(endpointingWait(needsDob, "March fourteenth"), 1.6, needsDob);
+  assertEquals(endpointingWait(needsDob, "March fourteenth nineteen eighty six"), null, needsDob);
+  // what happened, after the verified opening
+  const verified = sentenceFor("verified", { first_name: "Tobias" });
+  assertEquals(endpointingWait(verifiedFileClaimSentence(verified), "A pipe burst"), 1.2, verified);
+  // an answer to "anything else" never waits for digits
   for (
     const text of [
-      ...everyPhrasing("email_sent"),
-      ...everyPhrasing("email_sent", { target: "given" }),
-      ...everyPhrasing("claim_filed", { claim_last3: "472", emailed: true }),
-      ...everyPhrasing("claim_intake_saved", { first_name: "Jane", emailed: true }),
-      ...everyPhrasing("rep_queued", { target: "caller_id" }),
+      sentenceFor("email_sent"),
+      sentenceFor("email_sent", { target: "given" }),
+      sentenceFor("claim_filed", { claim_last3: "472", emailed: true }),
+      sentenceFor("claim_intake_saved", { first_name: "Jane", emailed: true }),
+      sentenceFor("rep_queued", { target: "caller_id" }),
     ]
   ) {
     assertEquals(endpointingWait(text, "Yes, can you try 6 0 2 5"), null, text);
