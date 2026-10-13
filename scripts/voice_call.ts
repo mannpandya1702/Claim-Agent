@@ -47,14 +47,39 @@ const SCENARIOS: Record<string, string[]> = {
   ],
   // Not found twice, then Ava takes a new caller's details: a spoken name, a spelled email (ASR of
   // letters, endpointing while spelling), the read-back, the confirmation and the emailed steps.
+  // The address is on example.com, so no real inbox can ever receive the steps.
   "new-customer": [
-    "Hi, I'd like to start a claim. My number is six zero two, five five five, zero one nine nine.",
+    "Hi, I'm new and I'd like to know how to start a claim. My number is six zero two, five five five, zero one nine nine.",
     "Yes, that's right.",
     "It's John Smith.",
-    "j o h n dot s m i t h at gmail dot com",
+    "j o h n dot s m i t h at example dot com",
     "You can reach me at six zero two, five five five, zero one seven seven.",
     "Yes, that's right.",
     "Please email me the steps.",
+    "No, that's all. Thank you, goodbye.",
+  ],
+  // Voice FNOL for a verified customer: intent first, verify with intent file_claim, the loss and its
+  // day in one answer, the server's read-back (claim type inferred, the date spoken in full), the
+  // yes, and the claim number read back with the confirmation email to the address on file.
+  "fnol-verified": [
+    "Hi, I need to file a claim. Someone backed into my car in a parking lot.",
+    "It's six zero two, five five five, zero one zero one.",
+    "March fourteenth, nineteen eighty six.",
+    "It was parked at the grocery store yesterday afternoon. Someone dented the rear bumper and drove off.",
+    "Yes, that's correct.",
+    "No, that's all. Thank you, goodbye.",
+  ],
+  // Voice FNOL for a new caller: not found twice, details captured and confirmed, then the loss taken
+  // down for a specialist (a lead intake: no claim number) with a confirmation to the confirmed email.
+  "fnol-new-caller": [
+    "Hi, I'd like to report a claim. My number is six zero two, five five five, zero one nine nine.",
+    "Yes, that's right.",
+    "It's John Smith.",
+    "j o h n dot s m i t h at example dot com",
+    "You can reach me at six zero two, five five five, zero one seven seven.",
+    "Yes, that's right.",
+    "Let's do it now. My basement flooded yesterday after a pipe burst.",
+    "Yes, that's correct.",
     "No, that's all. Thank you, goodbye.",
   ],
 };
@@ -64,7 +89,7 @@ const FRAME_MS = 20;
 const FRAME_BYTES = (SAMPLE_RATE * FRAME_MS / 1000) * 2;
 const QUIET_MS = 2600; // assistant silence that ends its turn (fillers and tool gaps are shorter)
 const SPEECH_RMS = 500; // s16 RMS above this counts as assistant speech
-const MAX_CALL_MS = 240_000;
+const MAX_CALL_MS = 360_000; // the longest scenario (fnol-new-caller) runs about four minutes
 
 const args = Deno.args;
 const scenario = args.find((a) => !a.startsWith("--")) ?? "happy";
