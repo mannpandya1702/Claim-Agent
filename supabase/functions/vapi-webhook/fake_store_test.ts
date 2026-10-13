@@ -1,14 +1,17 @@
-// The fake must behave like 0001_init.sql, or every test built on it proves the wrong thing. These
-// cases walk the same sequences scripts/db_suite.ts runs against the live database.
+// The fake must behave like 0001_init.sql (and 0010_lookup_retries.sql for lookups), or every test
+// built on it proves the wrong thing. These cases walk the same sequences scripts/db_suite.ts runs
+// against the live database.
 
-import { assert, assertEquals, assertFalse, assertRejects } from "@std/assert";
-import { createFakeStore, demoSeed } from "./fake_store.ts";
+import { assert, assertEquals, assertFalse, assertMatch, assertRejects } from "@std/assert";
+import { createFakeStore, demoSeed, numberHash } from "./fake_store.ts";
 import { OUTBOX_LEASE_MS, outboxClaimable, outboxDue } from "./store_rules.ts";
 import type { InteractionRow, OutboxRef } from "./types.ts";
 
 const TOBIAS = "6b0d6f0e-1c11-4c7a-9a01-000000000101";
 const TOBIAS_PHONE = "+16025550101";
 const NOBODY_PHONE = "+16025550199";
+// match no seeded customer either
+const OTHER_PHONES = ["+16025550198", "+16025550197"];
 
 function lookup(store: ReturnType<typeof createFakeStore>, callKey: string, toolCallId: string, phone: string | null) {
   return store.lookupCustomerAttempt({ callKey, channel: "webCall", phoneE164: phone, toolCallId, callerNumber: null });
@@ -163,21 +166,85 @@ Deno.test("verify before any lookup is no_lookup_yet and creates the session", a
   assertEquals(kinds(store, "c1"), ["other:no_lookup_yet"]);
 });
 
-Deno.test("two misses end the lookups for the call; a later hit is still not_found_final", async () => {
+Deno.test("the same number again is final for that number: recorded as other, never counted twice", async () => {
+  const store = createFakeStore();
+  assertEquals(await lookup(store, "c1", "t1", NOBODY_PHONE), { code: "not_found", misses: 1 });
+  assertEquals(await lookup(store, "c1", "t2", NOBODY_PHONE), { code: "not_found_final", misses: 1 });
+  assertEquals(await lookup(store, "c1", "t3", NOBODY_PHONE), { code: "not_found_final", misses: 1 });
+  assertEquals(kinds(store, "c1"), ["lookup_miss:not_found", "other:not_found_final", "other:not_found_final"]);
+  // the miss row carries the number's hash, as 0010 writes it; no row carries the number itself
+  assertEquals(store.tables.attempts.map((a) => a.number_hash), [numberHash(NOBODY_PHONE), null, null]);
+  assertMatch(numberHash(NOBODY_PHONE), /^[0-9a-f]{64}$/);
+  assertFalse(JSON.stringify(store.tables.attempts).includes("5550199"));
+  // listAttempts reads the columns store.ts selects, without the hash
+  assertFalse("number_hash" in (await store.listAttempts("c1"))[0]);
+});
+
+Deno.test("a final reached by a repeat is not sticky: a different number is still looked up", async () => {
+  const store = createFakeStore();
+  await lookup(store, "c1", "t1", NOBODY_PHONE);
+  assertEquals((await lookup(store, "c1", "t2", NOBODY_PHONE)).code, "not_found_final");
+  assertEquals(await lookup(store, "c1", "t3", TOBIAS_PHONE), { code: "needs_dob", misses: 1 });
+  assertEquals((await store.getSession("c1"))?.candidate_customer_id, TOBIAS);
+});
+
+Deno.test("two different numbers miss and the third hits", async () => {
   const store = createFakeStore();
   assertEquals(await lookup(store, "c1", "t1", NOBODY_PHONE), { code: "not_found", misses: 1 });
   assertEquals(await lookup(store, "c1", "t2", null), { code: "invalid_phone", misses: 1 });
-  assertEquals(await lookup(store, "c1", "t3", "+16025550198"), { code: "not_found_final", misses: 2 });
-  assertEquals(await lookup(store, "c1", "t4", TOBIAS_PHONE), { code: "not_found_final", misses: 2 });
-  const s = await store.getSession("c1");
-  assertEquals(s?.level, "none");
-  assertEquals(s?.candidate_customer_id, null);
+  assertEquals(await lookup(store, "c1", "t3", OTHER_PHONES[0]), { code: "not_found", misses: 2 });
+  assertEquals(await lookup(store, "c1", "t4", TOBIAS_PHONE), { code: "needs_dob", misses: 2 });
+  assertEquals((await store.getSession("c1"))?.level, "phone_found");
   assertEquals(kinds(store, "c1"), [
     "lookup_miss:not_found",
     "unreadable:invalid_phone",
+    "lookup_miss:not_found",
+    "lookup_hit:needs_dob",
+  ]);
+});
+
+Deno.test("three different numbers miss: the third is final, and so is every lookup after it", async () => {
+  const store = createFakeStore();
+  assertEquals(await lookup(store, "c1", "t1", NOBODY_PHONE), { code: "not_found", misses: 1 });
+  assertEquals(await lookup(store, "c1", "t2", OTHER_PHONES[0]), { code: "not_found", misses: 2 });
+  assertEquals(await lookup(store, "c1", "t3", OTHER_PHONES[1]), { code: "not_found_final", misses: 3 });
+  // sticky: even a seeded number is not looked up any more
+  assertEquals(await lookup(store, "c1", "t4", TOBIAS_PHONE), { code: "not_found_final", misses: 3 });
+  assertEquals(await lookup(store, "c1", "t5", NOBODY_PHONE), { code: "not_found_final", misses: 3 });
+  const s = await store.getSession("c1");
+  assertEquals([s?.level, s?.candidate_customer_id], ["none", null]);
+  assertEquals(kinds(store, "c1"), [
+    "lookup_miss:not_found",
+    "lookup_miss:not_found",
     "lookup_miss:not_found_final",
     "other:not_found_final",
+    "other:not_found_final",
   ]);
+  // a retry of a toolCallId replays its own answer with today's count
+  assertEquals(await lookup(store, "c1", "t1", NOBODY_PHONE), { code: "not_found", misses: 3 });
+  assertEquals(await lookup(store, "c1", "t3", TOBIAS_PHONE), { code: "not_found_final", misses: 3 });
+  assertEquals(store.tables.attempts.length, 5);
+});
+
+Deno.test("miss rows from before 0010 (no number_hash) still count, each as a different number", async () => {
+  const store = createFakeStore();
+  await lookup(store, "c1", "t0", null); // the session row, as any first lookup writes it
+  const legacy = (id: string) => ({
+    call_key: "c1",
+    tool_call_id: id,
+    tool_name: "lookup_customer",
+    kind: "lookup_miss",
+    code: "not_found",
+    number_hash: null,
+    created_at: new Date().toISOString(),
+  });
+  store.tables.attempts.push(legacy("old1"));
+  // one old miss: a second different number still gets the read-back, and its repeat is known
+  assertEquals(await lookup(store, "c1", "t1", NOBODY_PHONE), { code: "not_found", misses: 2 });
+  assertEquals(await lookup(store, "c1", "t2", NOBODY_PHONE), { code: "not_found_final", misses: 2 });
+  store.tables.attempts.push(legacy("old2"));
+  // two old misses and one new one: the cap is reached, whatever number comes next
+  assertEquals(await lookup(store, "c1", "t3", TOBIAS_PHONE), { code: "not_found_final", misses: 3 });
 });
 
 Deno.test("a miss then a hit still reaches the DOB step", async () => {

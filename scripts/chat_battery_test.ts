@@ -178,6 +178,29 @@ Deno.test("lookup mock: seeded hit, a miss read back digit by digit, an unknown 
   assertEquals((await answer("lookup_customer", s, { phone: "6025550101" })).meta.request_id, "req-1");
 });
 
+Deno.test("lookup mock: a different number after a miss is looked up, up to three different numbers", async () => {
+  const phones = ["6025550199", "6025550198", "6025550197"];
+  const miss = (phone: string, code: string) => ({ tool: "lookup_customer", args: { phone }, code });
+  // the confirmed number again is final; a misheard second number gets its own read-back
+  const one = stateAfter([miss("6025550199", "not_found")]);
+  assertEquals((await answer("lookup_customer", one, { phone: "6025550199" }, { phones })).code, "not_found_final");
+  const second = await answer("lookup_customer", one, { phone: "6025550198" }, { phones });
+  assertEquals([second.code, second.message], ["not_found", sentenceFor("not_found", { digits: "6025550198" })]);
+  // two different misses, then the right number
+  const two = stateAfter([miss("6025550199", "not_found"), miss("6025550198", "not_found")]);
+  assertEquals((await answer("lookup_customer", two, { phone: "6025550101" }, { phones })).code, "needs_dob");
+  assertEquals((await answer("lookup_customer", two, { phone: "6025550197" }, { phones })).code, "not_found_final");
+  // a repeat's final is not sticky
+  const repeated = stateAfter([miss("6025550199", "not_found"), miss("6025550199", "not_found_final")]);
+  assertEquals((await answer("lookup_customer", repeated, { phone: "6025550101" }, { phones })).code, "needs_dob");
+  // after three different misses, nothing more is looked up
+  const capped = stateAfter([
+    ...phones.slice(0, 2).map((p) => miss(p, "not_found")),
+    miss(phones[2], "not_found_final"),
+  ]);
+  assertEquals((await answer("lookup_customer", capped, { phone: "6025550101" }, { phones })).code, "not_found_final");
+});
+
 Deno.test("verify mock follows the identity ladder from the replayed state", async () => {
   assertEquals((await answer("verify_identity", initialState(), TOBIAS_VERIFY.args)).code, "no_lookup_yet");
   const found = stateAfter([TOBIAS_LOOKUP]);

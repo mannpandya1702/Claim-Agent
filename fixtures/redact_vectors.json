@@ -74,7 +74,7 @@
     { "note": "a plain at and dot sentence is not an address", "input": "I was at the office, dot com or not.", "output": "I was at the office, dot com or not." }
   ],
   "asks_for_sensitive": [
-    { "text": "Hi, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. What's the phone number on your account?", "expected": true },
+    { "text": "Hey, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. What's the phone number on your account?", "expected": true },
     { "text": "Thanks. For security, what's the date of birth on the account?", "expected": true },
     { "text": "I need the full ten-digit number on the account. Could you say it again?", "expected": true },
     { "text": "I'm sorry, that doesn't match what we have on file. Could you give me your date of birth one more time?", "expected": true },

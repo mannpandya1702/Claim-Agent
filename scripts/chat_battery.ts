@@ -1349,6 +1349,9 @@ const EMAIL_PROMISE =
 const WHEN_ASK = /\bwhen\b|\bwhat (day|date)\b/i;
 const WHAT_HAPPENED_ASK = /\bwhat happened\b/i;
 const POLICY_NUMBER_ASK = /\bpolicy number\b/i;
+// What Ava said on a test call instead of looking up the right third number.
+const LOOKUP_REFUSED =
+  /\b(can't|cannot|can not|unable to) (look up|check|try|search) (another|any more|more|a different)\b/i;
 const INJURY_ASK = /\b(anyone|anybody|you|everyone) (hurt|injured)\?|\binjur(y|ies)\b[^.?]*\?/i;
 
 const TOBIAS_SAYS_PHONE = "six zero two, five five five, zero one zero one";
@@ -1498,7 +1501,7 @@ export const PERSONAS: Persona[] = [
   },
   {
     id: "f3",
-    title: "F3 not found (0199)",
+    title: "F3 not found (0199, corrected to 0198, which is confirmed and still not found)",
     turns: [
       {
         user: "Hi, my phone number is six zero two, five five five, zero one nine nine.",
@@ -1507,11 +1510,20 @@ export const PERSONAS: Persona[] = [
         args: { lookup_customer: phoneIs("6025550199") },
         heardSays: [/six zero two\.\.\. five five five\.\.\. zero one nine nine/],
       },
+      // a different number after the read-back is looked up, never refused
+      {
+        user: "Oh sorry, no. It's six zero two, five five five, zero one nine eight.",
+        tools: ["lookup_customer"],
+        codes: ["not_found"],
+        args: { lookup_customer: phoneIs("6025550198") },
+        heardSays: [/six zero two\.\.\. five five five\.\.\. zero one nine eight/],
+        modelNever: [LOOKUP_REFUSED],
+      },
       {
         user: "Yes, that's right.",
         tools: ["lookup_customer"],
         codes: ["not_found_final"],
-        args: { lookup_customer: phoneIs("6025550199") },
+        args: { lookup_customer: phoneIs("6025550198") },
         heardSays: [/first and last name/],
       },
       {
@@ -1521,6 +1533,39 @@ export const PERSONAS: Persona[] = [
       },
     ],
     neverTools: ["verify_identity", "get_claim_status", "capture_contact"],
+  },
+  {
+    id: "f3-third-number",
+    title: "Not found twice (the second number misheard), then the right third number is looked up and verified",
+    turns: [
+      {
+        user: `Hi, I want to check on my claim. My number is ${UNKNOWN_SAYS_PHONE}.`,
+        tools: ["lookup_customer"],
+        codes: ["not_found"],
+        args: { lookup_customer: phoneIs("6025550199") },
+      },
+      {
+        user: "No, it's six zero two, five five five, zero one nine eight.",
+        tools: ["lookup_customer"],
+        codes: ["not_found"],
+        args: { lookup_customer: phoneIs("6025550198") },
+        modelNever: [LOOKUP_REFUSED],
+      },
+      {
+        user: `Sorry, I misspoke. It's ${TOBIAS_SAYS_PHONE}.`,
+        tools: ["lookup_customer"],
+        codes: ["needs_dob"],
+        args: { lookup_customer: phoneIs("6025550101") },
+        modelNever: [LOOKUP_REFUSED, NAME],
+      },
+      {
+        ...verifyTobias,
+        args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("claim_status")) },
+        modelNever: [NAME],
+      },
+    ],
+    neverTools: ["capture_contact", "escalate"],
+    toolOrder: ["lookup_customer", "lookup_customer", "lookup_customer", "verify_identity"],
   },
   {
     id: "f4",

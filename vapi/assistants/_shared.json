@@ -41,26 +41,104 @@
       ]
     },
     "startSpeakingPlan": {
-      "waitSeconds": 0.6,
+      "waitSeconds": 0.4,
       "smartEndpointingPlan": { "provider": "livekit" },
       "customEndpointingRules": [
         {
-          "type": "assistant",
-          "regex": "(spell|letter by letter)",
+          "type": "both",
+          "assistantRegex": "(spell|letter by letter)",
+          "assistantRegexOptions": [{ "type": "ignore-case", "enabled": true }],
+          "customerRegex": ".",
+          "timeoutSeconds": 2.5
+        },
+        {
+          "type": "both",
+          "assistantRegex": "(phone number|best number|reach you|right number|that number|another number|number on)",
+          "assistantRegexOptions": [{ "type": "ignore-case", "enabled": true }],
+          "customerRegex": "^(?:(?!\\b(?:double|triple)\\s+\\d)\\D)*(?:(?:\\d|\\b(?:double|triple)(?=\\s+\\d))(?:(?!\\b(?:double|triple)\\s+\\d)\\D)*){1,9}$",
+          "customerRegexOptions": [{ "type": "ignore-case", "enabled": true }],
+          "timeoutSeconds": 1.6
+        },
+        {
+          "type": "customer",
+          "regex": "^(?!.*\\b(?:19|20) ?\\d\\d\\b)(?=.*(?:\\d|\\b(?:double|triple))[\\s.,!?]*$)(?:(?!\\b(?:double|triple)\\s+\\d)\\D)*(?:(?:\\d|\\b(?:double|triple)(?=\\s+\\d))(?:(?!\\b(?:double|triple)\\s+\\d)\\D)*){3,9}$",
           "regexOptions": [{ "type": "ignore-case", "enabled": true }],
-          "timeoutSeconds": 3
+          "timeoutSeconds": 1.4
+        },
+        {
+          "type": "both",
+          "assistantRegex": "(date of birth|day and year)",
+          "assistantRegexOptions": [{ "type": "ignore-case", "enabled": true }],
+          "customerRegex": "^(?!.*\\b(?:19|20) ?\\d\\d\\b)",
+          "timeoutSeconds": 1.6
         },
         {
           "type": "assistant",
-          "regex": "(phone number|date of birth|best number|reach you|first and last name|get that right|get wrong|what happened|when did|what day|should I change)",
+          "regex": "(what happened|a little more about)",
           "regexOptions": [{ "type": "ignore-case", "enabled": true }],
-          "timeoutSeconds": 2
+          "timeoutSeconds": 1.2
         }
       ]
     },
-    "stopSpeakingPlan": { "numWords": 2, "voiceSeconds": 0.3, "backoffSeconds": 2 },
+    "stopSpeakingPlan": {
+      "numWords": 1,
+      "voiceSeconds": 0.2,
+      "backoffSeconds": 1,
+      "interruptionPhrases": [
+        "stop",
+        "shut",
+        "up",
+        "enough",
+        "quiet",
+        "silence",
+        "but",
+        "dont",
+        "not",
+        "no",
+        "hold",
+        "wait",
+        "cut",
+        "pause",
+        "nope",
+        "nah",
+        "nevermind",
+        "never",
+        "bad",
+        "actually",
+        "sorry",
+        "excuse",
+        "hang",
+        "hey",
+        "ava",
+        "question"
+      ],
+      "acknowledgementPhrases": [
+        "i understand",
+        "i see",
+        "i got it",
+        "i hear you",
+        "im listening",
+        "im with you",
+        "right",
+        "okay",
+        "ok",
+        "sure",
+        "alright",
+        "got it",
+        "understood",
+        "yeah",
+        "yes",
+        "uh-huh",
+        "mm-hmm",
+        "gotcha",
+        "mhmm",
+        "ah",
+        "yeah okay",
+        "yeah sure"
+      ]
+    },
     "backgroundSound": "off",
-    "firstMessage": "Hi, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. How can I help you today?",
+    "firstMessage": "Hey, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. How can I help you today?",
     "firstMessageMode": "assistant-speaks-first",
     "hooks": [
       {

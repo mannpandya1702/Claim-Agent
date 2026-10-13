@@ -8,6 +8,7 @@ import {
   isPlainEmail,
   lastFour,
   MAX_EMAIL_CHARS,
+  MAX_LOOKUP_MISSES,
   normaliseEmail,
   normaliseName,
   normaliseNanp,
@@ -89,6 +90,8 @@ Deno.test("lastFour never returns more than four digits", () => {
 const HIT = "cust-1";
 const lookupHit: IdentityEvent = { type: "lookup", phoneE164: "+16025550101", customerId: HIT };
 const lookupMiss: IdentityEvent = { type: "lookup", phoneE164: "+16025550199", customerId: null };
+const lookupMissB: IdentityEvent = { type: "lookup", phoneE164: "+16025550198", customerId: null };
+const lookupMissC: IdentityEvent = { type: "lookup", phoneE164: "+16025550197", customerId: null };
 const badPhone: IdentityEvent = { type: "lookup", phoneE164: null, customerId: null };
 const dobOk: IdentityEvent = { type: "dob", valid: true, matches: true };
 const dobWrong: IdentityEvent = { type: "dob", valid: true, matches: false };
@@ -112,6 +115,7 @@ Deno.test("initial identity", () => {
   assertEquals(initialIdentity(), {
     level: "none",
     misses: 0,
+    missed: [],
     wrong: 0,
     unreadable: 0,
     candidate: null,
@@ -123,10 +127,34 @@ Deno.test("initial identity", () => {
 const LADDERS: { name: string; events: IdentityEvent[]; codes: Code[]; level: IdentityState["level"] }[] = [
   { name: "happy path", events: [lookupHit, dobOk], codes: ["needs_dob", "verified"], level: "verified" },
   {
-    name: "not found twice, then sticky even for a real number",
-    events: [lookupMiss, lookupMiss, lookupHit, lookupMiss],
-    codes: ["not_found", "not_found_final", "not_found_final", "not_found_final"],
+    name: "the same number again (confirmed after the read-back) is final for that number",
+    events: [lookupMiss, lookupMiss, lookupMiss],
+    codes: ["not_found", "not_found_final", "not_found_final"],
     level: "none",
+  },
+  {
+    name: "a final reached by a repeat is not sticky: a different number is still looked up",
+    events: [lookupMiss, lookupMiss, lookupHit, dobOk],
+    codes: ["not_found", "not_found_final", "needs_dob", "verified"],
+    level: "verified",
+  },
+  {
+    name: "two different numbers miss, the third hits",
+    events: [lookupMiss, lookupMissB, lookupHit],
+    codes: ["not_found", "not_found", "needs_dob"],
+    level: "phone_found",
+  },
+  {
+    name: "three different numbers miss: the third is final, and every lookup after it",
+    events: [lookupMiss, lookupMissB, lookupMissC, lookupHit, lookupMiss],
+    codes: ["not_found", "not_found", "not_found_final", "not_found_final", "not_found_final"],
+    level: "none",
+  },
+  {
+    name: "repeats between different misses do not count toward the cap",
+    events: [lookupMiss, lookupMiss, lookupMissB, lookupMissB, lookupHit],
+    codes: ["not_found", "not_found_final", "not_found", "not_found_final", "needs_dob"],
+    level: "phone_found",
   },
   {
     name: "one miss, then a hit",
@@ -209,14 +237,51 @@ for (const l of LADDERS) {
 
 Deno.test("step: counters and customer ids", () => {
   const verified = run([lookupMiss, lookupHit, dobUnreadable, dobWrong, dobOk]).state;
-  assertEquals(verified, { level: "verified", misses: 1, wrong: 1, unreadable: 1, candidate: HIT, verified: HIT });
+  assertEquals(verified, {
+    level: "verified",
+    misses: 1,
+    missed: ["+16025550199"],
+    wrong: 1,
+    unreadable: 1,
+    candidate: HIT,
+    verified: HIT,
+  });
   const locked = run([lookupHit, dobWrong, dobWrong]).state;
-  assertEquals(locked, { level: "locked", misses: 0, wrong: 2, unreadable: 0, candidate: HIT, verified: null });
-  const final = run([lookupMiss, lookupMiss, lookupMiss]).state;
-  assertEquals(final.misses, 2, "a sticky not_found_final does not keep counting");
+  assertEquals(locked, {
+    level: "locked",
+    misses: 0,
+    missed: [],
+    wrong: 2,
+    unreadable: 0,
+    candidate: HIT,
+    verified: null,
+  });
+  const repeated = run([lookupMiss, lookupMiss, lookupMiss]).state;
+  assertEquals([repeated.misses, repeated.missed], [1, ["+16025550199"]], "a repeat is not a new miss");
+  const capped = run([lookupMiss, lookupMissB, lookupMissC, lookupMissB, lookupHit]).state;
+  assertEquals(capped.misses, MAX_LOOKUP_MISSES, "a capped call does not keep counting");
+  assertEquals(capped.candidate, null, "a lookup after the cap sets no candidate");
   // A second hit on another account moves the candidate, as the SQL update does.
   const moved = run([lookupHit, { type: "lookup", phoneE164: "+16025550102", customerId: "cust-2" }, dobOk]).state;
   assertEquals(moved.verified, "cust-2");
+});
+
+Deno.test("step: the ledger's number key decides what a repeat is, and keyless old misses still count", () => {
+  // fake_store.ts passes attempts.number_hash; two spellings of one key are one number
+  const keyed = (phoneE164: string, numberKey: string): IdentityEvent => ({
+    type: "lookup",
+    phoneE164,
+    customerId: null,
+    numberKey,
+  });
+  assertEquals(run([keyed("+16025550199", "k1"), keyed("+16025550199", "k1")]).codes, ["not_found", "not_found_final"]);
+  assertEquals(run([keyed("+16025550199", "k1"), keyed("+16025550199", "k2")]).codes, ["not_found", "not_found"]);
+  // two misses written before number keys existed: one more different number reaches the cap, and a
+  // number among the old ones cannot be recognised, so it counts as different too
+  const legacy: IdentityState = { ...initialIdentity(), misses: 2 };
+  assertEquals(run([lookupMiss], legacy).codes, ["not_found_final"]);
+  assertEquals(run([lookupHit], legacy).codes, ["needs_dob"]);
+  assertEquals(run([lookupMiss], { ...initialIdentity(), misses: 1 }).codes, ["not_found"]);
 });
 
 Deno.test("step is pure", () => {
@@ -225,10 +290,14 @@ Deno.test("step is pure", () => {
   const r = step(s, lookupHit);
   assertEquals(s, frozen);
   assertNotEquals(r.state, s);
+  // a miss copies the key list instead of pushing onto the caller's
+  const missed = step(s, lookupMiss);
+  assertEquals(s, frozen);
+  assertEquals(missed.state.missed, ["+16025550199"]);
 });
 
 Deno.test("step: invariants over seeded random sequences", () => {
-  const events = [lookupHit, lookupMiss, badPhone, dobOk, dobWrong, dobUnreadable];
+  const events = [lookupHit, lookupMiss, lookupMissB, lookupMissC, badPhone, dobOk, dobWrong, dobUnreadable];
   let seed = 20261015;
   const rand = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
   for (let run = 0; run < 500; run++) {
@@ -240,7 +309,8 @@ Deno.test("step: invariants over seeded random sequences", () => {
       assert((CODES as readonly string[]).includes(r.code));
       if (before.level === "locked") assertEquals(s.level, "locked");
       if (before.level === "verified") assertEquals(s.level, "verified");
-      assert(s.misses >= before.misses && s.misses <= 2);
+      assert(s.misses >= before.misses && s.misses <= MAX_LOOKUP_MISSES);
+      assertEquals(s.missed.length, s.misses, "every miss in a fresh run has a key");
       assert(s.wrong >= before.wrong && s.wrong <= 2);
       if (s.level === "verified") assertEquals(s.verified, s.candidate);
       if (r.code === "verified") assertEquals(s.level, "verified");

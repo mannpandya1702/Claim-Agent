@@ -43,13 +43,14 @@ import {
   REP_PHONE_PLACEHOLDER,
   SQUAD_MEMBERS,
 } from "./render.ts";
+import { sentenceFor, verifiedFileClaimSentence } from "../supabase/functions/vapi-webhook/speak.ts";
 import { extraKeys, invariantProblems, leafDiff, type LiveView, patchBody } from "./vapi_sync.ts";
 
 const FINAL_TRANSCRIPT = 'transcript[transcriptType="final"]';
 const REP_PHONE = "+16025550188";
 const ENDCALL_GOODBYE = "Thanks for calling Observe Insurance. Take care.";
 const FIRST_MESSAGE =
-  "Hi, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. How can I help you today?";
+  "Hey, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. How can I help you today?";
 // The ElevenLabs voice every assistant speaks with (field names per the VAPI ElevenLabsVoice schema).
 const VOICE = {
   provider: "11labs",
@@ -355,21 +356,30 @@ Deno.test("conversation style rules are in every prompt", () => {
 // ---------------------------------------------------------------------------------------------
 // Assistant config
 // ---------------------------------------------------------------------------------------------
+// A regex field and the options field VAPI reads with it (the CustomEndpointingRule schemas).
+const REGEX_OPTION_FIELDS: Record<string, string> = {
+  regex: "regexOptions",
+  assistantRegex: "assistantRegexOptions",
+  customerRegex: "customerRegexOptions",
+};
+
+/** The flags VAPI's RegExp gets from a rule's options (whole-word has no JavaScript flag). */
+function regexFlags(options: unknown): string {
+  return (Array.isArray(options) ? options : [])
+    .filter((o: any) => o.enabled)
+    .map((o: any) => ({ "ignore-case": "i", "multi-line": "m", "whole-word": "", global: "g" } as any)[o.type] ?? "")
+    .join("");
+}
+
 Deno.test("every regex compiles with its declared options and carries no inline flags", () => {
   let count = 0;
   for (const key of ASSISTANT_KEYS) {
     walk(withRep.assistants[key].payload, (k, value, parent, path) => {
-      if (k !== "regex") return;
+      if (!(k in REGEX_OPTION_FIELDS)) return;
       count++;
       assert(typeof value === "string" && value, `${key} ${path}`);
       assert(!/\(\?[a-z]+\)/.test(value), `${key} ${path}: inline flags are not supported`);
-      const flags = (parent.regexOptions ?? [])
-        .filter((o: any) => o.enabled)
-        .map((o: any) =>
-          ({ "ignore-case": "i", "multi-line": "m", "whole-word": "", global: "g" } as any)[o.type] ?? ""
-        )
-        .join("");
-      new RegExp(value, flags);
+      new RegExp(value, regexFlags(parent[REGEX_OPTION_FIELDS[k]]));
     });
   }
   assert(count >= ASSISTANT_KEYS.length);
@@ -803,62 +813,229 @@ Deno.test("the callback question fits the channel: only the phone-only assistant
   }
 });
 
-Deno.test("endpointing waits longer after every sentence that asks for a number, a date, a name or a spelling", async () => {
-  const { sentenceFor, verifiedFileClaimSentence } = await import("../supabase/functions/vapi-webhook/speak.ts");
-  const rules: { re: RegExp; timeoutSeconds: number }[] = withRep.assistants["solo-core"].payload.startSpeakingPlan
-    .customEndpointingRules.map((r: any) => ({
-      re: new RegExp(r.regex, r.regexOptions?.some((o: any) => o.type === "ignore-case" && o.enabled) ? "i" : ""),
-      timeoutSeconds: r.timeoutSeconds,
-    }));
+// ---------------------------------------------------------------------------------------------
+// Turn-taking: endpointing and barge-in
+// ---------------------------------------------------------------------------------------------
+interface EndpointingRule {
+  index: number;
+  timeoutSeconds: number;
+  matches(assistant: string, customer: string): boolean;
+}
+
+/** The custom endpointing rules as VAPI runs them: RegExp.test (a substring match) with the rule's
+ *  own options, assistant rules on Ava's last message, customer rules on the caller's transcript so
+ *  far, both rules on the two together. */
+function endpointingRules(payload: any): EndpointingRule[] {
+  return payload.startSpeakingPlan.customEndpointingRules.map((r: any, index: number) => {
+    const re = (field: string) => new RegExp(r[field], regexFlags(r[REGEX_OPTION_FIELDS[field]]));
+    const test: (a: string, c: string) => boolean = r.type === "assistant"
+      ? (a) => re("regex").test(a)
+      : r.type === "customer"
+      ? (_a, c) => re("regex").test(c)
+      : (a, c) => re("assistantRegex").test(a) && re("customerRegex").test(c);
+    return { index, timeoutSeconds: r.timeoutSeconds, matches: test };
+  });
+}
+
+const RULES = endpointingRules(withRep.assistants["solo-core"].payload);
+
+/** The wait VAPI applies: the first rule that matches wins; null is no rule, so smart endpointing
+ *  decides when the caller is done. */
+function endpointingWait(assistant: string, customer: string): number | null {
+  return RULES.find((r) => r.matches(assistant, customer))?.timeoutSeconds ?? null;
+}
+
+Deno.test("endpointing: a short base wait, smart endpointing, then five ordered rules that only wait when needed", () => {
+  for (const key of ASSISTANT_KEYS) {
+    const plan = withRep.assistants[key].payload.startSpeakingPlan;
+    assertEquals(plan.waitSeconds, 0.4, key);
+    assertEquals(plan.smartEndpointingPlan, { provider: "livekit" }, key);
+    assertEquals(
+      plan.customEndpointingRules.map((r: any) => [r.type, r.timeoutSeconds]),
+      [["both", 2.5], ["both", 1.6], ["customer", 1.4], ["both", 1.6], ["assistant", 1.2]],
+      key,
+    );
+    for (const r of plan.customEndpointingRules) {
+      const fields = r.type === "both" ? ["assistantRegex", "customerRegex"] : ["regex"];
+      for (const f of fields) assert(typeof r[f] === "string" && r[f], `${key}: ${r.type} rule without ${f}`);
+    }
+  }
+});
+
+// Transcripts as Deepgram nova-3 writes them with numerals on (digits, sometimes grouped, sometimes
+// with a closing full stop), against what Ava last said. Expected: the wait in seconds, or null.
+const PHONE_ASK = "I'd be happy to help with that. What's the phone number on your account?";
+const READ_BACK_NUMBER = sentenceFor("not_found", { digits: "6025550199" });
+const DOB_ASK = sentenceFor("needs_dob");
+const ANYTHING_ELSE = sentenceFor("email_sent");
+const SPELL_ASK = "What's the best email address for you? Please spell it out, letter by letter.";
+const ENDPOINTING_CASES: [string, string, string, number | null][] = [
+  // a number in progress waits; ten digits are a whole number, so smart endpointing answers fast
+  ["phone, first groups", PHONE_ASK, "6 0 2 5 5 5", 1.6],
+  ["phone, one group", PHONE_ASK, "It's 602", 1.6],
+  ["phone, grouped in full", PHONE_ASK, "602 555 0101", null],
+  ["phone, digit by digit in full", PHONE_ASK, "It's 6 0 2 5 5 5 0 1 0 1.", null],
+  ["phone, a whole number with a 960 area code", PHONE_ASK, "9 6 0 1 5 5 0 1 2 3", null],
+  ["phone, nine of ten digits", PHONE_ASK, "9 6 0 1 5 5 0 1 2", 1.6],
+  // "double 6" is two digits, so a full number said with one is still ten
+  ["phone, double in progress", PHONE_ASK, "9 6 0 1 double 5", 1.6],
+  ["phone, double in full", PHONE_ASK, "9 6 0 1 double 5 0 1 2 3", null],
+  ["phone, double at the start", PHONE_ASK, "Double 6 0 2", 1.6],
+  ["phone, a double still to come", PHONE_ASK, "6 0 2 double", 1.6],
+  ["phone, no digits yet", PHONE_ASK, "Sure, give me a second", null],
+  // the cut-off from a test call: a new number after "Is that the right number?"
+  ["read-back, a new number in progress", READ_BACK_NUMBER, "No, can you please try this number? 6 4 2", 1.6],
+  ["read-back, yes", READ_BACK_NUMBER, "Yes, that's right.", null],
+  ["read-back, a new number in full", READ_BACK_NUMBER, "No, it's 602 555 0198", null],
+  // digits trailing off after any other question
+  ["any question, digits trailing off", ANYTHING_ELSE, "Yes, can you try 6 0 2 5", 1.4],
+  ["any question, digits and a full stop", ANYTHING_ELSE, "Can you try 6 4 2.", 1.4],
+  ["any question, a number mentioned in passing", ANYTHING_ELSE, "My claim ends in 4 7 2, can you check it", null],
+  ["any question, one digit", ANYTHING_ELSE, "I have 2 claims", null],
+  ["any question, a full number", ANYTHING_ELSE, "602 555 0101", null],
+  ["any question, a plain answer", ANYTHING_ELSE, "No, that's all, thanks", null],
+  // a date of birth waits until it has a four-digit year (said as one number or as two)
+  ["DOB, month and day", DOB_ASK, "March fourteenth", 1.6],
+  ["DOB, month and day in digits", DOB_ASK, "March 14", 1.6],
+  ["DOB, three digits trailing off", DOB_ASK, "3 14", 1.4],
+  ["DOB, year started", DOB_ASK, "March 14 19", 1.4],
+  ["DOB, year as two numbers", DOB_ASK, "March fourteenth 19 86.", null],
+  ["DOB, year as one number", DOB_ASK, "3 14 1986", null],
+  ["DOB, after a wrong one", sentenceFor("auth_failed"), "June third", 1.6],
+  ["DOB, after an unreadable one", sentenceFor("dob_unreadable"), "June", 1.6],
+  ["DOB, a 2000s year", DOB_ASK, "July 4 2001", null],
+  // spelling an email has the longest pauses
+  ["spelled email, letters", SPELL_ASK, "j o h n dot", 2.5],
+  ["spelled email, after a failed read", sentenceFor("contact_invalid_email"), "s m i t h at", 2.5],
+  // a loss told in the caller's own words
+  [
+    "what happened",
+    verifiedFileClaimSentence(sentenceFor("verified", { first_name: "Tobias" })),
+    "Someone backed into my car",
+    1.2,
+  ],
+  ["what happened, short ask", sentenceFor("claim_needs_description"), "A pipe burst", 1.2],
+  // names, yes or no, and the day of a loss: smart endpointing
+  ["name", sentenceFor("not_found_final"), "John Smith", null],
+  ["name, new caller", sentenceFor("claim_needs_contact"), "Priya Raman", null],
+  ["yes to a read-back", sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe" }), "Yes", null],
+  ["what to change", sentenceFor("claim_retry"), "The date", null],
+  ["what day", sentenceFor("claim_bad_date"), "Last Tuesday", null],
+  ["when", "When did it happen?", "Yesterday afternoon", null],
+];
+
+Deno.test("endpointing: realistic transcripts get the wait each rule is for, first match wins", () => {
+  for (const [note, assistant, customer, want] of ENDPOINTING_CASES) {
+    assertEquals(endpointingWait(assistant, customer), want, `${note}: "${customer}" after "${assistant}"`);
+  }
+});
+
+Deno.test("endpointing: every question that asks for a number waits for a partial number, never for a whole one", () => {
   const asks: [string, string][] = [
-    // the greeting asks how Ava can help; the phone number is asked once the caller says what they need
-    ["phone ask after intent", "I'd be happy to help with that. What's the phone number on your account?"],
-    ["needs_dob", sentenceFor("needs_dob")],
-    ["rep_queued_no_number", sentenceFor("rep_queued_no_number")],
+    ["phone ask after intent", PHONE_ASK],
+    ["not_verified (nothing yet)", sentenceFor("not_verified", { level: "none" })],
+    ["no_lookup_yet", sentenceFor("no_lookup_yet")],
+    ["invalid_phone", sentenceFor("invalid_phone")],
+    ["not_found", READ_BACK_NUMBER],
+    ["not_found (no digits)", sentenceFor("not_found")],
     ["not_found_final", sentenceFor("not_found_final")],
-    ["no_email_on_file", sentenceFor("no_email_on_file")],
-    ["contact_invalid_email", sentenceFor("contact_invalid_email")],
-    ["contact_needs_name", sentenceFor("contact_needs_name")],
-    ["not_pending", sentenceFor("not_pending")],
-    ["contact_retry", sentenceFor("contact_retry")],
-    ["contact_retry (with number)", sentenceFor("contact_retry", { has_email: true, has_phone: true })],
-    ["contact_retry (no email)", sentenceFor("contact_retry", { has_email: false })],
-    ["contact_retry (email update)", sentenceFor("contact_retry", { part: "email" })],
+    ["rep_queued_no_number", sentenceFor("rep_queued_no_number")],
     ["contact_needs_phone", sentenceFor("contact_needs_phone")],
-    ["not_pending (verified)", sentenceFor("not_pending", { verified: true })],
-    // the read-back: a yes or no, or a correction spelled or said in digits
-    [
-      "contact_readback",
-      sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe", email: "jane@gmail.com" }),
-    ],
-    ["contact_readback (name only)", sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe" })],
-    // reporting a loss: what happened is told with pauses, a date in parts, a correction after a no
-    ["verified (file_claim)", verifiedFileClaimSentence(sentenceFor("verified", { first_name: "Tobias" }))],
     ["claim_needs_lookup", sentenceFor("claim_needs_lookup")],
-    ["claim_needs_contact", sentenceFor("claim_needs_contact")],
-    ["claim_needs_verification", sentenceFor("claim_needs_verification")],
-    ["claim_needs_description", sentenceFor("claim_needs_description")],
-    ["claim_bad_date", sentenceFor("claim_bad_date")],
     ["claim_needs_phone", sentenceFor("claim_needs_phone")],
-    ["contact_saved_new (take it down now)", sentenceFor("contact_saved_new", { first_name: "Jane" })],
-    ["claim_not_pending", sentenceFor("claim_not_pending")],
-    ["claim_retry", sentenceFor("claim_retry")],
-    ["the prompt's own date question", "When did it happen?"],
-    // the prompt's own callback questions, often answered with digits
+    [
+      "contact_readback (with a number)",
+      sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe", callback_phone: "+16025550177" }),
+    ],
     ["calling-from question", CALLING_FROM_QUESTION],
     ["best-number question", BEST_NUMBER_QUESTION],
   ];
   for (const [where, text] of asks) {
-    const rule = rules.find((r) => r.re.test(text));
-    assert(rule, `${where}: no endpointing rule waits after "${text}"`);
-    assert(rule.timeoutSeconds >= 2, where);
+    assertEquals(endpointingWait(text, "6 0 2 5 5 5"), 1.6, `${where}: a partial number must wait`);
+    assertEquals(endpointingWait(text, "6 0 2 5 5 5 0 1 7 7"), null, `${where}: a whole number must not wait`);
+    assertEquals(endpointingWait(text, "Yes"), null, `${where}: a plain answer must not wait`);
   }
-  // A spelled email has the longest pauses between parts.
-  for (const [where, text] of asks.filter(([, t]) => /\bspell\b/i.test(t))) {
-    assert(rules.find((r) => r.re.test(text))!.timeoutSeconds >= 3, `${where}: spelling needs the longer wait`);
+  // A spelled email waits longest of all.
+  const longest = Math.max(...RULES.map((r) => r.timeoutSeconds));
+  for (
+    const text of [SPELL_ASK, sentenceFor("contact_invalid_email"), sentenceFor("contact_retry", { part: "email" })]
+  ) {
+    if (/\bspell/i.test(text)) assertEquals(endpointingWait(text, "j o h n"), longest, text);
   }
-  // A plain answer turn does not wait.
-  assert(!rules.some((r) => r.re.test(sentenceFor("email_sent"))));
+});
+
+// StopSpeakingPlan defaults in VAPI's openapi, written out so the config says what it does and
+// sync:check compares them: interruption phrases always stop Ava at once, acknowledgements never do.
+const VAPI_INTERRUPTION_PHRASES = [
+  "stop",
+  "shut",
+  "up",
+  "enough",
+  "quiet",
+  "silence",
+  "but",
+  "dont",
+  "not",
+  "no",
+  "hold",
+  "wait",
+  "cut",
+  "pause",
+  "nope",
+  "nah",
+  "nevermind",
+  "never",
+  "bad",
+  "actually",
+];
+const VAPI_ACKNOWLEDGEMENT_PHRASES = [
+  "i understand",
+  "i see",
+  "i got it",
+  "i hear you",
+  "im listening",
+  "im with you",
+  "right",
+  "okay",
+  "ok",
+  "sure",
+  "alright",
+  "got it",
+  "understood",
+  "yeah",
+  "yes",
+  "uh-huh",
+  "mm-hmm",
+  "gotcha",
+  "mhmm",
+  "ah",
+  "yeah okay",
+  "yeah sure",
+];
+// How callers on test calls tried to stop Ava: "sorry, wait", "excuse me", "hang on", "hey Ava".
+const EXTRA_INTERRUPTION_PHRASES = ["sorry", "excuse", "hang", "hey", "ava", "question"];
+
+Deno.test("barge-in: one word stops Ava, backchannels never do, and the greeting is heard in full", () => {
+  for (const key of ASSISTANT_KEYS) {
+    const p = withRep.assistants[key].payload;
+    assertEquals(p.stopSpeakingPlan, {
+      numWords: 1,
+      voiceSeconds: 0.2,
+      backoffSeconds: 1,
+      interruptionPhrases: [...VAPI_INTERRUPTION_PHRASES, ...EXTRA_INTERRUPTION_PHRASES],
+      acknowledgementPhrases: VAPI_ACKNOWLEDGEMENT_PHRASES,
+    }, key);
+    // the recording notice in the greeting is never cut off
+    assert(!("firstMessageInterruptionsEnabled" in p), `${key}: firstMessageInterruptionsEnabled must stay unset`);
+    // the transcriber is primed for the name a caller says to get Ava's attention
+    assert(p.transcriber.keyterm.includes(PERSONA_NAME), key);
+  }
+  const { interruptionPhrases, acknowledgementPhrases } = withRep.assistants["solo-core"].payload.stopSpeakingPlan;
+  for (const phrase of [...interruptionPhrases, ...acknowledgementPhrases]) {
+    assertMatch(phrase, /^[a-z][a-z -]*$/, `"${phrase}": VAPI compares lower-case words without apostrophes`);
+  }
+  assertEquals(new Set(interruptionPhrases).size, interruptionPhrases.length);
+  for (const p of interruptionPhrases) assert(!acknowledgementPhrases.includes(p), `"${p}" is in both lists`);
 });
 
 Deno.test("variants differ only where intended", () => {

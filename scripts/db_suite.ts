@@ -258,25 +258,86 @@ await test("unreadable DOBs and phones are never counted; the third unreadable D
   ));
 });
 
-await test("two lookup misses end lookups for the call (not_found_final is sticky)", async () => {
+await test("the same number again is final for that number only; a different number is still looked up", async () => {
   const f = fixture("notfound");
   await sql(tx(
     insertCustomer(f),
     doBlock([
       lookup(f, "t01", f.nobody[0], "not_found", 1),
       lookup(f, "t02", null, "invalid_phone", 1),
-      lookup(f, "t03", f.nobody[1], "not_found_final", 2),
-      lookup(f, "t04", f.phone, "not_found_final", 2),
+      // the caller said yes to the read-back: the same number is final, recorded as other, not counted
+      lookup(f, "t03", f.nobody[0], "not_found_final", 1),
+      lookup(f, "t04", f.nobody[0], "not_found_final", 1),
       levelIs(f, "none"),
-      `assert (select candidate_customer_id from call_sessions where call_key = ${lit(f.callKey)}) is null,
-        'a sticky not_found_final still set a candidate';`,
+      // not sticky: the right number still reaches the date of birth
+      lookup(f, "t05", f.phone, "needs_dob", 1),
+      levelIs(f, "phone_found"),
       ledgerIs(f, [
         "lookup_miss:not_found",
         "unreadable:invalid_phone",
-        "lookup_miss:not_found_final",
         "other:not_found_final",
+        "other:not_found_final",
+        "lookup_hit:needs_dob",
       ]),
+      // the miss row carries the hex SHA-256 of the E.164; no row carries the number itself
+      `assert (select string_agg(coalesce(number_hash, '-'), ',' order by tool_call_id) from attempts
+               where call_key = ${lit(f.callKey)})
+             = encode(sha256(convert_to(${lit(f.nobody[0])}, 'UTF8')), 'hex') || ',-,-,-,-',
+        format('number_hash: got %s', (select string_agg(coalesce(number_hash, '-'), ',' order by tool_call_id)
+                                       from attempts where call_key = ${lit(f.callKey)}));`,
+      `assert not exists (select 1 from attempts a where a.call_key = ${lit(f.callKey)}
+                            and row_to_json(a)::text like ${lit(`%${f.nobody[0].slice(2)}%`)}),
+        'an attempts row carries the raw number';`,
     ].join("\n")),
+  ));
+});
+
+await test("up to three different numbers: two misses then a hit; a third different miss is final and sticky", async () => {
+  const f = fixture("thirdnum");
+  const third = `+1996${f.phone.slice(5)}`;
+  const k2 = lit(`${f.callKey}-cap`);
+  await sql(tx(
+    insertCustomer(f),
+    doBlock([
+      lookup(f, "t01", f.nobody[0], "not_found", 1),
+      lookup(f, "t02", f.nobody[1], "not_found", 2),
+      lookup(f, "t03", f.phone, "needs_dob", 2),
+      levelIs(f, "phone_found"),
+      ledgerIs(f, ["lookup_miss:not_found", "lookup_miss:not_found", "lookup_hit:needs_dob"]),
+    ].join("\n")),
+    doBlock([
+      lookup({ ...f, callKey: `${f.callKey}-cap` }, "t01", f.nobody[0], "not_found", 1),
+      lookup({ ...f, callKey: `${f.callKey}-cap` }, "t02", f.nobody[1], "not_found", 2),
+      lookup({ ...f, callKey: `${f.callKey}-cap` }, "t03", third, "not_found_final", 3),
+      // sticky after three different misses: even the customer's number
+      lookup({ ...f, callKey: `${f.callKey}-cap` }, "t04", f.phone, "not_found_final", 3),
+      lookup({ ...f, callKey: `${f.callKey}-cap` }, "t05", f.nobody[0], "not_found_final", 3),
+      // a replay keeps its own answer and reads today's count
+      lookup({ ...f, callKey: `${f.callKey}-cap` }, "t01", f.nobody[0], "not_found", 3),
+      `assert (select candidate_customer_id from call_sessions where call_key = ${k2}) is null,
+        'a lookup after the cap set a candidate';`,
+      `assert (select string_agg(kind || ':' || code, ',' order by tool_call_id) from attempts where call_key = ${k2})
+             = 'lookup_miss:not_found,lookup_miss:not_found,lookup_miss:not_found_final,other:not_found_final,'
+               || 'other:not_found_final', 'capped ledger';`,
+    ].join("\n")),
+  ));
+});
+
+await test("miss rows from before 0010 (no number_hash) each count as a different number", async () => {
+  const f = fixture("legacy");
+  const k = lit(f.callKey);
+  await sql(tx(
+    insertCustomer(f),
+    `insert into call_sessions (call_key, channel) values (${k}, 'webCall');
+     insert into attempts (call_key, tool_call_id, tool_name, kind, code)
+     values (${k}, 'old1', 'lookup_customer', 'lookup_miss', 'not_found');`,
+    doBlock([
+      lookup(f, "t01", f.nobody[0], "not_found", 2),
+      lookup(f, "t02", f.nobody[0], "not_found_final", 2),
+    ].join("\n")),
+    `insert into attempts (call_key, tool_call_id, tool_name, kind, code)
+     values (${k}, 'old2', 'lookup_customer', 'lookup_miss', 'not_found_final');`,
+    doBlock(lookup(f, "t03", f.phone, "not_found_final", 3)),
   ));
 });
 

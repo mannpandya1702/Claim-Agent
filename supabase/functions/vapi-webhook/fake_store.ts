@@ -1,12 +1,14 @@
 // In-memory Store for the unit tests. It mirrors 0001_init.sql instead of approximating it: the
 // identity ladder runs through identity.step over counts derived from the attempts ledger (the way
-// the SQL functions derive them), unique keys and CHECK lists reject what Postgres would reject,
-// and upsert_interaction merges column by column like the SQL. A test that passes here should not
-// be able to fail in production only because the database is stricter.
+// the SQL functions derive them; lookups count different numbers, as in 0010_lookup_retries.sql),
+// unique keys and CHECK lists reject what Postgres would reject, and upsert_interaction merges
+// column by column like the SQL. A test that passes here should not be able to fail in production
+// only because the database is stricter.
 //
 // Every method body runs synchronously after its failure check, so one call is atomic the way the
 // call_sessions row lock makes it atomic in Postgres.
 
+import { createHash } from "node:crypto";
 import { type InteractionForMirror, MIRROR_COLUMNS } from "./airtable.ts";
 import { GHL_COLUMNS, type InteractionForGhl } from "./ghl.ts";
 import {
@@ -245,6 +247,11 @@ function clone<T>(v: T): T {
   return v === undefined ? v : structuredClone(v);
 }
 
+/** attempts.number_hash as 0010 writes it: encode(sha256(convert_to(e164, 'UTF8')), 'hex'). */
+export function numberHash(e164: string): string {
+  return createHash("sha256").update(e164, "utf8").digest("hex");
+}
+
 /** The date Postgres make_date would build, as YYYY-MM-DD, or null where verify_dob_attempt
  *  treats the parts as unreadable (missing, year outside 1900..this year, impossible date). */
 function sqlDate(year: number | null, month: number | null, day: number | null): string | null {
@@ -371,6 +378,7 @@ export function createFakeStore(
     toolName: string,
     kind: AttemptKind,
     code: string | null,
+    hash: string | null = null,
   ) {
     if (findAttempt(callKey, toolCallId)) {
       throw dbError("23505", 'duplicate key value violates unique constraint "attempts_pkey"');
@@ -383,17 +391,22 @@ export function createFakeStore(
       tool_name: toolName,
       kind,
       code,
+      number_hash: hash,
       created_at: nowIso(),
     });
   }
 
-  // The SQL functions read the level from the session row and every counter from the ledger.
+  // The SQL functions read the level from the session row and every counter from the ledger. A miss
+  // row without a number_hash (written before 0010) counts as a different number of its own.
   function identityOf(callKey: string): IdentityState {
     const s = session(callKey)!;
     const rows = tables.attempts.filter((a) => a.call_key === callKey);
+    const misses = rows.filter((a) => a.kind === "lookup_miss");
+    const missed = [...new Set(misses.map((a) => a.number_hash).filter((h): h is string => typeof h === "string"))];
     return {
       level: s.level,
-      misses: rows.filter((a) => a.kind === "lookup_miss").length,
+      misses: missed.length + misses.filter((a) => typeof a.number_hash !== "string").length,
+      missed,
       wrong: rows.filter((a) => a.kind === "dob_wrong").length,
       unreadable: rows.filter((a) => a.kind === "unreadable" && a.tool_name === "verify_identity").length,
       candidate: s.candidate_customer_id,
@@ -578,7 +591,8 @@ export function createFakeStore(
       if (prior) return { code: prior.code as Code, misses: before.misses };
 
       const customerId = p.phoneE164 === null ? null : customers.find((c) => c.phone_e164 === p.phoneE164)?.id ?? null;
-      const { state, code } = step(before, { type: "lookup", phoneE164: p.phoneE164, customerId });
+      const numberKey = p.phoneE164 === null ? undefined : numberHash(p.phoneE164);
+      const { state, code } = step(before, { type: "lookup", phoneE164: p.phoneE164, customerId, numberKey });
       const kind: AttemptKind = code === "needs_dob"
         ? "lookup_hit"
         : state.misses > before.misses
@@ -587,7 +601,14 @@ export function createFakeStore(
         ? "unreadable"
         : "other";
       applyIdentity(p.callKey, state);
-      insertAttempt(p.callKey, p.toolCallId, "lookup_customer", kind, code);
+      insertAttempt(
+        p.callKey,
+        p.toolCallId,
+        "lookup_customer",
+        kind,
+        code,
+        kind === "lookup_miss" ? numberKey ?? null : null,
+      );
       return { code, misses: state.misses };
     },
 
@@ -694,7 +715,15 @@ export function createFakeStore(
     },
 
     listAttempts(callKey): AttemptRow[] {
-      return clone(tables.attempts.filter((a) => a.call_key === callKey)) as AttemptRow[];
+      // store.ts selects these columns only (never number_hash)
+      return tables.attempts.filter((a) => a.call_key === callKey).map((a) => ({
+        call_key: a.call_key,
+        tool_call_id: a.tool_call_id,
+        tool_name: a.tool_name,
+        kind: a.kind,
+        code: a.code,
+        created_at: a.created_at,
+      }));
     },
 
     upsertEscalation(p) {

@@ -218,41 +218,56 @@ export function lastFour(e164: string): string {
   return typeof e164 === "string" ? e164.replace(/\D/g, "").slice(-4) : "";
 }
 
+/** Different numbers that may miss on one call; the one that reaches it is told not_found_final, and
+ *  so is every lookup after it. */
+export const MAX_LOOKUP_MISSES = 3;
+
 /** Pure mirror of the SQL state machine (lookup_customer_attempt / verify_dob_attempt), used by
  *  fake_store.ts and identity_test.ts. The SQL functions remain the source of truth in production. */
 export interface IdentityState {
   level: Level;
+  /** Different numbers that missed on this call (lookup_miss rows; an old row without a number key
+   *  counts as a number of its own). */
   misses: number;
+  /** The keys of those numbers (attempts.number_hash), so a number that missed is known again. */
+  missed: string[];
   wrong: number;
   unreadable: number;
   candidate: string | null;
   verified: string | null;
 }
 export type IdentityEvent =
-  | { type: "lookup"; phoneE164: string | null; customerId: string | null }
+  /** numberKey: how the ledger knows the number (attempts.number_hash, the hex SHA-256 of the
+   *  E.164). Defaults to phoneE164, which is all an in-memory replay needs. */
+  | { type: "lookup"; phoneE164: string | null; customerId: string | null; numberKey?: string }
   | { type: "dob"; valid: boolean; matches: boolean };
 
 export function initialIdentity(): IdentityState {
-  return { level: "none", misses: 0, wrong: 0, unreadable: 0, candidate: null, verified: null };
+  return { level: "none", misses: 0, missed: [], wrong: 0, unreadable: 0, candidate: null, verified: null };
 }
 
 // Branch order matches the SQL exactly: level first, then readability, then the counters. The
 // `unreadable` counter is the verify_identity one only (the SQL filters on tool_name), so an
 // unreadable phone never moves the caller toward dob_give_up.
 export function step(s: IdentityState, e: IdentityEvent): { state: IdentityState; code: Code } {
-  const next: IdentityState = { ...s };
+  const next: IdentityState = { ...s, missed: [...s.missed] };
   if (e.type === "lookup") {
     if (s.level === "verified") return { state: next, code: "already_verified" };
     if (s.level === "locked") return { state: next, code: "locked" };
     if (e.phoneE164 === null) return { state: next, code: "invalid_phone" };
-    if (s.misses >= 2) return { state: next, code: "not_found_final" };
+    const key = e.numberKey ?? e.phoneE164;
+    // A number that already missed (the caller said yes to "Is that the right number?") is final for
+    // that number only: a different one may still be tried while fewer than three have missed.
+    if (s.missed.includes(key)) return { state: next, code: "not_found_final" };
+    if (s.misses >= MAX_LOOKUP_MISSES) return { state: next, code: "not_found_final" };
     if (e.customerId !== null) {
       next.level = "phone_found";
       next.candidate = e.customerId;
       return { state: next, code: "needs_dob" };
     }
     next.misses = s.misses + 1;
-    return { state: next, code: next.misses >= 2 ? "not_found_final" : "not_found" };
+    next.missed.push(key);
+    return { state: next, code: next.misses >= MAX_LOOKUP_MISSES ? "not_found_final" : "not_found" };
   }
 
   if (s.level === "verified") return { state: next, code: "verified" };

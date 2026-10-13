@@ -71,9 +71,10 @@ const SLOANE = {
   dob: { dob_month: 7, dob_day: 21, dob_year: 1992 },
 };
 const UNKNOWN_PHONE = "6025550199";
+const OTHER_UNKNOWN_PHONES = ["6025550198", "6025550197"];
 const CALLBACK_PHONE = "6025550177";
 const FIRST_MESSAGE =
-  "Hi, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. What's the phone number on your account?";
+  "Hey, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. What's the phone number on your account?";
 // The new caller the contact cases invent; no customer has these details.
 const NEW_CALLER = { first_name: "smoke", last_name: "tester" };
 // Spelled the way a caller says it, so the server's spoken-form reading is exercised end to end.
@@ -518,9 +519,47 @@ export function smokeCases(): SmokeCase[] {
           code: "not_found",
           sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }),
         });
+        // The caller confirmed the number: the same number again is final, and stays final. (A
+        // different number is still looked up: lookup-third-number.)
         await c.tool(ref, { name: "lookup_customer", args: { phone: UNKNOWN_PHONE }, code: "not_found_final" });
-        // Sticky: even a seeded number is not looked up after the second miss.
-        await c.tool(ref, { name: "lookup_customer", args: { phone: TOBIAS.phone }, code: "not_found_final" });
+        await c.tool(ref, { name: "lookup_customer", args: { phone: UNKNOWN_PHONE }, code: "not_found_final" });
+      },
+    },
+    {
+      // Needs 0010_lookup_retries.sql: before it, two misses of any numbers were final.
+      name: "lookup-third-number",
+      async run(c) {
+        // The first number misses, the second is misheard and misses, the third is the right one.
+        const ref = c.ref();
+        await c.tool(ref, {
+          name: "lookup_customer",
+          args: { phone: UNKNOWN_PHONE },
+          code: "not_found",
+          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }),
+        });
+        await c.tool(ref, {
+          name: "lookup_customer",
+          args: { phone: OTHER_UNKNOWN_PHONES[0] },
+          code: "not_found",
+          sentence: sentenceFor("not_found", { digits: OTHER_UNKNOWN_PHONES[0] }),
+        });
+        await c.tool(ref, { name: "lookup_customer", args: { phone: TOBIAS.phone }, code: "needs_dob" });
+        // Three different misses end the lookups for the call, even for a seeded number.
+        const capped = c.ref("cap");
+        for (const phone of [UNKNOWN_PHONE, OTHER_UNKNOWN_PHONES[0]]) {
+          await c.tool(capped, {
+            name: "lookup_customer",
+            args: { phone },
+            code: "not_found",
+            sentence: sentenceFor("not_found", { digits: phone }),
+          });
+        }
+        await c.tool(capped, {
+          name: "lookup_customer",
+          args: { phone: OTHER_UNKNOWN_PHONES[1] },
+          code: "not_found_final",
+        });
+        await c.tool(capped, { name: "lookup_customer", args: { phone: TOBIAS.phone }, code: "not_found_final" });
       },
     },
     {

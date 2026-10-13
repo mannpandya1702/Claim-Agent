@@ -222,7 +222,7 @@ Deno.test("locked path: two wrong DOBs lock, the lock is sticky and every claim 
   assertEquals(h.calls.length, 0);
 });
 
-Deno.test("not_found twice gives not_found_final, and it is sticky", async () => {
+Deno.test("not_found reads the number back; the same number again is not_found_final", async () => {
   const h = harness();
   const miss = await h.run("lookup_customer", { phone: "602 555 0199" });
   assertEquals(miss.code, "not_found");
@@ -231,14 +231,31 @@ Deno.test("not_found twice gives not_found_final, and it is sticky", async () =>
     miss.sentence,
     "I'm not finding an account under six zero two... five five five... zero one nine nine. Is that the right number?",
   );
-  const final = await h.run("lookup_customer", { phone: "(602) 555-0198" });
+  // the caller said yes: the confirmed number is looked up again, written another way
+  const final = await h.run("lookup_customer", { phone: "(602) 555-0199" });
   assertEquals(final.code, "not_found_final");
   assertEquals(
     final.sentence,
     "I'm sorry, I still can't find an account for that number. If you're new with us, I can help you get started. Could I get your first and last name?",
   );
-  // even a real customer's number is not looked up any more on this call
-  assertEquals((await h.run("lookup_customer", { phone: "6025550101" })).code, "not_found_final");
+  // final for that number only: a different number is still looked up
+  assertEquals((await h.run("lookup_customer", { phone: "6025550101" })).code, "needs_dob");
+});
+
+Deno.test("up to three different numbers: a misheard second miss still lets the right third one through", async () => {
+  const h = harness();
+  assertEquals((await h.run("lookup_customer", { phone: "6025550199" })).code, "not_found");
+  const second = await h.run("lookup_customer", { phone: "6025550198" });
+  assertEquals(second.code, "not_found");
+  assertEquals(second.data, { digits: "6025550198" });
+  assertEquals((await h.run("lookup_customer", { phone: "6025550101" })).code, "needs_dob");
+
+  const capped = harness();
+  assertEquals((await capped.run("lookup_customer", { phone: "6025550199" })).code, "not_found");
+  assertEquals((await capped.run("lookup_customer", { phone: "6025550198" })).code, "not_found");
+  assertEquals((await capped.run("lookup_customer", { phone: "6025550197" })).code, "not_found_final");
+  // sticky after three: even a real customer's number is not looked up any more on this call
+  assertEquals((await capped.run("lookup_customer", { phone: "6025550101" })).code, "not_found_final");
 });
 
 Deno.test("an unreadable phone number is never counted as a miss", async () => {
@@ -250,7 +267,8 @@ Deno.test("an unreadable phone number is never counted as a miss", async () => {
   assertEquals((await h.run("lookup_customer", { phone: "6025550199" })).code, "not_found");
   assertEquals((await h.run("lookup_customer", {})).code, "invalid_phone");
   assertEquals((await h.run("lookup_customer", { phone: "1111111111" })).code, "invalid_phone");
-  assertEquals((await h.run("lookup_customer", { phone: "6025550198" })).code, "not_found_final");
+  assertEquals((await h.run("lookup_customer", { phone: "6025550198" })).code, "not_found");
+  assertEquals((await h.run("lookup_customer", { phone: "6025550197" })).code, "not_found_final");
 });
 
 Deno.test("verify_identity before a lookup, and three unreadable DOBs give dob_give_up", async () => {
@@ -518,7 +536,7 @@ Deno.test("a store failure is system_error, never a business answer, and is not 
     code: "system_error",
     sentence: SYSTEM_ERROR,
   });
-  // the failed call burned nothing: two real misses are still needed for not_found_final
+  // the failed call burned nothing: the first real lookup of the number is still a plain miss
   assertEquals((await h.run("lookup_customer", { phone: "6025550199" })).code, "not_found");
 
   const v = harness();
