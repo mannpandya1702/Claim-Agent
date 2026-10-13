@@ -2109,7 +2109,8 @@ export const PERSONAS: Persona[] = [
   },
   {
     id: "existing-unlisted-number",
-    title: "Not found twice, but already has a claim: a callback offer, never new-claim intake",
+    title:
+      "Not found twice, but already has a claim: a callback offer or the account holder's number, never new-claim intake",
     turns: [
       {
         user: `Hi, I'm calling about my claim. My number is ${UNKNOWN_SAYS_PHONE}.`,
@@ -2126,7 +2127,14 @@ export const PERSONAS: Persona[] = [
       {
         user: "But I already have a claim with you. The policy might be under my husband's number.",
         tools: [],
-        modelSays: [REPRESENTATIVE],
+        // with up to three different numbers per call (0010), asking for the account holder's number is
+        // as right as offering a callback; never new-claim intake
+        modelSays: [
+          new RegExp(
+            `${REPRESENTATIVE.source}|\\b(phone number|his number|that number|number on (the|his|that) account)\\b`,
+            "i",
+          ),
+        ],
         modelNever: [NAME_ASK, EMAIL_ASK],
       },
       {
