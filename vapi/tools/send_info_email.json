@@ -27,7 +27,7 @@
     {
       "type": "request-start",
       "blocking": false,
-      "content": "One moment, let me check on that."
+      "content": "One moment."
     },
     {
       "type": "request-response-delayed",

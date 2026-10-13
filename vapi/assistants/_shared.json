@@ -11,15 +11,16 @@
     },
     "voice": {
       "provider": "11labs",
-      "model": "eleven_multilingual_v2",
+      "model": "eleven_turbo_v2_5",
       "voiceId": "bP6y87KyX5lwNEi7xOkX",
       "speed": 0.9,
       "stability": 0.75,
       "similarityBoost": 0.75,
       "style": 0,
       "useSpeakerBoost": true,
-      "enableSsmlParsing": true,
-      "optimizeStreamingLatency": 0,
+      "enableSsmlParsing": false,
+      "optimizeStreamingLatency": 3,
+      "language": "en",
       "chunkPlan": { "enabled": true, "minCharacters": 80, "punctuationBoundaries": [".", "!", "?"] }
     },
     "transcriber": {

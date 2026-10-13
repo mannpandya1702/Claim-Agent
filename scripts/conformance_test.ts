@@ -51,22 +51,24 @@ const REP_PHONE = "+16025550188";
 const ENDCALL_GOODBYE = "Thanks for calling Observe Insurance. Take care.";
 const FIRST_MESSAGE =
   "Hey, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. How can I help you today?";
-// The ElevenLabs voice every assistant speaks with (field names per the VAPI ElevenLabsVoice schema),
-// as chosen: Multilingual v2, ElevenLabs' most natural-sounding model, a calm pace (speed 0.9),
-// a steady delivery (stability 0.75, style 0), SSML parsing on, no streaming-latency shortcuts
-// (optimizeStreamingLatency 0), and a ChunkPlan that sends whole sentences to TTS (at least 80
-// characters, ending on . ! or ?) so intonation runs across a sentence. Quality over first-audio speed.
+// The ElevenLabs voice every assistant speaks with (field names per the VAPI ElevenLabsVoice schema):
+// the chosen voice and delivery (a calm pace, speed 0.9; a steady read, stability 0.75, style 0) on
+// Turbo v2.5, chosen over Multilingual v2 for speed: first audio about 0.30 s against
+// about 0.84 s on their calls. SSML parsing is off (nothing sends SSML, and it costs latency),
+// optimizeStreamingLatency is VAPI's default 3, and the ChunkPlan sends whole sentences to TTS (at
+// least 80 characters, ending on . ! or ?) so intonation runs across a sentence.
 const VOICE = {
   provider: "11labs",
-  model: "eleven_multilingual_v2",
+  model: "eleven_turbo_v2_5",
   voiceId: "bP6y87KyX5lwNEi7xOkX",
   speed: 0.9,
   stability: 0.75,
   similarityBoost: 0.75,
   style: 0,
   useSpeakerBoost: true,
-  enableSsmlParsing: true,
-  optimizeStreamingLatency: 0,
+  enableSsmlParsing: false,
+  optimizeStreamingLatency: 3,
+  language: "en",
   chunkPlan: { enabled: true, minCharacters: 80, punctuationBoundaries: [".", "!", "?"] },
 };
 // What the platform says while a tool runs: request-start and the delayed line. Every tool sets its
@@ -75,12 +77,12 @@ const DELAYED = "Thanks for bearing with me, almost there.";
 const FILLERS: Record<string, { start: string; delayed: string }> = {
   lookup_customer: { start: "Sure, let me look that up.", delayed: DELAYED },
   verify_identity: { start: "Okay, let me check that.", delayed: DELAYED },
-  get_claim_status: { start: "Alright, let me pull up your claims.", delayed: DELAYED },
+  get_claim_status: { start: "Sure, one moment.", delayed: DELAYED },
   // Says nothing of the result before the tool confirms it, and leaves "our claims team" to the
   // sentence that follows, so the two do not say "our team" in one breath.
   escalate: { start: "Of course, one moment.", delayed: DELAYED },
   // Outcome-neutral: most results are not a send (no address on file, not verified, already sent).
-  send_info_email: { start: "One moment, let me check on that.", delayed: DELAYED },
+  send_info_email: { start: "One moment.", delayed: DELAYED },
   // The read-back opens with a thanks, so the filler does not thank them too.
   capture_contact: { start: "Got it, one second.", delayed: DELAYED },
   // Without a request-start VAPI speaks a default filler of its own ("Hold on a sec"), and the

@@ -30,7 +30,7 @@
     {
       "type": "request-start",
       "blocking": false,
-      "content": "Alright, let me pull up your claims."
+      "content": "Sure, one moment."
     },
     {
       "type": "request-response-delayed",
