@@ -389,12 +389,13 @@ const SENSITIVE_ASK_RE =
   /(date of birth|birth ?date|birthday|\bborn\b|\bDOB\b|(month|day|year) of birth|(what|which) year|phone number|number on (the|your) account|ten-digit|ten digit|month, day,? and (the )?year|(best|right) number|reach you|email address|\bspell|your email is|what(?:'s| is) (?:the best |your )?email|\b(?:your|an|which|what) email\b[^.?!]{0,80}\?|\bdigits\b|\b(?:next|last|first) (?:three|four)\b)/i;
 
 /** A short re-ask of whatever the caller just said ("Sorry, I didn't quite catch that. Could you say that
- *  again?", rules.md rule 23, the low-confidence hook, bad_args), or a line check when the caller can't
+ *  again?", rules.md rule 23, the low-confidence hook, bad_args), a line check when the caller can't
  *  hear Ava ("Sorry about that, can you hear me now?", "Yes, I can hear you.", "I'm still here.", rule
- *  25). Right after a sensitive question either one still waits on the same answer, so the masking
- *  that question started carries on through it. */
+ *  25), or a hold line while they look for it (the silence hooks' "No rush, I'm right here." and "Take
+ *  all the time you need.", or "Sure, take your time."). Right after a sensitive question each one still
+ *  waits on the same answer, so the masking that question started carries on through it. */
 export const REASK_RE =
-  /\b(catch|caught|missed that|say (that|it) again|one more time|repeat that|hear (me|you)|I['\u2019]m here|still here)\b/i;
+  /\b(catch|caught|missed that|say (that|it) again|one more time|repeat that|hear (me|you)|(I['\u2019]m|I am) here|(right|still) here|take (all the|your) time)\b/i;
 
 /** True when an assistant line asks for a date of birth, a phone number or an email address. */
 export function asksForSensitive(assistantText: string | null | undefined): boolean {

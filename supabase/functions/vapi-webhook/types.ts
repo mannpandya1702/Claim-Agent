@@ -399,7 +399,7 @@ export interface Store {
   ensureInteraction(row: InteractionRow): Promise<void>; // insert ... on conflict do nothing
   upsertInteraction(row: InteractionRow): Promise<void>; // SQL upsert_interaction(jsonb)
   insertTranscriptLine(line: TranscriptLine): Promise<void>; // on conflict do nothing
-  lastAssistantLine(callKey: string): Promise<string | null>; // newest assistant text by ts_ms
+  recentAssistantLines(callKey: string, limit: number): Promise<string[]>; // assistant texts by ts_ms, newest first
   deleteTranscriptLines(callKey: string): Promise<void>;
   captureWebhook(messageType: string | null, callKey: string | null, body: unknown): Promise<void>;
 

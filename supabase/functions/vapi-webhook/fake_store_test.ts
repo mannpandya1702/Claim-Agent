@@ -567,11 +567,12 @@ Deno.test("transcript lines: retried deliveries are no-ops; the newest assistant
   await store.insertTranscriptLine({ call_key: "c1", role: "assistant", text: "duplicate", ts_ms: 2000 });
   await store.insertTranscriptLine({ call_key: "c2", role: "assistant", text: "other call", ts_ms: 9000 });
   assertEquals(store.tables.transcript_lines.filter((t) => t.call_key === "c1").length, 3);
-  assertEquals(await store.lastAssistantLine("c1"), "What's the date of birth?");
-  assertEquals(await store.lastAssistantLine("nobody"), null);
+  assertEquals(await store.recentAssistantLines("c1", 1), ["What's the date of birth?"]);
+  assertEquals(await store.recentAssistantLines("c1", 6), ["What's the date of birth?", "Hello"]);
+  assertEquals(await store.recentAssistantLines("nobody", 6), []);
   await store.deleteTranscriptLines("c1");
-  assertEquals(await store.lastAssistantLine("c1"), null);
-  assertEquals(await store.lastAssistantLine("c2"), "other call");
+  assertEquals(await store.recentAssistantLines("c1", 6), []);
+  assertEquals(await store.recentAssistantLines("c2", 6), ["other call"]);
   await assertRejects(() =>
     store.insertTranscriptLine({ call_key: "c1", role: "system" as never, text: "x", ts_ms: 1 })
   );

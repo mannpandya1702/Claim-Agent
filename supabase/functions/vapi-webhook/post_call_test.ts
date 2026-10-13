@@ -573,6 +573,103 @@ Deno.test("masking: the caller asks whether Ava can hear them; her yes keeps the
   );
 });
 
+// The 10 s silence hook says "No rush, I'm right here." (and the 20 s one "Take all the time you need.")
+// while a caller looks for their number or date of birth; the answer that follows, often in pieces too
+// short for redactPII, is still the sensitive one (01a13617 message 7).
+Deno.test("masking: a hold line between a sensitive question and its answer keeps it withheld", () => {
+  for (
+    const hold of ["No rush, I'm right here.", "Take all the time you need.", "Sure, take your time.", "I am here."]
+  ) {
+    assertEquals(
+      maskTranscript(
+        `AI: ${PHONE_QUESTION}\nAI: ${hold}\nUser: six zero two\nUser: five five five\nUser: zero one zero one`,
+      ),
+      `AI: ${PHONE_QUESTION}\nAI: ${hold}\nUser: ${MASKED_ANSWER}\nUser: ${MASKED_ANSWER}\nUser: ${MASKED_ANSWER}`,
+      hold,
+    );
+    const message = fixture("full");
+    message.artifact.messages = [
+      { role: "bot", message: DOB_QUESTION, secondsFromStart: 1 },
+      { role: "bot", message: hold, secondsFromStart: 11 },
+      { role: "user", message: "march fourteenth", secondsFromStart: 14 },
+      { role: "user", message: "nineteen eighty six", secondsFromStart: 16 },
+    ];
+    message.artifact.transcript = [
+      `AI: ${DOB_QUESTION}`,
+      `AI: ${hold}`,
+      "User: march fourteenth",
+      "User: nineteen eighty six",
+    ].join("\n");
+    const row = buildInteractionRow(message, facts());
+    assertEquals(textsOf(row.messages, "user"), [MASKED_ANSWER, MASKED_ANSWER], hold);
+    assertFalse(String(row.transcript).includes("march"), hold);
+  }
+  // with no sensitive question before it, a hold line masks nothing
+  assertEquals(
+    maskTranscript("AI: What happened?\nAI: No rush, I'm right here.\nUser: a pipe burst"),
+    "AI: What happened?\nAI: No rush, I'm right here.\nUser: a pipe burst",
+  );
+});
+
+// The live view (transcript_lines) follows the same rule as the end-of-call views: onTranscript reads
+// the assistant's latest lines, so a line check, a "Yes, I can hear you." or a hold line after a DOB or
+// phone question keeps the caller's answer withheld, piece by piece.
+Deno.test("transcript: a line check or a hold line after a sensitive question keeps the live answer withheld", async () => {
+  const cases: [string, string | null, string[], string[]][] = [
+    [DOB_QUESTION, "Can you hear me?", ["Yes, I can hear you."], ["march fourteenth", "nineteen eighty six"]],
+    [DOB_QUESTION, "Hello? Hello?", ["Sorry about that, can you hear me now?"], [
+      "march fourteenth",
+      "nineteen eighty six",
+    ]],
+    [DOB_QUESTION, "You're breaking up.", ["Sorry about that, can you hear me now?", "I'm still here."], [
+      "march fourteenth",
+      "nineteen eighty six",
+    ]],
+    [PHONE_QUESTION, null, ["No rush, I'm right here."], ["six zero two", "five five five", "zero one zero one"]],
+    [PHONE_QUESTION, null, ["No rush, I'm right here.", "Take all the time you need."], [
+      "six zero two",
+      "five five five",
+    ]],
+  ];
+  for (const [question, caller, between, answer] of cases) {
+    const { store, deps } = harness();
+    let ts = 1000;
+    await onTranscript(liveLine("assistant", question, ts), deps);
+    if (caller) await onTranscript(liveLine("user", caller, ts += 1000), deps);
+    for (const line of between) await onTranscript(liveLine("assistant", line, ts += 1000), deps);
+    for (const piece of answer) await onTranscript(liveLine("user", piece, ts += 1000), deps);
+    const users = store.tables.transcript_lines.filter((l) => l.role === "user").map((l) => l.text);
+    assertEquals(users, Array(answer.length + (caller ? 1 : 0)).fill(MASKED_ANSWER), between.join(" / "));
+  }
+  // rule 25's answer to "can you hear me?" asks the waiting question again, which masks on its own
+  {
+    const { store, deps } = harness();
+    await onTranscript(
+      liveLine("assistant", "Yes, I can hear you. What's the date of birth on the account?", 1000),
+      deps,
+    );
+    await onTranscript(liveLine("user", "march fourteenth", 2000), deps);
+    assertEquals(store.tables.transcript_lines.at(-1)?.text, MASKED_ANSWER);
+  }
+  // the carry ends at the next line that is neither: the caller's next turn is stored as said
+  {
+    const { store, deps } = harness();
+    await onTranscript(liveLine("assistant", DOB_QUESTION, 1000), deps);
+    await onTranscript(liveLine("assistant", "Yes, I can hear you.", 2000), deps);
+    await onTranscript(liveLine("assistant", "Thanks, Tobias. You're all verified.", 3000), deps);
+    await onTranscript(liveLine("user", "Great, thanks.", 4000), deps);
+    assertEquals(store.tables.transcript_lines.at(-1)?.text, "Great, thanks.");
+  }
+  // and a line check with no sensitive question before it masks nothing
+  {
+    const { store, deps } = harness();
+    await onTranscript(liveLine("assistant", "What happened?", 1000), deps);
+    await onTranscript(liveLine("assistant", "Sorry about that, can you hear me now?", 2000), deps);
+    await onTranscript(liveLine("user", "a pipe burst under the sink", 3000), deps);
+    assertEquals(store.tables.transcript_lines.at(-1)?.text, "a pipe burst under the sink");
+  }
+});
+
 Deno.test("masking: a phone number taken in pieces after a re-ask is withheld piece by piece", () => {
   const pieces = "Let's take the phone number three digits at a time.";
   assertEquals(
@@ -1666,7 +1763,7 @@ Deno.test("transcript: when the call's end cannot be read, a caller line with no
 Deno.test("transcript: when the previous question cannot be read, a caller line is withheld", async () => {
   const { store, deps } = harness();
   await onTranscript(liveLine("assistant", "How can I help?", 1000), deps);
-  store.failNext("lastAssistantLine");
+  store.failNext("recentAssistantLines");
   await onTranscript(liveLine("user", "march fourteenth", 2000), deps);
   assertEquals(store.tables.transcript_lines.at(-1)?.text, MASKED_ANSWER);
 });

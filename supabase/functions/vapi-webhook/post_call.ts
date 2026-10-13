@@ -290,6 +290,21 @@ export function buildMessages(raw: unknown): StoredMessage[] | null {
   return out.length > 0 ? out : null;
 }
 
+/** How many of the latest assistant lines the live path reads: the question, and the re-asks or line
+ *  checks after it (VAPI can split one assistant turn into more than one final transcript). */
+const MASK_CARRY_LINES = 6;
+
+/** The masking rule over assistant lines given newest first, as buildMessages applies it in order: a
+ *  sensitive question turns it on, and a re-ask or line check right after one keeps it on. */
+function maskingAfter(assistantNewestFirst: string[]): boolean {
+  let masking = false;
+  for (let i = assistantNewestFirst.length - 1; i >= 0; i--) {
+    const line = assistantNewestFirst[i];
+    masking = asksForSensitive(line) || (masking && REASK_RE.test(line));
+  }
+  return masking;
+}
+
 /** "AI: ..." / "User: ..." transcript, redacted line by line with the masking rule applied. */
 export function maskTranscript(text: string): string {
   let speaker: "assistant" | "user" | null = null;
@@ -890,14 +905,17 @@ export async function onTranscript(message: VapiMessage, deps: Deps): Promise<vo
   if (!spoken) return;
   const { store } = deps;
 
-  let lastAssistant: string | null = null;
+  // The assistant's latest lines, newest first: the question this line may answer, and any re-ask or
+  // line check after it that keeps its masking on.
+  let recentAssistant: string[] = [];
   let unknownContext = false;
   try {
-    lastAssistant = await store.lastAssistantLine(callKey);
+    recentAssistant = await store.recentAssistantLines(callKey, MASK_CARRY_LINES);
   } catch (e) {
     unknownContext = true;
-    safeLog(deps, { event: "post_call_error", call_key: callKey, step: "lastAssistantLine", error: errorText(e) });
+    safeLog(deps, { event: "post_call_error", call_key: callKey, step: "recentAssistantLines", error: errorText(e) });
   }
+  const lastAssistant = recentAssistant[0] ?? null;
   if (lastAssistant === null && !unknownContext) {
     // No assistant line stored: the start of the call, or a line VAPI delivered after the report
     // closed the call and cleared its lines, when the question this answers is gone with them.
@@ -926,7 +944,7 @@ export async function onTranscript(message: VapiMessage, deps: Deps): Promise<vo
   }
 
   // Without the previous question the answer may be a DOB, so it is withheld.
-  const masked = role === "user" && (unknownContext || asksForSensitive(lastAssistant));
+  const masked = role === "user" && (unknownContext || maskingAfter(recentAssistant));
   const text = masked ? MASKED_ANSWER : redactPII(spoken.slice(0, MAX_LINE_SCAN));
   const timestamp = num(message.timestamp);
   await store.insertTranscriptLine({

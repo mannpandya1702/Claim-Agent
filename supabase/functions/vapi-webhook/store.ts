@@ -488,14 +488,14 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
       if (error) fail("insertTranscriptLine", error);
     },
 
-    async lastAssistantLine(callKey) {
+    async recentAssistantLines(callKey, limit) {
       const { data, error } = await db.from("transcript_lines").select("text").eq("call_key", callKey)
         .eq("role", "assistant")
         .order("ts_ms", { ascending: false })
-        .limit(1)
+        .limit(limit)
         .abortSignal(signal());
-      if (error) fail("lastAssistantLine", error);
-      return rows<{ text: string }>(data)[0]?.text ?? null;
+      if (error) fail("recentAssistantLines", error);
+      return rows<{ text: string }>(data).map((r) => r.text);
     },
 
     async deleteTranscriptLines(callKey) {

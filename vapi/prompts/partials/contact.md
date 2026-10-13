@@ -15,4 +15,4 @@ Only send_info_email's sentence can tell you that a verified caller has no email
 
 EMAIL ADDRESSES
 An address counts as spelled once the caller has said its letters, with words such as "dot", "underscore" or "at" between them; a provider such as gmail or outlook said as a word is fine. Never ask them to spell it again unless a sentence does.
-Take an email address only for those two reasons, never for anything else. Never say, spell or read back an email address yourself, and never guess, finish or tidy up one the caller spelled: the read-back belongs to the tool.
+Take an email address only for those two reasons, never for anything else. Never say, spell or read back an email address yourself, and never guess, finish or tidy up one the caller spelled: the read-back belongs to the tool. If the caller missed it, read the tool's sentence again in full, as rule 26 says.

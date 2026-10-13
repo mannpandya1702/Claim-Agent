@@ -1519,6 +1519,15 @@ const EMAIL_LIST: Action[] = [{ call: "send_info_email", args: { topic: "documen
 const LINE_CHECK = "Sorry about that, can you hear me now?";
 const DOCUMENTS_AGAIN =
   "I was saying, for your home claim we need photos of the damage, a contractor estimate, and proof of ownership for the damaged items, by October twenty-fourth.";
+// Jordan's details up to capture_contact's read-back (new-customer), and that read-back as the tool says it.
+const JORDAN_TO_READBACK: Action[][] = [
+  [{ call: "lookup_customer", args: { phone: "6025550199" } }],
+  [{ call: "lookup_customer", args: { phone: "6025550199" } }],
+  [{ say: "Thanks. What's the best email for you? Please spell it out, letter by letter." }],
+  [{ say: "Got it. What's the best number to reach you?" }],
+  [{ call: "capture_contact", args: { ...JORDAN, callback_phone: "6025550177" } }],
+];
+const JORDAN_READBACK = say("contact_readback", { ...JORDAN, callback_phone: "6025550177" });
 const LINE_TROUBLE: [string, Action[][]][] = [
   ["cant-hear-mixed", [
     ...STATUS_TOBIAS,
@@ -1563,6 +1572,12 @@ const LINE_TROUBLE: [string, Action[][]][] = [
     [{ call: "lookup_customer", args: { phone: "6025550103" } }],
     [{ call: "verify_identity", args: { dob_month: 7, dob_day: 21, dob_year: 1992, intent: "claim_status" } }],
     [{ call: "get_claim_status", args: { detail: "claim", claim_ending: "177" } }],
+  ]],
+  ["cant-hear-answer", STATUS_TOBIAS],
+  ["cant-hear-readback", [
+    ...JORDAN_TO_READBACK,
+    [{ say: `${LINE_CHECK} ${JORDAN_READBACK}` }],
+    [{ call: "confirm_contact", args: { correct: true } }],
   ]],
   ["what-surprise", [
     [{ call: "lookup_customer", args: { phone: "6025550103" } }],
@@ -1648,6 +1663,34 @@ Deno.test("line trouble: what Ava did on 01a13635, and rule 23's line, fail", as
     [{ say: `${LINE_CHECK} I was saying your property claim ending in one seven seven was denied.` }],
   ]);
   assertStringIncludes(text, "t3: model text matches /\\bhear me\\b/i");
+  // the date of birth given with the complaint, asked for again instead of verified
+  text = await problems("cant-hear-answer", [
+    STATUS_TOBIAS[0],
+    [{ say: `${LINE_CHECK} What's the date of birth on the account?` }],
+  ]);
+  assertStringIncludes(text, "t2: tools [], expected [verify_identity]");
+  assertStringIncludes(text, "t2: model text matches /date of birth/i");
+  // the read-back shortened into Ava's own words, the address and number dropped, then confirmed anyway
+  text = await problems("cant-hear-readback", [
+    ...JORDAN_TO_READBACK,
+    [{ say: `${LINE_CHECK} I was saying, I have your name, your email and your number. Did I get that right?` }],
+    [{ call: "confirm_contact", args: { correct: true } }],
+  ]);
+  assertStringIncludes(text, "t6: model text lacks /\\bJ,? O,? R,? D,? A,? N,?");
+  assertStringIncludes(text, "t6: model text lacks /six zero two, five five five, zero one seven seven/");
+  // the address said Ava's own way, and the yes taken before the caller heard the details again
+  text = await problems("cant-hear-readback", [
+    ...JORDAN_TO_READBACK,
+    [{ say: `${LINE_CHECK} I have Jordan Ellis, jordan.ellis@gmail.com. Did I get that right?` }],
+    [{ call: "confirm_contact", args: { correct: true } }],
+  ]);
+  assertStringIncludes(text, "t6: model text matches /@/");
+  text = await problems("cant-hear-readback", [
+    ...JORDAN_TO_READBACK,
+    [{ call: "confirm_contact", args: { correct: true } }],
+    [{ call: "confirm_contact", args: { correct: true } }],
+  ]);
+  assertStringIncludes(text, "t6: tools [confirm_contact], expected []");
 });
 
 // ---------------------------------------------------------------------------------------------

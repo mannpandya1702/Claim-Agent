@@ -8,7 +8,7 @@
 //   deno task battery --list               persona ids
 //   deno task battery --dry-run            build every first request offline and print the plan
 //
-// Options: --cap <conversations> (default 120, a hard ceiling checked before anything is spent),
+// Options: --cap <conversations> (default 126, a hard ceiling checked before anything is spent),
 // --concurrency <k> (default 3). Every chat is named "INTERNAL ...", every number is a 555 number,
 // and a one-turn 402 probe runs first: an empty wallet halts the run before any persona starts.
 // The JSON report lands in fixtures/raw/battery/ (gitignored).
@@ -79,7 +79,7 @@ import { vapiClient, VapiError } from "./lib/vapi.ts";
 import { deepMerge, loadVariant, paths, promptPath, renderPrompt, sha256Hex } from "./render.ts";
 
 export const ASSISTANT_KEY = "solo-core" as const;
-export const DEFAULTS = { n: 3, cap: 120, concurrency: 3 };
+export const DEFAULTS = { n: 3, cap: 126, concurrency: 3 };
 const MAX_N = 20;
 const MAX_CONCURRENCY = 6;
 // A conversation never needs more requests than turns plus confirmations; this bounds a runaway.
@@ -1420,6 +1420,11 @@ const IM_HERE = /\b(I'm|I am|still|right) here\b/i;
 const SUMMARY_KEY = /\bdocuments\b|October twenty-fourth|\bpaid\b/i;
 /** More than n words in the model's turn: a repeat that ran long. */
 const moreThanWords = (n: number) => new RegExp(`(?:\\S+\\s+){${n}}\\S`);
+// Jordan's read-back, as capture_contact's sentence says it (speak.ts speakEmail and speakPhone): read
+// again in full after a line check (rule 26), never shortened or spelled another way.
+const JORDAN_EMAIL_SPELLED = /\bJ,? O,? R,? D,? A,? N,? dot,? E,? L,? L,? I,? S,? at gmail dot com\b/;
+const JORDAN_NUMBER_SAID = /six zero two, five five five, zero one seven seven/;
+const READBACK_QUESTION = /\b(get|got) (that|it|everything|all of that) right\?|\bright\?|\bcorrect\?/i;
 
 const TOBIAS_SAYS_PHONE = "six zero two, five five five, zero one zero one";
 const TOBIAS_DOB = "March fourteenth, nineteen eighty-six.";
@@ -2620,6 +2625,75 @@ export const PERSONAS: Persona[] = [
       },
     ],
     neverTools: ["verify_identity", "escalate", "endCall"],
+  },
+  {
+    id: "cant-hear-answer",
+    title:
+      "A complaint about the line and the date of birth in one breath: verified at once, never asked for the date again",
+    turns: [
+      { ...lookupTobias, user: `Hi, I'm calling to check on my claim. My number is ${TOBIAS_SAYS_PHONE}.` },
+      {
+        ...verifyTobias,
+        user: `Sorry, you were breaking up. ${TOBIAS_DOB}`,
+        firstToolSilent: "verify_identity",
+        args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("claim_status")) },
+        modelNever: [/date of birth/i, LINE_CHECK],
+      },
+    ],
+    neverTools: ["escalate", "endCall"],
+    toolOrder: ["lookup_customer", "verify_identity"],
+  },
+  {
+    id: "cant-hear-readback",
+    title:
+      "A new caller who missed the details read-back: line check and the tool's read-back again in full, confirmed only on their yes",
+    contacts: [{ first: "Jordan", last: "Ellis", email: "jordan.ellis@gmail.com" }],
+    turns: [
+      {
+        user: `Hi, I'd like the steps to start a claim. My number is ${UNKNOWN_SAYS_PHONE}.`,
+        tools: ["lookup_customer"],
+        codes: ["not_found"],
+        args: { lookup_customer: phoneIs("6025550199") },
+      },
+      {
+        user: "Yes, that's right.",
+        tools: ["lookup_customer"],
+        codes: ["not_found_final"],
+        args: { lookup_customer: phoneIs("6025550199") },
+      },
+      { user: "Sure, it's Jordan Ellis.", tools: [], modelSays: [EMAIL_ASK, SPELL_ASK] },
+      {
+        user: "It's j o r d a n, dot, e l l i s, at gmail dot com.",
+        tools: [],
+        modelSays: [NUMBER_ASK],
+        modelNever: [ADDRESS_SPOKEN],
+      },
+      {
+        user: "You can reach me at six zero two, five five five, zero one seven seven.",
+        tools: ["capture_contact"],
+        codes: ["contact_readback"],
+        firstToolSilent: "capture_contact",
+        args: {
+          capture_contact: all(nameIs("Jordan", "Ellis"), emailIs("jordan.ellis@gmail.com"), callbackIs("6025550177")),
+        },
+      },
+      {
+        // the read-back is the one repeat that is never shortened: the address and number as the tool said them
+        user: "Sorry, you were breaking up there. I didn't hear any of that.",
+        tools: [],
+        modelSays: [LINE_CHECK, /\bJordan Ellis\b/, JORDAN_EMAIL_SPELLED, JORDAN_NUMBER_SAID, READBACK_QUESTION],
+        modelNever: [BLAMES_CALLER, FOLLOW_UP_14, DIGITS, /@/],
+      },
+      {
+        user: "Yes, that's right.",
+        tools: ["confirm_contact"],
+        codes: ["contact_saved_new"],
+        firstToolSilent: "confirm_contact",
+        args: { confirm_contact: correctIs(true) },
+      },
+    ],
+    neverTools: ["verify_identity", "get_claim_status", "escalate", "start_claim", "confirm_claim", "send_info_email"],
+    toolOrder: ["lookup_customer", "lookup_customer", "capture_contact", "confirm_contact"],
   },
   {
     id: "what-surprise",

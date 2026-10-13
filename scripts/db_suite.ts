@@ -1476,13 +1476,14 @@ await test("store.ts round trip through PostgREST maps every method onto the sch
     await store.insertTranscriptLine({ call_key: k, role: "assistant", text: "Hello", ts_ms: 1000 });
     await store.insertTranscriptLine({ call_key: k, role: "user", text: "[answer withheld]", ts_ms: 3000 });
     await store.insertTranscriptLine({ call_key: k, role: "assistant", text: "retried delivery", ts_ms: 2000 });
-    assertEquals(await store.lastAssistantLine(k), "What's the date of birth?");
+    assertEquals(await store.recentAssistantLines(k, 1), ["What's the date of birth?"]);
+    assertEquals(await store.recentAssistantLines(k, 6), ["What's the date of birth?", "Hello"]);
     const [{ n: lines }] = await sql<{ n: number }>(
       `select count(*)::int n from transcript_lines where call_key = ${lit(k)}`,
     );
     assertEquals(lines, 3);
     await store.deleteTranscriptLines(k);
-    assertEquals(await store.lastAssistantLine(k), null);
+    assertEquals(await store.recentAssistantLines(k, 6), []);
 
     // a capture also enforces the 7-day retention on the table
     await sql(`insert into webhook_captures (message_type, call_key, body, received_at)

@@ -1091,13 +1091,12 @@ export function createFakeStore(
       });
     },
 
-    lastAssistantLine(callKey) {
-      let best: Row | null = null;
-      for (const t of tables.transcript_lines) {
-        if (t.call_key !== callKey || t.role !== "assistant") continue;
-        if (!best || t.ts_ms > best.ts_ms) best = t;
-      }
-      return best ? best.text : null;
+    recentAssistantLines(callKey, limit) {
+      return tables.transcript_lines
+        .filter((t) => t.call_key === callKey && t.role === "assistant")
+        .sort((a, b) => b.ts_ms - a.ts_ms)
+        .slice(0, limit)
+        .map((t) => t.text);
     },
 
     deleteTranscriptLines(callKey) {

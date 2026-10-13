@@ -536,6 +536,8 @@ Deno.test("a caller who can't hear Ava: a line check, then only what they missed
       /With nothing to repeat, the line check alone\. Said in passing like this, the line check isn't a second question under rule 1\./,
       // a request in the same breath is confirmed in a few words and done on a yes, never claimed early
       /end by asking in a few words whether to still do it, such as "Should I still email you that list\?", and call its tool on a yes: never make them ask a third time, and never say it's done before the tool's sentence says so\./,
+      // an answer given in the same breath as the complaint goes straight to its tool, never asked again
+      /never say it's done before the tool's sentence says so\. If they also gave the answer you were waiting on in full, such as their whole phone number or their date of birth, skip the check and pass it to its tool at once, as rule 3 or rule 4 says, with no words of your own: the tool's sentence answers them, so never ask for it again\./,
       // a tool's sentence not read yet is read in full
       /If they said hello before you'd read a tool's sentence, say "I'm here\." and read that sentence in full, as rule 2 says\./,
       /Say sorry only once per complaint; if they say they already told you, own it/,
@@ -543,7 +545,9 @@ Deno.test("a caller who can't hear Ava: a line check, then only what they missed
       /If on their very next turn they still can't hear you, offer once to have the claims team call them back, such as "The line's still breaking up\. Would you like the claims team to call you back\?", and on a yes call escalate with reason representative_requested and details saying the line kept breaking up\./,
       /keep each turn to a few words, such as "I'm still here\.", and never end the call for them\./,
       /A later complaint, after they could hear you again, starts fresh with a new check and repeat\./,
-      /When they ask whether you can hear them and you can, say so in a few words, such as "Yes, I can hear you\.", and carry on\./,
+      // "can you hear me?" gets a yes, and the question still waiting with its key words, so the
+      // endpointing rules and the live transcript masking still see it
+      /When they ask whether you can hear them and you can, say so in a few words, such as "Yes, I can hear you\.", and carry on; if you were waiting on an answer, end with that question again, keeping its key words, such as "Yes, I can hear you\. What's the date of birth on the account\?"\./,
       // what is not about the line
       /a single "hello\?" after a pause, a hold or a quiet line, which gets "I'm here\." and the question you were waiting on, with no sorry;/,
       /a "what\?" of surprise or confusion about what you said, such as "What\? It was denied\?", which is a question to answer;/,
@@ -570,6 +574,8 @@ Deno.test("a caller who can't hear Ava: a line check, then only what they missed
         /every fact in it, such as a name, a claim's ending, a date, an amount, a document or the next step, is copied word for word from the tool's result/,
         /never changed and never added to, and the whole repeat is about 20 words at most\./,
         /Say a web or email address again only if it was the point of what they missed\./,
+        // a read-back to confirm is read again whole, as the tool wrote it, never shortened
+        /A read-back the caller has to confirm, of their details or a new claim, is never shortened or put in your own words: read that tool's sentence again in full, exactly as it was written, and never say a caller's own email address any other way\./,
         /A question you were waiting on keeps its key words, such as "phone number", "date of birth" or "spell"\./,
         /Never call a tool again just to repeat what it said: no second email, lookup, verification or callback\./,
         /Never close a repeat with a rule 14 follow-up, such as "Does that make sense\?" or "Does that help\?"\./,
@@ -597,6 +603,17 @@ Deno.test("a caller who can't hear Ava: a line check, then only what they missed
       key,
     );
     assert(!prompt.includes("Every one of these turns is a tool turn"), `${key}: the old no-exception sentence`);
+    // a read-back the caller missed is read again in full, not shortened (rule 26)
+    assertMatch(
+      prompt,
+      /Never read the claim back yourself, and never repeat its read-back, unless the caller missed it: then read that sentence again in full, as rule 26 says\./,
+      key,
+    );
+    assertMatch(
+      prompt,
+      /the read-back belongs to the tool\. If the caller missed it, read the tool's sentence again in full, as rule 26 says\./,
+      key,
+    );
   }
 });
 
@@ -854,6 +871,12 @@ Deno.test("the platform's own lines sound warm, and the safety lines keep every 
   assertMatch("Yes, I can hear you.", REASK_RE);
   assertMatch("I'm still here.", REASK_RE);
   assertMatch("I'm here. What's the date of birth on the account?", REASK_RE);
+  // and a hold line while they look for it: the two silence nudges, and the reply to a hold on
+  for (const [nudge] of says(withRep.assistants["solo-core"].payload).slice(0, 2)) assertMatch(nudge, REASK_RE);
+  assertMatch("No rush, I'm right here.", REASK_RE);
+  assertMatch("I am here.", REASK_RE);
+  assertMatch("Sure, take your time.", REASK_RE);
+  assert(!REASK_RE.test("What's the best email address for you?"));
   // a tool's transport-failure line is the server's own sentence for the same outcome, word for word
   const failed = (name: string) => withRep.tools[name].messages.find((m: any) => m.type === "request-failed").content;
   assertEquals(failed("lookup_customer"), sentenceFor("system_error"));
@@ -1208,6 +1231,8 @@ const HEARING_COMPLAINT_160 =
 const LINE_CHECK = "Sorry about that, can you hear me now?";
 const LINE_CHECK_DOB = `${LINE_CHECK} I was saying, what's the date of birth on the account?`;
 const LINE_CHECK_PHONE = `${LINE_CHECK} I was saying, what's the phone number on your account?`;
+// rule 25's answer to "can you hear me?" when a question is waiting: it asks it again, key words kept
+const HEAR_YOU_DOB = "Yes, I can hear you. What's the date of birth on the account?";
 const ENDPOINTING_CASES: [string, string, string, number | null][] = [
   // a number in progress waits; ten digits are a whole number, so smart endpointing answers fast
   ["phone, first groups", PHONE_ASK, "6 0 2 5 5 5", 1.6],
@@ -1297,6 +1322,13 @@ const ENDPOINTING_CASES: [string, string, string, number | null][] = [
   ["line check, DOB in full", LINE_CHECK_DOB, "Yes. March 14 1986", null],
   ["line check, number in progress", LINE_CHECK_PHONE, "Yes, 6 0 2", 1.6],
   ["line check, number in full", LINE_CHECK_PHONE, "Yes, 6 0 2 5 5 5 0 1 0 1", null],
+  ["can hear you, DOB in progress", HEAR_YOU_DOB, "March 14", 1.6],
+  ["can hear you, DOB in full", HEAR_YOU_DOB, "March 14 1986", null],
+  // a complaint and the answer in one breath: the answer's own wait while it is unfinished, none once whole
+  ["complaint, then a DOB in progress", DOB_ASK, "Sorry, you were breaking up. March 14", 1.6],
+  ["complaint, then a DOB in full", DOB_ASK, "Sorry, you were breaking up. March 14 1986", null],
+  ["complaint, then a number in progress", PHONE_ASK, "You're breaking up, it's 6 0 2 5 5 5", 1.6],
+  ["complaint, then a number in full", PHONE_ASK, "You're breaking up, it's 6 0 2 5 5 5 0 1 0 1", null],
 ];
 
 Deno.test("endpointing: realistic transcripts get the wait each rule is for, first match wins", () => {
