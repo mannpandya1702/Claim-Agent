@@ -474,7 +474,13 @@ function serverOutcome(facts: PostCallFacts, escalatedByTransfer: boolean, everV
   // were not found, and that was handled.
   if (facts.intake?.confirmed === true) return "resolved";
   if (facts.session?.level === "locked") return "auth_failed";
-  if (!everVerified && attempts.some((a) => a.kind === "lookup_miss")) return "not_found";
+  // Not found only when no lookup ever matched: a third different number that hit (0010) found an
+  // account even if the caller never got through the date of birth. Same rule as the escalation reason.
+  if (
+    !everVerified && !attempts.some((a) => a.kind === "lookup_hit") && attempts.some((a) => a.kind === "lookup_miss")
+  ) {
+    return "not_found";
+  }
   if (everVerified && readClaims(attempts)) return "resolved";
   return null;
 }

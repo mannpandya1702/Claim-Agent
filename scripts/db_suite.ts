@@ -279,15 +279,21 @@ await test("the same number again is final for that number only; a different num
         "other:not_found_final",
         "lookup_hit:needs_dob",
       ]),
-      // the miss row carries the hex SHA-256 of the E.164; no row carries the number itself
-      `assert (select string_agg(coalesce(number_hash, '-'), ',' order by tool_call_id) from attempts
+      // the miss is known by the hex SHA-256 of the E.164 in lookup_numbers; no row carries the number
+      `assert (select string_agg(number_hash || '@' || tool_call_id, ',') from lookup_numbers
                where call_key = ${lit(f.callKey)})
-             = encode(sha256(convert_to(${lit(f.nobody[0])}, 'UTF8')), 'hex') || ',-,-,-,-',
-        format('number_hash: got %s', (select string_agg(coalesce(number_hash, '-'), ',' order by tool_call_id)
-                                       from attempts where call_key = ${lit(f.callKey)}));`,
+             = encode(sha256(convert_to(${lit(f.nobody[0])}, 'UTF8')), 'hex') || '@t01',
+        format('lookup_numbers: got %s', (select string_agg(number_hash || '@' || tool_call_id, ',')
+                                          from lookup_numbers where call_key = ${lit(f.callKey)}));`,
       `assert not exists (select 1 from attempts a where a.call_key = ${lit(f.callKey)}
                             and row_to_json(a)::text like ${lit(`%${f.nobody[0].slice(2)}%`)}),
         'an attempts row carries the raw number';`,
+      `assert not has_table_privilege('authenticated', 'lookup_numbers', 'select')
+          and not has_table_privilege('anon', 'lookup_numbers', 'select'),
+        'staff or anon can read lookup_numbers';`,
+      `assert not exists (select 1 from pg_publication_tables
+                          where pubname = 'supabase_realtime' and tablename = 'lookup_numbers'),
+        'lookup_numbers is published to Realtime';`,
     ].join("\n")),
   ));
 });
@@ -323,7 +329,7 @@ await test("up to three different numbers: two misses then a hit; a third differ
   ));
 });
 
-await test("miss rows from before 0010 (no number_hash) each count as a different number", async () => {
+await test("miss rows from before 0010 (no lookup_numbers row) each count as a different number", async () => {
   const f = fixture("legacy");
   const k = lit(f.callKey);
   await sql(tx(

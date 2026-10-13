@@ -229,7 +229,7 @@ export interface IdentityState {
   /** Different numbers that missed on this call (lookup_miss rows; an old row without a number key
    *  counts as a number of its own). */
   misses: number;
-  /** The keys of those numbers (attempts.number_hash), so a number that missed is known again. */
+  /** The keys of those numbers (lookup_numbers.number_hash, 0010), so a number that missed is known again. */
   missed: string[];
   wrong: number;
   unreadable: number;
@@ -237,7 +237,7 @@ export interface IdentityState {
   verified: string | null;
 }
 export type IdentityEvent =
-  /** numberKey: how the ledger knows the number (attempts.number_hash, the hex SHA-256 of the
+  /** numberKey: how the ledger knows the number (lookup_numbers.number_hash, the hex SHA-256 of the
    *  E.164). Defaults to phoneE164, which is all an in-memory replay needs. */
   | { type: "lookup"; phoneE164: string | null; customerId: string | null; numberKey?: string }
   | { type: "dob"; valid: boolean; matches: boolean };

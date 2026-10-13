@@ -172,6 +172,7 @@ Deno.test("cleanup SQL covers every call table and only the smoke prefix", () =>
   for (
     const table of [
       "attempts",
+      "lookup_numbers",
       "call_sessions",
       "escalations",
       "emails",
@@ -186,7 +187,7 @@ Deno.test("cleanup SQL covers every call table and only the smoke prefix", () =>
   }
   // only the claims a smoke call filed; a seeded claim has no reported_call_key
   assertStringIncludes(sql, "delete from claims where reported_call_key like 'smoke-%'");
-  assertEquals(sql.match(/like 'smoke-%'/g)?.length, 10);
+  assertEquals(sql.match(/like 'smoke-%'/g)?.length, 11);
   assert(!/delete from \w+ returning/.test(sql), "an unfiltered delete");
   assertThrows(() => cleanupSql("%"));
   assertThrows(() => cleanupSql("smoke"));

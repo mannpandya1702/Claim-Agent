@@ -1425,6 +1425,7 @@ export function cleanupSql(prefix = SMOKE_PREFIX): string {
   const like = lit(`${prefix}%`);
   return `with
   d_attempts as (delete from attempts where call_key like ${like} returning 1),
+  d_lookup_numbers as (delete from lookup_numbers where call_key like ${like} returning 1),
   d_sessions as (delete from call_sessions where call_key like ${like} returning 1),
   d_escalations as (delete from escalations where call_key like ${like} returning 1),
   d_emails as (delete from emails where call_key like ${like} returning 1),

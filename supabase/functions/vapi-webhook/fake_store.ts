@@ -247,7 +247,8 @@ function clone<T>(v: T): T {
   return v === undefined ? v : structuredClone(v);
 }
 
-/** attempts.number_hash as 0010 writes it: encode(sha256(convert_to(e164, 'UTF8')), 'hex'). */
+/** lookup_numbers.number_hash as 0010 writes it: encode(sha256(convert_to(e164, 'UTF8')), 'hex'). The twin keeps
+ *  it on its miss rows; SQL keeps it in the service-role-only lookup_numbers table. */
 export function numberHash(e164: string): string {
   return createHash("sha256").update(e164, "utf8").digest("hex");
 }
@@ -397,7 +398,7 @@ export function createFakeStore(
   }
 
   // The SQL functions read the level from the session row and every counter from the ledger. A miss
-  // row without a number_hash (written before 0010) counts as a different number of its own.
+  // row without a number_hash (no lookup_numbers row: written before 0010) counts as a different number of its own.
   function identityOf(callKey: string): IdentityState {
     const s = session(callKey)!;
     const rows = tables.attempts.filter((a) => a.call_key === callKey);

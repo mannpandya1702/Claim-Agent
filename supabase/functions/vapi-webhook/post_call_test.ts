@@ -702,6 +702,24 @@ Deno.test("name chain: structured caller_name for an unverified caller, else Unk
   const row = buildInteractionRow(notFound, misses);
   assertEquals([row.caller_name, row.customer_id, row.outcome], ["Dana", null, "not_found"]);
 
+  // two misses, then a different number found an account, and the caller never gave the date of birth:
+  // an account was found, so the server does not force not_found; the analysis outcome stands (a report
+  // whose analysis says resolved keeps it, where the old rule overrode it with not_found)
+  const full = fixture("full");
+  const foundLater = buildInteractionRow(
+    full,
+    facts({
+      session: session(full.call!.id!, "phone_found"),
+      attempts: [
+        attempt(full.call!.id!, "lookup_customer", "lookup_miss", "not_found"),
+        attempt(full.call!.id!, "lookup_customer", "lookup_miss", "not_found"),
+        attempt(full.call!.id!, "lookup_customer", "lookup_hit", "needs_dob"),
+      ],
+    }),
+  );
+  assert(foundLater.outcome !== "not_found", `outcome ${foundLater.outcome}`);
+  assertEquals(foundLater.caller_type, "existing");
+
   // structured outputs only (no analysis.structuredData)
   const so = buildInteractionRow(fixture("structured_outputs_only"), facts());
   assertEquals(so.caller_name, "Mara");

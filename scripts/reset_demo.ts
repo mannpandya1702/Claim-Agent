@@ -23,6 +23,7 @@ export const SEEDED_PHONES = ["+16025550101", "+16025550102", "+16025550103", "+
 export const NO_EMAIL_PHONE = "+16025550104";
 export const CALL_TABLES = [
   { table: "attempts", key: "call_key" },
+  { table: "lookup_numbers", key: "call_key" },
   { table: "call_sessions", key: "call_key" },
   { table: "escalations", key: "call_key" },
   { table: "emails", key: "call_key" },

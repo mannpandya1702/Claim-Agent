@@ -9,12 +9,23 @@
 --   * up to three different numbers may miss. The third different miss is not_found_final, and so is
 --     every lookup after it (sticky, as before);
 --   * misses (returned) is the count of different numbers that missed.
--- The ledger knows a number again by attempts.number_hash, the hex SHA-256 of the E.164, written on
--- lookup_miss rows only; the number itself is still never stored. Staff can read the column like the
--- rest of attempts (0003), and they already see full caller numbers on the call page. Rows written
--- before this migration have no hash: each one still counts as a different number.
+-- A number is known again by its hex SHA-256 (of the E.164) in lookup_numbers, one row per number
+-- that missed on the call; the number itself is never stored. The hash lives in its own table, not
+-- on attempts: staff can read attempts and it is in the Realtime publication (0003), and a SHA-256 of
+-- a ten-digit number is reversible by brute force in seconds, which would undo the masking of every
+-- spoken number. lookup_numbers is service_role only and never published. Miss rows written before
+-- this migration have no lookup_numbers row: each one still counts as a different number.
 
-alter table attempts add column number_hash text;
+create table lookup_numbers (
+  call_key text not null,
+  number_hash text not null check (number_hash ~ '^[0-9a-f]{64}$'),
+  tool_call_id text not null,           -- the attempts row of the miss
+  created_at timestamptz not null default now(),
+  primary key (call_key, number_hash)
+);
+alter table lookup_numbers enable row level security;
+revoke all on lookup_numbers from anon, authenticated;
+grant select, insert, delete on lookup_numbers to service_role;
 
 -- Same signature, return type, row lock and replay guard as 0001; only the counting changed.
 create or replace function lookup_customer_attempt(
@@ -37,9 +48,14 @@ begin
 
   select s.level into v_level from call_sessions s where s.call_key = p_call_key for update;
 
-  -- different numbers that missed on this call; a row without a hash (before 0010) is one of its own
-  select (count(distinct a.number_hash) + count(*) filter (where a.number_hash is null))::int into v_misses
-  from attempts a where a.call_key = p_call_key and a.kind = 'lookup_miss';
+  -- different numbers that missed on this call; a miss row with no lookup_numbers row (before 0010)
+  -- is one of its own
+  select ((select count(*) from lookup_numbers n where n.call_key = p_call_key)
+        + (select count(*) from attempts a
+           where a.call_key = p_call_key and a.kind = 'lookup_miss'
+             and not exists (select 1 from lookup_numbers n
+                             where n.call_key = a.call_key and n.tool_call_id = a.tool_call_id)))::int
+    into v_misses;
 
   -- replay guard: the same toolCallId always gets the same answer
   select a.code into v_prior from attempts a where a.call_key = p_call_key and a.tool_call_id = p_tool_call_id;
@@ -58,8 +74,7 @@ begin
     v_code := 'locked'; v_kind := 'other';
   elsif p_phone_e164 is null then
     v_code := 'invalid_phone'; v_kind := 'unreadable';
-  elsif exists (select 1 from attempts a
-                where a.call_key = p_call_key and a.kind = 'lookup_miss' and a.number_hash = v_hash) then
+  elsif exists (select 1 from lookup_numbers n where n.call_key = p_call_key and n.number_hash = v_hash) then
     v_code := 'not_found_final'; v_kind := 'other';   -- this number already missed: final for it only
   elsif v_misses >= 3 then
     v_code := 'not_found_final'; v_kind := 'other';   -- three different numbers missed: sticky
@@ -76,9 +91,12 @@ begin
     end if;
   end if;
 
-  insert into attempts (call_key, tool_call_id, tool_name, kind, code, number_hash)
-  values (p_call_key, p_tool_call_id, 'lookup_customer', v_kind, v_code,
-          case when v_kind = 'lookup_miss' then v_hash end);
+  insert into attempts (call_key, tool_call_id, tool_name, kind, code)
+  values (p_call_key, p_tool_call_id, 'lookup_customer', v_kind, v_code);
+  if v_kind = 'lookup_miss' then
+    insert into lookup_numbers (call_key, number_hash, tool_call_id) values (p_call_key, v_hash, p_tool_call_id)
+    on conflict (call_key, number_hash) do nothing;
+  end if;
 
   return query select v_code, v_misses;
 end $$;
