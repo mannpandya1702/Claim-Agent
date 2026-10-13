@@ -1,0 +1,41 @@
+{
+  "type": "function",
+  "async": false,
+  "function": {
+    "name": "confirm_contact",
+    "strict": false,
+    "description": "Record the caller's yes or no to the read-back of their contact details. Call it right after they answer, with no words of your own, not even an acknowledgement: its result sentence acknowledges them and has already been spoken to the caller.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "correct": {
+          "type": "boolean",
+          "description": "true when the caller said the details read back are right; false when they said something is wrong."
+        }
+      },
+      "required": ["correct"],
+      "additionalProperties": false
+    }
+  },
+  "server": {
+    "url": "<<SERVER_URL>>",
+    "credentialId": "<<CREDENTIAL_ID>>",
+    "timeoutSeconds": 10
+  },
+  "messages": [
+    {
+      "type": "request-start",
+      "blocking": false,
+      "content": "Okay."
+    },
+    {
+      "type": "request-response-delayed",
+      "timingMilliseconds": 3000,
+      "content": "Thanks for bearing with me, almost there."
+    },
+    {
+      "type": "request-failed",
+      "content": "I'm sorry, I couldn't save that just now. I can have someone from our claims team call you back instead. Would you like that?"
+    }
+  ]
+}

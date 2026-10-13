@@ -13,7 +13,7 @@ const CallDetail = lazy(() => import("@/pages/CallDetail"));
 const Live = lazy(() => import("@/pages/Live"));
 const Escalations = lazy(() => import("@/pages/Escalations"));
 const Ops = lazy(() => import("@/pages/Ops"));
-const TalkToTessa = lazy(() => import("@/pages/TalkToTessa"));
+const TalkToAva = lazy(() => import("@/pages/TalkToAva"));
 const NotFound = lazy(() => import("@/pages/NotFound"));
 
 function PageFallback() {
@@ -49,7 +49,7 @@ export function AppRoutes() {
         path="/call"
         element={
           <Suspense fallback={<FullPageLoading label="Loading call page" />}>
-            <TalkToTessa />
+            <TalkToAva />
           </Suspense>
         }
       />

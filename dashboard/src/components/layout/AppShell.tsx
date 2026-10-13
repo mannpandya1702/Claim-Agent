@@ -25,7 +25,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: "/live", label: "Live", icon: Radio, description: "Calls happening now" },
   { to: "/escalations", label: "Escalations", icon: LifeBuoy, description: "Callback queue" },
   { to: "/ops", label: "Ops", icon: Activity, description: "Automation health" },
-  { to: "/call", label: "Talk to Tessa", icon: Mic, description: "Public call page" },
+  { to: "/call", label: "Talk to Ava", icon: Mic, description: "Public call page" },
 ];
 
 const REPO_URL = "https://github.com/mannpandya1702/Claim-Agent";

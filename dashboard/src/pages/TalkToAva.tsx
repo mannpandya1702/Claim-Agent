@@ -15,7 +15,7 @@ import { env, shortSha } from "@/lib/env";
 import { CALL_MODES, isCallActive, parseMode, preloadVapi, start, stop, useCallState, type CallMode } from "@/lib/vapi";
 
 /**
- * Public call page (#/call, no sign-in): start and end a browser web call with Tessa, see the
+ * Public call page (#/call, no sign-in): start and end a browser web call with Ava, see the
  * caller-side transcript, and keep the demo identities at hand. The right pane links to the
  * call's detail page and, for staff, shows the server's live view of the same call.
  *
@@ -23,7 +23,7 @@ import { CALL_MODES, isCallActive, parseMode, preloadVapi, start, stop, useCallS
  * StrictMode remount never drops or duplicates it; this component only reads it and calls
  * start() from the button handler.
  */
-export default function TalkToTessa() {
+export default function TalkToAva() {
   const [params, setParams] = useSearchParams();
   const call = useCallState();
   const micPermission = useMicPermission();
@@ -92,7 +92,7 @@ export default function TalkToTessa() {
 
       <main id="main" tabIndex={-1} className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 outline-none sm:px-6 lg:py-8">
         <PageHeader
-          title="Talk to Tessa"
+          title="Talk to Ava"
           description="Observe Insurance's claims assistant. Start a web call, give one of the demo phone numbers and its date of birth, then ask about the claim."
         />
 
@@ -139,7 +139,7 @@ function PublicHeader({ returnTo }: { returnTo: string }) {
         <Link
           to={returnTo}
           className="flex min-w-0 items-center gap-2.5 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          aria-label="Observe Insurance, Talk to Tessa"
+          aria-label="Observe Insurance, Talk to Ava"
         >
           <BrandMark />
           <span className="hidden min-w-0 flex-col leading-tight min-[400px]:flex">

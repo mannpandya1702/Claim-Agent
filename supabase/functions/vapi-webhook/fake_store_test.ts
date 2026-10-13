@@ -826,8 +826,10 @@ Deno.test("getInteractionForMirror: exactly the mirror columns, or null", async 
   assert(row);
   assertEquals(Object.keys(row).sort(), [
     "analysis_status",
+    "caller_email",
     "caller_name",
     "caller_phone",
+    "caller_type",
     "channel",
     "cost",
     "duration_seconds",
@@ -1113,4 +1115,112 @@ Deno.test("retention: every live line older than the cutoff, whatever became of 
   assertEquals(await store.pruneJobRuns(["sla", "outbox"], cutoff), 2);
   assertEquals(store.tables.job_runs.map((r) => r.period_key), ["outbox-6", "digest-30"]);
   assertEquals(await store.pruneJobRuns([], cutoff), 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// caller_contacts and the post-call caller columns (0006_contacts.sql), the same sequences
+// db_suite.ts runs against the live database.
+// ---------------------------------------------------------------------------------------------
+const CONTACT = {
+  callKey: "cc1",
+  kind: "new_customer" as const,
+  firstName: "Jane",
+  lastName: "Doe",
+  email: "jane.doe@example.com",
+  callbackPhone: "+16025550177",
+  callbackSource: "argument" as const,
+  customerId: null,
+};
+
+Deno.test("caller_contacts: inserted unconfirmed; confirm keeps its first time; an identical capture keeps it", async () => {
+  let t = Date.parse("2026-10-12T15:00:00Z");
+  const store = createFakeStore(undefined, { now: () => new Date(t) });
+  assertEquals(await store.getContact("cc1"), null);
+  assertEquals(await store.setContactConfirmed("cc1", true), null, "no row: nothing to confirm");
+
+  const first = await store.upsertContact(CONTACT);
+  assertEquals(first, {
+    call_key: "cc1",
+    kind: "new_customer",
+    first_name: "Jane",
+    last_name: "Doe",
+    email: "jane.doe@example.com",
+    callback_phone: "+16025550177",
+    callback_source: "argument",
+    customer_id: null,
+    confirmed: false,
+    confirmed_at: null,
+  });
+  const confirmed = await store.setContactConfirmed("cc1", true);
+  assertEquals([confirmed?.confirmed, confirmed?.confirmed_at], [true, "2026-10-12T15:00:00.000Z"]);
+  t += 60_000;
+  assertEquals((await store.setContactConfirmed("cc1", true))?.confirmed_at, "2026-10-12T15:00:00.000Z");
+
+  // the same read-back again (a retried delivery, or the model capturing it twice) stays confirmed,
+  // even with a different callback number, which is not part of the read-back
+  const again = await store.upsertContact({ ...CONTACT, callbackPhone: null, callbackSource: "none" });
+  assertEquals([again.confirmed, again.confirmed_at, again.callback_phone], [true, "2026-10-12T15:00:00.000Z", null]);
+
+  // anything read back that changed needs a new yes
+  for (const change of [{ email: "jane.doe2@example.com" }, { lastName: "Dough" }, { email: null }]) {
+    await store.upsertContact(CONTACT);
+    await store.setContactConfirmed("cc1", true);
+    const changed = await store.upsertContact({ ...CONTACT, ...change });
+    assertEquals([changed.confirmed, changed.confirmed_at], [false, null], JSON.stringify(change));
+  }
+  const no = await store.setContactConfirmed("cc1", false);
+  assertEquals([no?.confirmed, no?.confirmed_at], [false, null]);
+  assertEquals(store.tables.caller_contacts.length, 1, "one row per call");
+});
+
+Deno.test("caller_contacts rejects what Postgres would reject", async () => {
+  const store = createFakeStore();
+  const bad: [Partial<typeof CONTACT> & Record<string, unknown>, string][] = [
+    [{ kind: "prospect" as never }, "23514"],
+    [{ callbackSource: "account" as never }, "23514"],
+    [{ firstName: "" }, "23514"],
+    [{ lastName: "x".repeat(41) }, "23514"],
+    [{ email: "Jane@Example.com" }, "23514"],
+    [{ email: "jane@example" }, "23514"],
+    [{ callbackPhone: "6025550177" }, "23514"],
+    [{ customerId: "not-a-uuid" as never }, "22P02"],
+    [{ customerId: "6b0d6f0e-1c11-4c7a-9a01-000000000999" as never }, "23503"],
+  ];
+  for (const [change, sqlstate] of bad) {
+    await assertRejects(() => store.upsertContact({ ...CONTACT, ...change } as typeof CONTACT), Error, sqlstate);
+  }
+  assertEquals(store.tables.caller_contacts.length, 0);
+  // an email_update carries the verified customer
+  const update = await store.upsertContact({ ...CONTACT, kind: "email_update", customerId: TOBIAS as never });
+  assertEquals([update.kind, update.customer_id], ["email_update", TOBIAS]);
+});
+
+Deno.test("upsert_interaction: caller_type replaces unknown and is never downgraded; caller_email is kept", async () => {
+  const store = createFakeStore();
+  const row = () => store.tables.call_interactions.find((r) => r.vapi_call_id === "ct1")!;
+  await store.ensureInteraction({ vapi_call_id: "ct1", outcome: "in_progress" });
+  assertEquals([row().caller_type, row().caller_email, row().caller_email_masked], ["unknown", null, null]);
+
+  await store.upsertInteraction({ vapi_call_id: "ct1", caller_type: "new", caller_email: "jane.doe@example.com" });
+  assertEquals([row().caller_type, row().caller_email, row().caller_email_masked], [
+    "new",
+    "jane.doe@example.com",
+    "j***@example.com",
+  ]);
+  // a stub, a partial or an explicit unknown never takes it back
+  await store.upsertInteraction({ vapi_call_id: "ct1", outcome: "in_progress" });
+  await store.upsertInteraction({ vapi_call_id: "ct1", caller_type: "unknown", caller_email: "" });
+  await store.upsertInteraction({ vapi_call_id: "ct1", caller_type: null, caller_email: null });
+  assertEquals([row().caller_type, row().caller_email], ["new", "jane.doe@example.com"]);
+  // a definite type replaces another
+  await store.upsertInteraction({ vapi_call_id: "ct1", caller_type: "existing" });
+  assertEquals(row().caller_type, "existing");
+  await assertRejects(
+    () => store.upsertInteraction({ vapi_call_id: "ct1", caller_type: "prospect" as never }),
+    Error,
+    "23514",
+  );
+  // a fresh row with no type is unknown, as the column default and the coalesce make it
+  await store.upsertInteraction({ vapi_call_id: "ct2" });
+  assertEquals(store.tables.call_interactions.find((r) => r.vapi_call_id === "ct2")?.caller_type, "unknown");
 });

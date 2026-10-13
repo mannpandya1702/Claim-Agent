@@ -2,6 +2,7 @@
 // Everything here is pure and timezone-independent: dates arrive as YYYY-MM-DD strings and are
 // read by hand, so neither the server clock nor a TZ setting can shift a spoken date by a day.
 import { CLAIM_TYPES, CLAIMS_URL_SPOKEN, type Code, MAIN_LINE_SPOKEN } from "./enums.ts";
+import { isPlainEmail } from "./identity.ts";
 import type { Claim } from "./types.ts";
 
 const SMALL = (
@@ -41,8 +42,11 @@ const BAD_ARGS = "Sorry, I didn't catch that. Could you say it again?";
 const SYSTEM_ERROR =
   "I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?";
 const INVALID_PHONE = "I need the full ten-digit number on the account. Could you say it again?";
+// The new-caller branch starts here: the sentence ends the turn, so it asks for the name itself. It
+// says "if you're new", so a policyholder whose account is under another number can say so and be
+// offered a callback instead of new-claim intake (branches-identity.md NOT FOUND).
 const NOT_FOUND_FINAL =
-  "I'm sorry, I can't find an account for that number. I can explain how to start a new claim, or have a representative call you back. Which would you like?";
+  "I'm sorry, I still can't find an account for that number. If you're new with us, I can help you get started. Could I get your first and last name?";
 const NEEDS_DOB = "Thanks. For security, what's the date of birth on the account?";
 const ALREADY_VERIFIED = "You're already verified. What can I help you with?";
 const LOCKED =
@@ -67,11 +71,29 @@ const EMERGENCY_LOGGED = "Our team has been told. Are you safe right now?";
 const EMERGENCY_DB_FAILED = "Please stay on the line. Are you safe right now?";
 const EMAIL_SENT =
   `Done, I've emailed that to the address on your account. It should arrive within a few minutes. ${ANYTHING_ELSE}`;
+// A new caller's copy goes to the address they spelled on this call, not to any account.
+const EMAIL_SENT_GIVEN =
+  `Done, I've emailed that to the address you gave me. It should arrive within a few minutes. ${ANYTHING_ELSE}`;
 const EMAIL_ALREADY_SENT = `I've already sent that to your email on this call. ${ANYTHING_ELSE}`;
+// A spelled address goes to staff as a pending update (capture_contact); nothing is sent to it.
 const NO_EMAIL_ON_FILE =
-  `I don't have an email address on your account, and I can't take one over the phone. You can find the same information at ${CLAIMS_URL_SPOKEN}. ${ANYTHING_ELSE}`;
+  `I don't see an email address on your account. If you'd like, you can spell one for me and I'll pass it to our team to add. Or you can find the same information at ${CLAIMS_URL_SPOKEN}. Which would you prefer?`;
 const EMAIL_FAILED =
   `I wasn't able to send that email just now. You can find the same information at ${CLAIMS_URL_SPOKEN}, or I can have a representative send it. Which would you prefer?`;
+const CONTACT_INVALID_EMAIL =
+  "Hmm, I didn't quite catch a full email address. Could you spell it for me, letter by letter?";
+const CONTACT_NEEDS_NAME = "Sorry, could I get your first and last name?";
+// A phone caller said to use the number they're calling from, but the call carries no usable caller id.
+const CONTACT_NEEDS_PHONE = "Sorry, I can't see the number you're calling from. What's the best number to reach you?";
+const NOT_PENDING = "Sorry, let me take your details again. What's your first and last name?";
+// A verified caller's name comes from the account, so only the address is asked for again.
+const NOT_PENDING_EMAIL = "Sorry, could you spell that email for me one more time, letter by letter?";
+// A verified caller's own address on file is never replaced from a call (account-takeover guard).
+const EMAIL_ON_FILE =
+  "There's already an email on your account, so I can't change it on this call. I can have someone from our claims team call you back about it. Would you like that?";
+const CONTACT_RETRY_EMAIL = "Sorry about that. Could you spell your email for me one more time, slowly?";
+const CONTACT_RETRY_NAME = "Sorry about that. Could you tell me your first and last name one more time?";
+const CONTACT_READBACK_PLAIN = "Just to confirm, did I get your details right?";
 const DOCUMENT_INSTRUCTIONS =
   `You can upload them at ${CLAIMS_URL_SPOKEN}, email them to claims docs at observeinsurance dot com, or mail them to our claims department, and please include your claim number.`;
 
@@ -179,6 +201,45 @@ export function speakMoney(amount: number): string {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Email read-back.
+// ---------------------------------------------------------------------------------------------
+const EMAIL_SYMBOL_WORDS: Readonly<Record<string, string>> = { ".": "dot", "_": "underscore", "-": "dash", "+": "plus" };
+// Mail providers callers name as words; any other domain label is spelled out.
+const KNOWN_EMAIL_DOMAINS: Readonly<Record<string, string>> = {
+  gmail: "gmail",
+  yahoo: "yahoo",
+  outlook: "outlook",
+  hotmail: "hotmail",
+  icloud: "i cloud",
+  aol: "A, O, L",
+  proton: "proton",
+  protonmail: "proton mail",
+};
+// Top-level domains said as words ("dot com"); any other is spelled ("dot c, o").
+const WORD_TLDS: ReadonlySet<string> = new Set(["com", "net", "org", "edu", "gov", "mil", "info", "biz", "me"]);
+
+// Letters are capitals: a lone lower-case "a" is easily voiced as the article ("uh"), and the read-back
+// is the one place the caller can catch a misheard letter.
+function spellOut(s: string): string {
+  return [...s].map((c) => EMAIL_SYMBOL_WORDS[c] ?? (/[0-9]/.test(c) ? SMALL[Number(c)] : c.toUpperCase())).join(", ");
+}
+
+/** "john.smith42@gmail.com" -> "J, O, H, N, dot, S, M, I, T, H, four, two, at gmail dot com". The
+ *  local part letter by letter (capital letters, digits as words, symbols named), a known provider as
+ *  a word, any other domain label spelled, and a common top-level domain as a word. Throws on anything
+ *  that is not a plain address (identity.ts isPlainEmail). */
+export function speakEmail(address: string): string {
+  const email = typeof address === "string" ? address.trim().toLowerCase() : "";
+  if (!isPlainEmail(email)) throw new RangeError("speakEmail: expected a plain address");
+  const [local, domain] = email.split("@");
+  const labels = domain.split(".");
+  const tld = labels.pop()!;
+  const parts = labels.map((l) => KNOWN_EMAIL_DOMAINS[l] ?? spellOut(l));
+  parts.push(WORD_TLDS.has(tld) ? tld : spellOut(tld));
+  return `${spellOut(local)}, at ${parts.join(" dot ")}`;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Speakability guard.
 // ---------------------------------------------------------------------------------------------
 // The main line is the one digit run TTS must read as a phone number, so only that exact string
@@ -247,6 +308,12 @@ function numberWords(n: string): string {
   const value = Number(int);
   const intWords = identifier || value > MAX_WORDS ? speakDigits(int) : numberToWords(value);
   return frac ? `${intWords} point ${speakDigits(frac)}` : intWords;
+}
+
+/** A name as it may be spoken: accents folded, anything but letters, spaces, apostrophes, full stops
+ *  and hyphens dropped, and "" when nothing speakable is left or it is longer than a name. */
+export function spokenName(raw: unknown): string {
+  return speakableName(raw);
 }
 
 function speakableName(raw: unknown): string {
@@ -424,6 +491,53 @@ function nationalDigits(v: unknown): string | null {
   return d.length === 10 ? d : null;
 }
 
+/** capture_contact's read-back from {first_name, last_name, email?, callback_phone?}: the names as
+ *  spoken words, the address letter by letter and a callback number the caller said, digit by digit
+ *  (a number taken from caller id is not read back: nobody said it, so nothing can be misheard).
+ *  Without a speakable name there is nothing to read back, so the plain confirmation question stands
+ *  in (the tool never stores such a name). */
+function contactReadback(d: Record<string, unknown>): string {
+  const first = speakableName(d.first_name);
+  const full = speakableName(`${typeof d.first_name === "string" ? d.first_name : ""} ${
+    typeof d.last_name === "string" ? d.last_name : ""
+  }`);
+  if (!first || !full) return CONTACT_READBACK_PLAIN;
+  let email = "";
+  if (typeof d.email === "string" && d.email) {
+    try {
+      email = speakEmail(d.email);
+    } catch {
+      return CONTACT_READBACK_PLAIN;
+    }
+  }
+  const digits = nationalDigits(d.callback_phone);
+  const number = digits ? `the best number is ${speakPhone(digits)}` : "";
+  let text: string;
+  if (email && number) {
+    text = `Thanks, ${first}. Let me read that back. ${full}, your email is ${email}, and ${number}. Did I get that right?`;
+  } else if (email) {
+    text = `Thanks, ${first}. Let me read that back. ${full}, and your email is ${email}. Did I get that right?`;
+  } else if (number) {
+    text = `Thanks, ${first}. Just to confirm, that's ${full}, and ${number}. Did I get that right?`;
+  } else {
+    text = `Thanks, ${first}. Just to confirm, that's ${full}. Did I get that right?`;
+  }
+  return isSpeakable(text) && text.length <= MAX_SPOKEN_CHARS ? text : CONTACT_READBACK_PLAIN;
+}
+
+/** contact_retry: a plain "no" to the read-back. An email_update read back only the address (the name
+ *  is the account's), so it is spelled again; otherwise the caller says which part was wrong rather
+ *  than being made to repeat a part that was right. */
+function contactRetry(d: Record<string, unknown>): string {
+  if (d.part === "email") return CONTACT_RETRY_EMAIL;
+  const parts = ["your name"];
+  if (d.has_email !== false) parts.push("your email");
+  if (d.has_phone === true) parts.push("your number");
+  if (parts.length === 1) return CONTACT_RETRY_NAME;
+  const which = parts.length === 2 ? `${parts[0]} or ${parts[1]}` : `${parts[0]}, ${parts[1]} or ${parts[2]}`;
+  return `Sorry about that. What did I get wrong, ${which}?`;
+}
+
 /** Code -> sentence. data carries the few dynamic parts (see CONTRACTS). */
 export function sentenceFor(code: Code, data?: Record<string, unknown>): string {
   const d = data ?? {};
@@ -491,13 +605,40 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
     case "emergency_logged":
       return d.db_failed === true ? EMERGENCY_DB_FAILED : EMERGENCY_LOGGED;
     case "email_sent":
-      return EMAIL_SENT;
+      return d.target === "given" ? EMAIL_SENT_GIVEN : EMAIL_SENT;
     case "email_already_sent":
       return EMAIL_ALREADY_SENT;
     case "no_email_on_file":
       return NO_EMAIL_ON_FILE;
     case "email_failed":
       return EMAIL_FAILED;
+    case "contact_readback":
+      return contactReadback(d);
+    case "contact_invalid_email":
+      return CONTACT_INVALID_EMAIL;
+    case "contact_needs_name":
+      return CONTACT_NEEDS_NAME;
+    case "contact_needs_phone":
+      return CONTACT_NEEDS_PHONE;
+    case "email_on_file":
+      return EMAIL_ON_FILE;
+    case "not_pending":
+      return d.verified === true ? NOT_PENDING_EMAIL : NOT_PENDING;
+    case "contact_retry":
+      return contactRetry(d);
+    case "contact_saved_new": {
+      const name = speakableName(d.first_name);
+      const thanks = name ? `Perfect, thanks ${name}.` : "Perfect, thanks.";
+      // Without an address there is nothing to email the steps to, so the website stands in.
+      const offer = d.has_email === false
+        ? `I can have someone from our claims team call you back, or you can find the steps to start a claim at ${CLAIMS_URL_SPOKEN}. Which would you like?`
+        : "I can email you the steps to start a new claim, or have someone from our claims team call you back. Which would you like?";
+      return `${thanks} I've saved your details. ${offer}`;
+    }
+    case "contact_saved_existing": {
+      const name = speakableName(d.first_name);
+      return `${name ? `Thanks, ${name}.` : "Thanks."} I've passed that email to our team to add to your account. Is there anything else I can help with?`;
+    }
     default: {
       // Exhaustive over CODES at compile time; an off-list code at runtime gets the trouble line.
       const _unreachable: never = code;

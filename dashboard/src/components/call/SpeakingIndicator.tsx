@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 interface SpeakingIndicatorProps {
   who: string;
   speaking: boolean;
-  /** Word shown while not speaking ("Listening" for Tessa, "Quiet" for the caller). */
+  /** Word shown while not speaking ("Listening" for Ava, "Quiet" for the caller). */
   idleWord: string;
   /** False when there is no live call: the row reads "Idle" behind a dashed edge. */
   connected: boolean;
@@ -19,7 +19,7 @@ const BARS = [
 ];
 
 /**
- * Who is talking right now. Tessa's state comes from the SDK's speech-start/speech-end events;
+ * Who is talking right now. Ava's state comes from the SDK's speech-start/speech-end events;
  * the caller's from an open partial transcript. The word carries the meaning; the bars only
  * reinforce it (and stop moving under prefers-reduced-motion).
  */
@@ -66,12 +66,12 @@ interface SpeakingPairProps {
   className?: string;
 }
 
-/** Tessa and the caller side by side, with the bar keyframes emitted once. */
+/** Ava and the caller side by side, with the bar keyframes emitted once. */
 export function SpeakingPair({ assistantSpeaking, callerSpeaking, connected, className }: SpeakingPairProps) {
   return (
     <div role="group" aria-label="Who is speaking" className={cn("grid grid-cols-2 gap-2", className)}>
       <style>{SPEAKING_KEYFRAMES}</style>
-      <SpeakingIndicator who="Tessa" speaking={assistantSpeaking} idleWord="Listening" connected={connected} />
+      <SpeakingIndicator who="Ava" speaking={assistantSpeaking} idleWord="Listening" connected={connected} />
       <SpeakingIndicator who="You" speaking={callerSpeaking} idleWord="Quiet" connected={connected} />
     </div>
   );

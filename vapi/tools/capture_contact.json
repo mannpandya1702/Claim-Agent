@@ -1,0 +1,52 @@
+{
+  "type": "function",
+  "async": false,
+  "function": {
+    "name": "capture_contact",
+    "strict": false,
+    "description": "Save a caller's contact details for the claims team: a new caller's name, email and callback number, or the email a verified caller with none on file wants added to their account. Call it once the caller has given and spelled what you asked for, and again with the corrected details after a correction. Its result is a sentence that has already been spoken to the caller: it reads the details back and asks whether they are right.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "first_name": {
+          "type": "string",
+          "description": "A new caller's first name, as they said or spelled it. Leave it out for a verified caller: their name comes from the account."
+        },
+        "last_name": {
+          "type": "string",
+          "description": "A new caller's last name, as they said or spelled it. Leave it out for a verified caller."
+        },
+        "email": {
+          "type": "string",
+          "description": "The email address exactly as the caller spelled it, written as an address. Only what they spelled: never guessed, completed or corrected by you."
+        },
+        "callback_phone": {
+          "type": "string",
+          "description": "The ten digits of the number the caller said to be called back on, digits only. Leave it out only when, on a phone call, they said to use the number they are calling from, or when they would rather not give a number."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "server": {
+    "url": "<<SERVER_URL>>",
+    "credentialId": "<<CREDENTIAL_ID>>",
+    "timeoutSeconds": 10
+  },
+  "messages": [
+    {
+      "type": "request-start",
+      "blocking": false,
+      "content": "Okay, one second."
+    },
+    {
+      "type": "request-response-delayed",
+      "timingMilliseconds": 3000,
+      "content": "Thanks for bearing with me, almost there."
+    },
+    {
+      "type": "request-failed",
+      "content": "I'm sorry, I couldn't save your details just now. I can have someone from our claims team call you back instead. Would you like that?"
+    }
+  ]
+}

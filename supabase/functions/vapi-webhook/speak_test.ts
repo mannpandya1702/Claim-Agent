@@ -10,7 +10,9 @@ import {
   speakDate,
   speakDigits,
   speakMoney,
+  speakEmail,
   speakPhone,
+  spokenName,
 } from "./speak.ts";
 
 // The demo claims exactly as 0002_seed.sql writes them.
@@ -104,6 +106,19 @@ const VARIANTS: [Code, Record<string, unknown> | undefined][] = [
   ["rep_queued", { target: "caller_id" }],
   ["callback_updated", { digits: "6025550101" }],
   ["emergency_logged", { db_failed: true }],
+  ["email_sent", { target: "given" }],
+  ["contact_readback", { first_name: "Jane", last_name: "Doe", email: "jane.doe42@gmail.com" }],
+  ["contact_readback", { first_name: "Jane", last_name: "Doe" }],
+  ["contact_readback", { first_name: "{{name}}", last_name: "Doe", email: "jane@example.com" }],
+  ["contact_readback", { first_name: "Jane", last_name: "Doe", email: "not an address" }],
+  ["contact_retry", { has_email: false }],
+  ["contact_retry", { has_email: true, has_phone: true }],
+  ["contact_retry", { part: "email" }],
+  ["contact_readback", { first_name: "Jane", last_name: "Doe", email: "jane.doe42@gmail.com", callback_phone: "+16025550177" }],
+  ["not_pending", { verified: true }],
+  ["contact_saved_new", { first_name: "Jane" }],
+  ["contact_saved_new", { first_name: "Jane", has_email: false }],
+  ["contact_saved_existing", { first_name: "Teague" }],
 ];
 
 Deno.test("every code has a non-empty speakable sentence, with and without data", () => {
@@ -147,7 +162,7 @@ Deno.test("exact fixed sentences", () => {
   );
   assertEquals(
     sentenceFor("no_email_on_file"),
-    "I don't have an email address on your account, and I can't take one over the phone. You can find the same information at observeinsurance dot com slash claims. Is there anything else I can help you with?",
+    "I don't see an email address on your account. If you'd like, you can spell one for me and I'll pass it to our team to add. Or you can find the same information at observeinsurance dot com slash claims. Which would you prefer?",
   );
   assertEquals(sentenceFor("emergency_logged"), "Our team has been told. Are you safe right now?");
   assertEquals(
@@ -503,4 +518,163 @@ Deno.test("assertSpeakable accepts plain speech and the main line only", () => {
   for (const text of rejects) assertThrows(() => assertSpeakable(text), Error, undefined, JSON.stringify(text));
   // A standalone-word rule: these contain the letters but not the word.
   assertSpeakable("The database team and the nullified form are fine.");
+});
+
+// ---------------------------------------------------------------------------------------------
+// Contact capture: the email read-back and the capture/confirm sentences.
+// ---------------------------------------------------------------------------------------------
+Deno.test("speakEmail: letter by letter, digits and symbols as words, known providers and common TLDs as words", () => {
+  const table: [string, string][] = [
+    ["john.smith42@gmail.com", "J, O, H, N, dot, S, M, I, T, H, four, two, at gmail dot com"],
+    ["jane_doe@yahoo.com", "J, A, N, E, underscore, D, O, E, at yahoo dot com"],
+    ["mary-jo@outlook.com", "M, A, R, Y, dash, J, O, at outlook dot com"],
+    ["pat+claims@hotmail.com", "P, A, T, plus, C, L, A, I, M, S, at hotmail dot com"],
+    ["sam@icloud.com", "S, A, M, at i cloud dot com"],
+    ["al@aol.com", "A, L, at A, O, L dot com"],
+    ["kim@proton.me", "K, I, M, at proton dot me"],
+    ["ops@acme-builders.org", "O, P, S, at A, C, M, E, dash, B, U, I, L, D, E, R, S dot org"],
+    ["x1@mail.example.co.uk", "X, one, at M, A, I, L dot E, X, A, M, P, L, E dot C, O dot U, K"],
+    ["zero0@gmail.io", "Z, E, R, O, zero, at gmail dot I, O"],
+    ["  Upper.Case@GMAIL.com ", "U, P, P, E, R, dot, C, A, S, E, at gmail dot com"],
+  ];
+  // Letters are capitals, so a lone "a" is read as the letter rather than the article.
+  assertEquals(speakEmail("a@gmail.com"), "A, at gmail dot com");
+  for (const [address, spoken] of table) {
+    assertEquals(speakEmail(address), spoken, address);
+    assertSpeakable(spoken);
+    assert(!spoken.includes("@") && !/[0-9]/.test(spoken), address);
+  }
+  // A guarded word in an address is spelled, so it can never be spoken as the word.
+  assertEquals(speakEmail("null.data@json.com"), "N, U, L, L, dot, D, A, T, A, at J, S, O, N dot com");
+  for (const bad of ["", "jane", "jane@example", "a@@b.com", "jane..doe@example.com", 42 as unknown as string]) {
+    assertThrows(() => speakEmail(bad), RangeError, undefined, String(bad));
+  }
+});
+
+Deno.test("contact sentences: exact wording", () => {
+  assertEquals(
+    sentenceFor("contact_readback", { first_name: "John", last_name: "Smith", email: "john.smith42@gmail.com" }),
+    "Thanks, John. Let me read that back. John Smith, and your email is J, O, H, N, dot, S, M, I, T, H, four, two, at gmail dot com. Did I get that right?",
+  );
+  // a callback number the caller said is read back in three groups, the way a person reads one
+  assertEquals(
+    sentenceFor("contact_readback", {
+      first_name: "John",
+      last_name: "Smith",
+      email: "john.smith42@gmail.com",
+      callback_phone: "+16025550177",
+    }),
+    "Thanks, John. Let me read that back. John Smith, your email is J, O, H, N, dot, S, M, I, T, H, four, two, at gmail dot com, and the best number is six zero two... five five five... zero one seven seven. Did I get that right?",
+  );
+  assertEquals(
+    sentenceFor("contact_readback", { first_name: "Jane", last_name: "O'Brien", callback_phone: "6025550177" }),
+    "Thanks, Jane. Just to confirm, that's Jane O'Brien, and the best number is six zero two... five five five... zero one seven seven. Did I get that right?",
+  );
+  // a number that is not ten digits is left out rather than read wrong
+  assertEquals(
+    sentenceFor("contact_readback", { first_name: "Jane", last_name: "O'Brien", callback_phone: "5550177" }),
+    "Thanks, Jane. Just to confirm, that's Jane O'Brien. Did I get that right?",
+  );
+  assertEquals(
+    sentenceFor("contact_readback", { first_name: "Jane", last_name: "O'Brien" }),
+    "Thanks, Jane. Just to confirm, that's Jane O'Brien. Did I get that right?",
+  );
+  // accents are folded for speech
+  assertEquals(
+    sentenceFor("contact_readback", { first_name: "Jos\u00e9", last_name: "Pe\u00f1a" }),
+    "Thanks, Jose. Just to confirm, that's Jose Pena. Did I get that right?",
+  );
+  // nothing speakable to read back: the plain question, never a broken sentence
+  for (const d of [undefined, { first_name: "123", last_name: "Doe" }, { first_name: "Jane", last_name: "Doe", email: "x@y" }]) {
+    assertEquals(sentenceFor("contact_readback", d), "Just to confirm, did I get your details right?");
+  }
+  assertEquals(
+    sentenceFor("contact_invalid_email"),
+    "Hmm, I didn't quite catch a full email address. Could you spell it for me, letter by letter?",
+  );
+  assertEquals(sentenceFor("contact_needs_name"), "Sorry, could I get your first and last name?");
+  assertEquals(
+    sentenceFor("contact_needs_phone"),
+    "Sorry, I can't see the number you're calling from. What's the best number to reach you?",
+  );
+  assertEquals(
+    sentenceFor("email_on_file"),
+    "There's already an email on your account, so I can't change it on this call. I can have someone from our claims team call you back about it. Would you like that?",
+  );
+  assertEquals(sentenceFor("not_pending"), "Sorry, let me take your details again. What's your first and last name?");
+  // a verified caller's name is the account's, so only the address is asked for again
+  assertEquals(
+    sentenceFor("not_pending", { verified: true }),
+    "Sorry, could you spell that email for me one more time, letter by letter?",
+  );
+  // a plain no asks which part was wrong, among the parts that were read back
+  assertEquals(sentenceFor("contact_retry"), "Sorry about that. What did I get wrong, your name or your email?");
+  assertEquals(
+    sentenceFor("contact_retry", { has_email: true, has_phone: true }),
+    "Sorry about that. What did I get wrong, your name, your email or your number?",
+  );
+  assertEquals(
+    sentenceFor("contact_retry", { has_email: false, has_phone: true }),
+    "Sorry about that. What did I get wrong, your name or your number?",
+  );
+  assertEquals(
+    sentenceFor("contact_retry", { has_email: false }),
+    "Sorry about that. Could you tell me your first and last name one more time?",
+  );
+  // an email_update read back only the address
+  assertEquals(
+    sentenceFor("contact_retry", { part: "email" }),
+    "Sorry about that. Could you spell your email for me one more time, slowly?",
+  );
+  assertEquals(
+    sentenceFor("contact_saved_new", { first_name: "Jane" }),
+    "Perfect, thanks Jane. I've saved your details. I can email you the steps to start a new claim, or have someone from our claims team call you back. Which would you like?",
+  );
+  assertEquals(
+    sentenceFor("contact_saved_new", { first_name: "Jane", has_email: false }),
+    "Perfect, thanks Jane. I've saved your details. I can have someone from our claims team call you back, or you can find the steps to start a claim at observeinsurance dot com slash claims. Which would you like?",
+  );
+  assertStringIncludes(sentenceFor("contact_saved_new"), "Perfect, thanks. I've saved your details.");
+  assertEquals(
+    sentenceFor("contact_saved_existing", { first_name: "Teague" }),
+    "Thanks, Teague. I've passed that email to our team to add to your account. Is there anything else I can help with?",
+  );
+  assertEquals(
+    sentenceFor("contact_saved_existing"),
+    "Thanks. I've passed that email to our team to add to your account. Is there anything else I can help with?",
+  );
+});
+
+Deno.test("the new-caller sentences lead into the details, and an email to a given address says so", () => {
+  assertEquals(
+    sentenceFor("not_found_final"),
+    "I'm sorry, I still can't find an account for that number. If you're new with us, I can help you get started. Could I get your first and last name?",
+  );
+  assertEquals(
+    sentenceFor("email_sent", { target: "given" }),
+    "Done, I've emailed that to the address you gave me. It should arrive within a few minutes. Is there anything else I can help you with?",
+  );
+  assertStringIncludes(sentenceFor("email_sent"), "the address on your account");
+  // the verified caller with no email on file is offered the spelled-address route, never told it is impossible
+  assert(!sentenceFor("no_email_on_file").includes("can't take one"));
+  assertStringIncludes(sentenceFor("no_email_on_file"), "spell one for me");
+});
+
+Deno.test("spokenName folds accents and refuses what cannot be spoken", () => {
+  assertEquals(spokenName("Jos\u00e9"), "Jose");
+  assertEquals(spokenName("O\u2019Brien"), "O'Brien");
+  assertEquals(spokenName("{{first}}"), "first");
+  assertEquals(spokenName("Null"), "");
+  assertEquals(spokenName(42), "");
+});
+
+Deno.test("no spoken string carries banned words or a double dash", () => {
+  for (const [code, data] of VARIANTS) {
+    const s = sentenceFor(code, data);
+    assert(!s.includes("--"), `${code} has a double dash`);
+    for (const banned of [/\bgotcha\b/i, /\bhoney\b/i, /\blove\b/i, /\bsweetie\b/i, /\bdear\b/i, /I understand your concern/i]) {
+      assert(!banned.test(s), `${code} says ${banned}`);
+    }
+    assert(!/\bTessa\b/.test(s), `${code} still names the old assistant`);
+  }
 });

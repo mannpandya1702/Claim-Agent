@@ -7,12 +7,17 @@ import {
   emergencyEmail,
   escapeHtml,
   howToStartEmail,
+  loadEscalationContact,
+  loadTeamCaller,
   maskEmail,
   sendEmail,
   slaRealertEmail,
+  type TeamCaller,
+  teamCallerOf,
   writtenDate,
 } from "./email.ts";
-import type { Claim, Customer, Deps, Env, Store } from "./types.ts";
+import { createFakeStore } from "./fake_store.ts";
+import type { CallerContact, Claim, Customer, Deps, Env, Store } from "./types.ts";
 
 const API_KEY = "re_test_key_123";
 const TO = "owner@example.com";
@@ -642,4 +647,266 @@ Deno.test("digestEmail: stats table, nested values, redaction and escaping", () 
   assertStringIncludes(t.html, "&lt;pending&gt;");
   assertFalse(t.html.includes("602-555-0101"));
   assertStringIncludes(digestEmail({ date: "2026-10-12", stats: {} }).html, "No activity was recorded.");
+});
+
+// ---------------------------------------------------------------------------------------------
+// Who called: the team emails name the caller, the full callback number and a spelled address.
+// ---------------------------------------------------------------------------------------------
+const JANE: CallerContact = {
+  call_key: CALL_KEY,
+  kind: "new_customer",
+  first_name: "Jane",
+  last_name: "Doe",
+  email: "jane.doe@gmail.com",
+  callback_phone: "+16025550177",
+  callback_source: "argument",
+  customer_id: null,
+  confirmed: true,
+  confirmed_at: "2026-10-12T15:00:00Z",
+};
+
+Deno.test("teamCallerOf: the verified name, else the confirmed given name, else unknown; only a confirmed address", () => {
+  assertEquals(teamCallerOf(TOBIAS, null), {
+    name: "Tobias Halvorsen",
+    nameSource: "account",
+    email: null,
+  });
+  assertEquals(teamCallerOf(null, JANE), {
+    name: "Jane Doe",
+    nameSource: "caller",
+    email: "jane.doe@gmail.com",
+  });
+  // a verified customer's pending address is passed on, labelled as theirs to confirm
+  assertEquals(
+    teamCallerOf(TOBIAS, {
+      ...JANE,
+      kind: "email_update",
+      first_name: "Tobias",
+      last_name: "Halvorsen",
+    }),
+    {
+      name: "Tobias Halvorsen",
+      nameSource: "account",
+      email: "jane.doe@gmail.com",
+    },
+  );
+  // what the caller said "no" to is not passed on
+  assertEquals(
+    teamCallerOf(null, { ...JANE, confirmed: false, confirmed_at: null }),
+    {
+      name: null,
+      nameSource: null,
+      email: null,
+    },
+  );
+  assertEquals(teamCallerOf(null, null), {
+    name: null,
+    nameSource: null,
+    email: null,
+  });
+});
+
+Deno.test("loadTeamCaller: reads the session's customer and the contact; a failed read costs only the name", async () => {
+  const store = createFakeStore();
+  await store.upsertContact({
+    callKey: CALL_KEY,
+    kind: "new_customer",
+    firstName: "Jane",
+    lastName: "Doe",
+    email: "jane.doe@gmail.com",
+    callbackPhone: null,
+    callbackSource: "none",
+    customerId: null,
+  });
+  await store.setContactConfirmed(CALL_KEY, true);
+  assertEquals((await loadTeamCaller(store, CALL_KEY, null)).name, "Jane Doe");
+  const verified = {
+    call_key: CALL_KEY,
+    channel: "webCall",
+    caller_number: null,
+    level: "verified" as const,
+    candidate_customer_id: TOBIAS.id,
+    verified_customer_id: TOBIAS.id,
+  };
+  assertEquals(
+    (await loadTeamCaller(store, CALL_KEY, verified)).name,
+    "Tobias Halvorsen",
+  );
+  store.failNext("getContact");
+  store.failNext("getCustomer");
+  assertEquals(await loadTeamCaller(store, CALL_KEY, verified), {
+    name: null,
+    nameSource: null,
+    email: null,
+  });
+  assertEquals(await loadTeamCaller({} as Store, CALL_KEY, null), {
+    name: null,
+    nameSource: null,
+    email: null,
+  });
+});
+
+Deno.test("callbackRequestEmail and emergencyEmail: name, full callback number and the labelled email", () => {
+  const caller: TeamCaller = {
+    name: "Jane <Doe>",
+    nameSource: "caller",
+    email: "jane.doe@gmail.com",
+  };
+  const base = {
+    callKey: CALL_KEY,
+    channel: "webCall",
+    dashboardUrl: DASHBOARD,
+  };
+  for (
+    const t of [
+      callbackRequestEmail({
+        ...base,
+        reason: "not_found",
+        verified: false,
+        callbackPhone: "+16025550177",
+        details: null,
+        caller,
+      }),
+      emergencyEmail({
+        ...base,
+        note: null,
+        callbackPhone: "+16025550177",
+        caller,
+      }),
+    ]
+  ) {
+    assertAsciiTemplate(t);
+    assertMatch(
+      t.html,
+      /Caller name<\/th><td[^>]*>Jane &lt;Doe&gt; \(caller-provided, unverified\)</,
+    );
+    assertStringIncludes(t.html, "(602) 555-0177 (+16025550177)");
+    assertMatch(
+      t.html,
+      /Email \(caller-provided, unverified\)<\/th><td[^>]*>jane\.doe@gmail\.com</,
+    );
+  }
+  const verified = callbackRequestEmail({
+    ...base,
+    reason: "representative_requested",
+    verified: true,
+    callbackPhone: "+16025550101",
+    details: null,
+    caller: { name: "Tobias Halvorsen", nameSource: "account", email: null },
+  });
+  assertMatch(verified.html, /Caller name<\/th><td[^>]*>Tobias Halvorsen</);
+  assertFalse(verified.html.includes("caller-provided"));
+  // no caller given: an unknown caller, and no email row
+  const bare = callbackRequestEmail({
+    ...base,
+    reason: "representative_requested",
+    verified: false,
+    callbackPhone: null,
+    details: null,
+  });
+  assertMatch(bare.html, /Caller name<\/th><td[^>]*>Unknown caller</);
+  assertFalse(bare.html.includes("Email (caller-provided"));
+  assertMatch(
+    emergencyEmail({ ...base, note: null }).html,
+    /Caller name<\/th><td[^>]*>Unknown caller</,
+  );
+});
+
+Deno.test("slaRealertEmail: the caller and the callback number when the job passes them", () => {
+  const t = slaRealertEmail({
+    callKey: CALL_KEY,
+    kind: "representative",
+    reason: "not_found",
+    minutesOpen: 31,
+    caller: {
+      name: "Jane Doe",
+      nameSource: "caller",
+      email: "jane.doe@gmail.com",
+    },
+    callbackPhone: "+16025550177",
+  });
+  assertAsciiTemplate(t);
+  assertStringIncludes(t.html, "Jane Doe (caller-provided, unverified)");
+  assertStringIncludes(t.html, "(602) 555-0177 (+16025550177)");
+  assertStringIncludes(t.html, "jane.doe@gmail.com");
+  const noNumber = slaRealertEmail({
+    callKey: CALL_KEY,
+    kind: "emergency",
+    reason: "emergency",
+    minutesOpen: 40,
+    callbackPhone: null,
+  });
+  assertStringIncludes(noNumber.html, "None known (check the dashboard)");
+  // without them the re-alert is the same as before
+  const plain = slaRealertEmail({
+    callKey: CALL_KEY,
+    kind: "emergency",
+    reason: "emergency",
+    minutesOpen: 40,
+  });
+  assertFalse(plain.html.includes("Caller name"));
+  assertFalse(plain.html.includes("Callback number"));
+});
+
+Deno.test("howToStartEmail for a new caller: greeted by the given first name, nothing from any account", () => {
+  const t = howToStartEmail({
+    customer: { first_name: "Jane" },
+    newCustomer: true,
+  });
+  assertAsciiTemplate(t);
+  assertStringIncludes(t.html, "Hello Jane,");
+  assertStringIncludes(t.html, "Thanks for calling Observe Insurance.");
+  assertStringIncludes(t.html, "Your policy number, if you have one");
+  // a policy number handed in by mistake is still left out of a new caller's copy
+  const leaked = howToStartEmail({
+    customer: { first_name: "Jane", policy_number: "POL-7301" },
+    newCustomer: true,
+  });
+  assertFalse(leaked.html.includes("POL-7301"));
+  assertStringIncludes(
+    howToStartEmail({ customer: {}, newCustomer: true }).html,
+    "Hello,",
+  );
+});
+
+Deno.test("loadEscalationContact: the caller and the escalation's own callback number, for the sla re-alert", async () => {
+  const store = createFakeStore();
+  await store.ensureSession(CALL_KEY, "webCall", null);
+  await store.upsertEscalation({
+    callKey: CALL_KEY,
+    kind: "representative",
+    reason: "not_found",
+    details: null,
+    callbackPhone: "+16025550177",
+    callbackSource: "argument",
+    channel: "webCall",
+    verified: false,
+  });
+  await store.upsertContact({
+    callKey: CALL_KEY,
+    kind: "new_customer",
+    firstName: "Jane",
+    lastName: "Doe",
+    email: "jane.doe@gmail.com",
+    callbackPhone: "+16025550177",
+    callbackSource: "argument",
+    customerId: null,
+  });
+  await store.setContactConfirmed(CALL_KEY, true);
+  const found = await loadEscalationContact(store, CALL_KEY, "representative");
+  assertEquals(found, {
+    caller: {
+      name: "Jane Doe",
+      nameSource: "caller",
+      email: "jane.doe@gmail.com",
+    },
+    callbackPhone: "+16025550177",
+  });
+  assertEquals(
+    (await loadEscalationContact(store, CALL_KEY, "emergency")).callbackPhone,
+    null,
+  );
+  store.failNext("listEscalations");
+  const failed = await loadEscalationContact(store, CALL_KEY, "representative");
+  assertEquals([failed.callbackPhone, failed.caller.name], [null, "Jane Doe"]);
 });

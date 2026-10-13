@@ -2,6 +2,7 @@ import type { DateRange } from "./dates";
 import { supabase } from "./supabase";
 import type {
   Attempt,
+  CallerContact,
   CallInteraction,
   CallListRow,
   CallsByDayRow,
@@ -22,7 +23,7 @@ import type {
 /*
  * Query keys and fetchers shared by every page, so a Realtime hook on one page invalidates the
  * same keys another page reads. Keys are prefix-friendly: invalidating ["call", id] refreshes
- * everything about one call; ["calls"] refreshes every list. Only what 0003_dashboard.sql grants
+ * everything about one call; ["calls"] refreshes every list. Only what the migrations grant staff
  * is read here; customers and claims are never queried.
  */
 
@@ -41,6 +42,7 @@ export const qk = {
   callEscalations: (id: string) => ["call", id, "escalations"] as const,
   callEmails: (id: string) => ["call", id, "emails"] as const,
   callOutbox: (id: string) => ["call", id, "outbox"] as const,
+  callContact: (id: string) => ["call", id, "contact"] as const,
 
   metrics: (range: DateRange) => ["metrics", range.from, range.to] as const,
   callsByDay: (range: DateRange) => ["calls-by-day", range.from, range.to] as const,
@@ -60,8 +62,9 @@ function fail(error: { message: string } | null): void {
 
 // The detail page reads the full row except the search vector and the stored recording
 // reference (has_recording says whether there is one; playback goes through recording-url).
-// Lists use search_calls, which never returns transcript, messages or a full phone number.
-export const CALL_DETAIL_COLUMNS = [
+// Lists use search_calls, which never returns transcript, messages, a full phone number or a
+// full email address.
+const CALL_DETAIL_COLUMNS_BEFORE_0006 = [
   "id",
   "vapi_call_id",
   "channel",
@@ -92,7 +95,15 @@ export const CALL_DETAIL_COLUMNS = [
   "analysis_status",
   "created_at",
   "updated_at",
-].join(",");
+];
+
+/** Detail columns, with 0006_contacts.sql's caller_type and caller_email (the confirmed captured address). */
+export const CALL_DETAIL_COLUMNS = [...CALL_DETAIL_COLUMNS_BEFORE_0006, "caller_type", "caller_email"].join(",");
+
+/** PostgREST's answer when a selected column does not exist yet (Postgres undefined_column). */
+function isMissingContactColumn(error: { code?: string; message: string } | null): boolean {
+  return !!error && error.code === "42703" && /caller_(type|email)/.test(error.message);
+}
 
 /**
  * Columns for live cards and other non-detail views: no transcript, messages, raw analysis or
@@ -166,7 +177,11 @@ export async function fetchLiveCalls(): Promise<CallSummary[]> {
 // ---------------------------------------------------------------------------------------------
 
 export async function fetchCall(id: string): Promise<CallInteraction | null> {
-  const { data, error } = await supabase.from("call_interactions").select(CALL_DETAIL_COLUMNS).eq("vapi_call_id", id).maybeSingle();
+  const read = (columns: string) => supabase.from("call_interactions").select(columns).eq("vapi_call_id", id).maybeSingle();
+  let { data, error } = await read(CALL_DETAIL_COLUMNS);
+  // The dashboard deploys on merge and migrations are applied by hand, so for the minutes between
+  // the two the page reads the older columns instead of failing every call (no caller type yet).
+  if (isMissingContactColumn(error)) ({ data, error } = await read(CALL_DETAIL_COLUMNS_BEFORE_0006.join(",")));
   fail(error);
   return (data ?? null) as unknown as CallInteraction | null;
 }
@@ -226,6 +241,20 @@ export async function fetchCallOutbox(id: string): Promise<OutboxEvent[]> {
     .order("created_at");
   fail(error);
   return (data ?? []) as OutboxEvent[];
+}
+
+/** caller_contacts columns the call page shows (customer_id is not needed in the browser). */
+export const CALLER_CONTACT_COLUMNS =
+  "call_key,kind,first_name,last_name,email,callback_phone,callback_source,confirmed,confirmed_at,created_at,updated_at";
+
+/**
+ * The name, email and callback number the caller gave on this call (one row per call, or none).
+ * Full email and number, so it is read on the call detail page only.
+ */
+export async function fetchCallContact(id: string): Promise<CallerContact | null> {
+  const { data, error } = await supabase.from("caller_contacts").select(CALLER_CONTACT_COLUMNS).eq("call_key", id).maybeSingle();
+  fail(error);
+  return (data ?? null) as unknown as CallerContact | null;
 }
 
 /**

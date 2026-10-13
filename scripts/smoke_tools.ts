@@ -9,9 +9,13 @@
 //   deno task smoke --keep          leave the rows in place for inspection
 //
 // Chat envelopes send no Telegram and no email (alert_status 'skipped'), and no case reaches an
-// alerting or emailing branch, so a smoke run never pages anyone.
+// alerting branch, so a smoke run never pages anyone. The one email a run can send is the new-caller
+// case's steps to start a claim, and only to OWNER_EMAIL (the address every seeded customer uses);
+// without it that case checks the gates and sends nothing.
 
+import { maskEmail } from "../supabase/functions/vapi-webhook/email.ts";
 import type { Code, Level } from "../supabase/functions/vapi-webhook/enums.ts";
+import { normaliseEmail } from "../supabase/functions/vapi-webhook/identity.ts";
 import { MASKED_ANSWER } from "../supabase/functions/vapi-webhook/redact.ts";
 import { assertSpeakable, sentenceFor } from "../supabase/functions/vapi-webhook/speak.ts";
 import {
@@ -41,10 +45,18 @@ const TOBIAS = {
   dob: { dob_month: 3, dob_day: 14, dob_year: 1986 },
 };
 const RONAN_PHONE = "6025550102";
+const TEAGUE = {
+  phone: "6025550104",
+  dob: { dob_month: 1, dob_day: 30, dob_year: 1965 },
+}; // no email on file
 const UNKNOWN_PHONE = "6025550199";
 const CALLBACK_PHONE = "6025550177";
 const FIRST_MESSAGE =
-  "Thanks for calling Observe Insurance claims support. This is Tessa, a virtual assistant, and this call may be recorded. To get started, what's the phone number on your account?";
+  "Hi, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. What's the phone number on your account?";
+// The new caller the contact cases invent; no customer has these details.
+const NEW_CALLER = { first_name: "smoke", last_name: "tester" };
+// Spelled the way a caller says it, so the server's spoken-form reading is exercised end to end.
+const SPOKEN_EMAIL = "s m o k e dot t e s t at example dot com";
 const VERIFIED_PREFIX = "Thank you, Tobias, you're verified.";
 const SETTLE_MS = 2000;
 const ROW_WAIT_MS = 3000;
@@ -73,6 +85,18 @@ export interface SmokeDb {
     } | null
   >;
   transcriptLines(callKey: string): Promise<{ role: string; text: string }[]>;
+  contact(callKey: string): Promise<
+    {
+      kind: string;
+      first_name: string;
+      last_name: string;
+      email: string | null;
+      confirmed: boolean;
+    } | null
+  >;
+  emails(
+    callKey: string,
+  ): Promise<{ kind: string; to_masked: string; status: string }[]>;
 }
 
 export interface SmokeConfig {
@@ -85,6 +109,8 @@ export interface SmokeConfig {
   /** Tools write some rows in the background (waitUntil), so a row check re-reads for up to this
    *  long before it fails. Default 3000 ms; tests pass 0. */
   rowWaitMs?: number;
+  /** OWNER_EMAIL: the only address the new-caller case may email the steps to start a claim. */
+  ownerEmail?: string;
 }
 
 export interface CaseResult {
@@ -102,6 +128,8 @@ interface ToolStep {
   id?: string; // reuse a toolCallId to exercise the replay guard
   code: Code;
   sentence?: Expect; // default: the exact sentenceFor(code)
+  // A second answer that also passes (an honest failure of a third party the case cannot control).
+  alternative?: { code: Code; sentence: Expect };
   check?: (reply: ToolReply) => string | null;
 }
 
@@ -160,7 +188,8 @@ class CaseCtx {
     const reply = replies[0];
     if (reply.toolCallId !== id) this.fail(`${label}: toolCallId ${String(reply.toolCallId)} != ${id}`);
     if (reply.name !== step.name) this.fail(`${label}: name ${String(reply.name)} != ${step.name}`);
-    if (reply.code !== step.code) {
+    const alternative = step.alternative && reply.code === step.alternative.code ? step.alternative : null;
+    if (reply.code !== step.code && !alternative) {
       this.fail(`${label}: got code ${String(reply.code)}`);
       return reply;
     }
@@ -170,7 +199,7 @@ class CaseCtx {
     } catch (e) {
       this.fail(`${label}: sentence not speakable (${(e as Error).message})`);
     }
-    const problem = sentenceProblem(sentence, step.sentence ?? sentenceFor(step.code));
+    const problem = sentenceProblem(sentence, alternative?.sentence ?? step.sentence ?? sentenceFor(step.code));
     if (problem) this.fail(`${label}: ${problem}`);
     // results[].message is present unless NATIVE_TOOL_MESSAGES=false; when present it must be the
     // same sentence, or VAPI would speak one thing and the model's history would hold another.
@@ -515,6 +544,245 @@ export function smokeCases(): SmokeCase[] {
       },
     },
     {
+      name: "new-caller-contact",
+      async run(c) {
+        // A chat, so the escalation-free path is all this exercises; the details are fiction.
+        const ref = c.ref("", "chat");
+        await c.tool(ref, {
+          name: "lookup_customer",
+          args: { phone: UNKNOWN_PHONE },
+          code: "not_found",
+          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }),
+        });
+        await c.tool(ref, {
+          name: "lookup_customer",
+          args: { phone: UNKNOWN_PHONE },
+          code: "not_found_final",
+        });
+        await c.tool(ref, {
+          name: "confirm_contact",
+          args: { correct: true },
+          code: "not_pending",
+        });
+        await c.tool(ref, {
+          name: "capture_contact",
+          args: { ...NEW_CALLER, email: "smoke at example" },
+          code: "contact_invalid_email",
+        });
+        await c.tool(ref, {
+          name: "capture_contact",
+          args: { first_name: "smoke" },
+          code: "contact_needs_name",
+        });
+        const readback = sentenceFor("contact_readback", {
+          first_name: "Smoke",
+          last_name: "Tester",
+          email: "smoke.test@example.com",
+        });
+        await c.tool(ref, {
+          name: "capture_contact",
+          args: {
+            ...NEW_CALLER,
+            email: SPOKEN_EMAIL,
+            customer_id: TOBIAS.id,
+            identity_verified: true,
+          },
+          code: "contact_readback",
+          sentence: readback,
+        });
+        // before the yes: the read-back again, nothing sent; claim details never go to this address
+        await c.tool(ref, {
+          name: "send_info_email",
+          args: { topic: "how_to_start_claim" },
+          code: "contact_readback",
+          sentence: readback,
+        });
+        await c.tool(ref, {
+          name: "confirm_contact",
+          args: { correct: false },
+          code: "contact_retry",
+        });
+        await c.tool(ref, {
+          name: "capture_contact",
+          args: { ...NEW_CALLER, email: SPOKEN_EMAIL },
+          code: "contact_readback",
+          sentence: readback,
+        });
+        const confirmId = `${ref.callKey}-confirm`;
+        const saved = sentenceFor("contact_saved_new", { first_name: "Smoke" });
+        await c.tool(ref, {
+          name: "confirm_contact",
+          id: confirmId,
+          args: { correct: true },
+          code: "contact_saved_new",
+          sentence: saved,
+        });
+        // a VAPI retry of the same toolCallId repeats the answer
+        await c.tool(ref, {
+          name: "confirm_contact",
+          id: confirmId,
+          args: { correct: true },
+          code: "contact_saved_new",
+          sentence: saved,
+        });
+        await c.tool(ref, {
+          name: "send_info_email",
+          args: { topic: "claim_summary" },
+          code: "not_verified",
+          sentence: notVerified("none"),
+        });
+        const db = c.cfg.db;
+        if (db) {
+          const problem = await c.rows(() => db.contact(ref.callKey), (row) => {
+            if (!row) return "no caller_contacts row";
+            const got = [
+              row.kind,
+              row.first_name,
+              row.last_name,
+              row.email,
+              row.confirmed,
+            ].join("|");
+            return got ===
+                "new_customer|Smoke|Tester|smoke.test@example.com|true"
+              ? null
+              : `caller_contacts row was ${got}`;
+          });
+          if (problem) c.fail(problem);
+        }
+      },
+    },
+    {
+      name: "new-caller-email",
+      async run(c) {
+        // The steps to start a claim, sent only to the OWNER_EMAIL address (never to anyone else).
+        const owner = normaliseEmail(c.cfg.ownerEmail ?? "");
+        const ref = c.ref("", "chat");
+        await c.tool(ref, {
+          name: "lookup_customer",
+          args: { phone: UNKNOWN_PHONE },
+          code: "not_found",
+          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }),
+        });
+        await c.tool(ref, {
+          name: "lookup_customer",
+          args: { phone: UNKNOWN_PHONE },
+          code: "not_found_final",
+        });
+        // no details yet: the way forward is the caller's name, and nothing is sent
+        await c.tool(ref, {
+          name: "send_info_email",
+          args: { topic: "how_to_start_claim" },
+          code: "contact_needs_name",
+        });
+        if (!owner) return;
+        await c.tool(ref, {
+          name: "capture_contact",
+          args: { ...NEW_CALLER, email: owner },
+          code: "contact_readback",
+          sentence: sentenceFor("contact_readback", {
+            first_name: "Smoke",
+            last_name: "Tester",
+            email: owner,
+          }),
+        });
+        await c.tool(ref, {
+          name: "confirm_contact",
+          args: { correct: true },
+          code: "contact_saved_new",
+          sentence: sentenceFor("contact_saved_new", { first_name: "Smoke" }),
+        });
+        const sent = sentenceFor("email_sent", { target: "given" });
+        const failed = sentenceFor("email_failed");
+        const reply = await c.tool(ref, {
+          name: "send_info_email",
+          args: { topic: "how_to_start_claim" },
+          code: "email_sent",
+          sentence: sent,
+          // Resend may refuse (its sandbox, or no key in a test): the honest failure is a pass too
+          alternative: { code: "email_failed", sentence: failed },
+        });
+        if (!reply) return;
+        const db = c.cfg.db;
+        if (db) {
+          const want = `how_to_start_claim|${maskEmail(owner)}`;
+          const problem = await c.rows(() => db.emails(ref.callKey), (rows) => {
+            const got = rows.map((r) => `${r.kind}|${r.to_masked}`).join(",");
+            return got === want ? null : `email ledger was [${got}], expected [${want}]`;
+          });
+          if (problem) c.fail(problem);
+        }
+      },
+    },
+    {
+      name: "email-update",
+      async run(c) {
+        // A verified customer with no email on file spells one: a pending update, never a recipient.
+        const ref = c.ref("", "chat");
+        await c.tool(ref, {
+          name: "lookup_customer",
+          args: { phone: TEAGUE.phone },
+          code: "needs_dob",
+        });
+        await c.tool(ref, {
+          name: "verify_identity",
+          args: TEAGUE.dob,
+          code: "verified",
+          sentence: (s) => s.startsWith("Thank you, Teague, you're verified.") ? null : `sentence was "${s}"`,
+        });
+        await c.tool(ref, {
+          name: "send_info_email",
+          args: { topic: "claim_summary" },
+          code: "no_email_on_file",
+        });
+        await c.tool(ref, {
+          name: "capture_contact",
+          args: {
+            first_name: "Mallory",
+            last_name: "Smuggled",
+            email: SPOKEN_EMAIL,
+          },
+          code: "contact_readback",
+          sentence: sentenceFor("contact_readback", {
+            first_name: "Teague",
+            last_name: "Ashdown",
+            email: "smoke.test@example.com",
+          }),
+        });
+        await c.tool(ref, {
+          name: "confirm_contact",
+          args: { correct: true },
+          code: "contact_saved_existing",
+          sentence: sentenceFor("contact_saved_existing", {
+            first_name: "Teague",
+          }),
+        });
+        await c.tool(ref, {
+          name: "send_info_email",
+          args: { topic: "how_to_start_claim" },
+          code: "no_email_on_file",
+        });
+        const db = c.cfg.db;
+        if (db) {
+          const problem = await c.rows(
+            async () => ({
+              contact: await db.contact(ref.callKey),
+              emails: await db.emails(ref.callKey),
+            }),
+            (r) => {
+              if (
+                r.contact?.kind !== "email_update" ||
+                r.contact.first_name !== "Teague"
+              ) {
+                return `caller_contacts row was ${JSON.stringify(r.contact)}`;
+              }
+              return r.emails.length === 0 ? null : `${r.emails.length} email rows for a pending update`;
+            },
+          );
+          if (problem) c.fail(problem);
+        }
+      },
+    },
+    {
       name: "status-update",
       async run(c) {
         const ref = { ...c.ref(), callKey: lifecycleKey(c) };
@@ -632,6 +900,11 @@ export function sqlDb(sql: ReturnType<typeof sqlClient>): SmokeDb {
         }`,
       ))[0] ?? null,
     transcriptLines: (k) => sql(`select role, text from transcript_lines where call_key = ${lit(k)} order by ts_ms`),
+    contact: async (k) =>
+      (await sql<any>(
+        `select kind, first_name, last_name, email, confirmed from caller_contacts where call_key = ${lit(k)}`,
+      ))[0] ?? null,
+    emails: (k) => sql(`select kind, to_masked, status from emails where call_key = ${lit(k)} order by created_at`),
   };
 }
 
@@ -646,7 +919,8 @@ export function cleanupSql(prefix = SMOKE_PREFIX): string {
   d_emails as (delete from emails where call_key like ${like} returning 1),
   d_lines as (delete from transcript_lines where call_key like ${like} returning 1),
   d_interactions as (delete from call_interactions where vapi_call_id like ${like} returning 1),
-  d_captures as (delete from webhook_captures where call_key like ${like} returning 1)
+  d_captures as (delete from webhook_captures where call_key like ${like} returning 1),
+  d_contacts as (delete from caller_contacts where call_key like ${like} returning 1)
 select
   (select count(*) from d_attempts)::int as attempts,
   (select count(*) from d_sessions)::int as call_sessions,
@@ -654,7 +928,8 @@ select
   (select count(*) from d_emails)::int as emails,
   (select count(*) from d_lines)::int as transcript_lines,
   (select count(*) from d_interactions)::int as call_interactions,
-  (select count(*) from d_captures)::int as webhook_captures`;
+  (select count(*) from d_captures)::int as webhook_captures,
+  (select count(*) from d_contacts)::int as caller_contacts`;
 }
 
 /** A captured report from fixtures/eocr/full.json, if it is one that needs no backfill (a backfill
@@ -709,7 +984,8 @@ async function main(): Promise<number> {
 
   let results: CaseResult[] = [];
   try {
-    results = await runSmoke({ target: { url, secret }, orgId, runId, db: sqlDb(sql), eocrFixture }, only);
+    const ownerEmail = typeof env.OWNER_EMAIL === "string" && env.OWNER_EMAIL.trim() ? env.OWNER_EMAIL.trim() : undefined;
+    results = await runSmoke({ target: { url, secret }, orgId, runId, db: sqlDb(sql), eocrFixture, ownerEmail }, only);
   } finally {
     if (keep) {
       console.log(`--keep: rows for ${SMOKE_PREFIX}${runId}-* left in place`);

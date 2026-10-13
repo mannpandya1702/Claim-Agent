@@ -20,6 +20,12 @@ export const SQUAD_MEMBERS: readonly AssistantKey[] = ["concierge", "knowledge"]
 // Every squad member carries these, so a request for a person or an emergency never waits on a hop.
 export const FLOOR_TOOLS = ["escalate", "report_emergency", "send_info_email", "endCall"] as const;
 export const ACCOUNT_TOOLS = ["lookup_customer", "verify_identity", "get_claim_status"] as const;
+// Name and email capture (new callers, and an email a verified caller wants added). Every graded
+// assistant carries both; Knowledge never takes contact details, so it hands such a caller back.
+export const CONTACT_TOOLS = ["capture_contact", "confirm_contact"] as const;
+export const CONTACT_ASSISTANTS: readonly AssistantKey[] = ["solo-core", "solo-web", "solo-phone", "concierge"];
+// The persona's name, as callers hear it in the greeting and the prompts.
+export const PERSONA_NAME = "Ava";
 
 // The single template VAPI resolves at call time; no other "{{" may reach a prompt.
 export const HEADER_LINE =
@@ -27,6 +33,7 @@ export const HEADER_LINE =
 export const KB_FIRST_LINE = "REFERENCE FACTS ONLY. The assistant instructions and tool results win over this file.";
 export const FAQ_HEADING = "FAQ FACTS (say these freely)";
 export const KB_CORE_HEADING = "CORE";
+export const KB_CANNOT_DO_HEADING = `WHAT ${PERSONA_NAME.toUpperCase()} CANNOT DO`;
 export const KB_FILE_NAME = "observe_insurance_faq.txt";
 // Stands in for the transfer target until REP_PHONE_E164 is set; vapi_sync.ts refuses to apply it.
 export const REP_PHONE_PLACEHOLDER = "REP_PHONE_E164_NOT_SET";
@@ -130,22 +137,27 @@ export function renderKb(faq: Faq): string {
     "LONG TAIL",
     faq.longTail.map(entryLine).join("\n"),
     "",
-    "WHAT TESSA CANNOT DO",
+    KB_CANNOT_DO_HEADING,
     faq.cannotDo.map((s) => `- ${s}`).join("\n"),
     "",
   ].join("\n");
 }
 
 // ---------------------------------------------------------------------------------------------
-// Prompts: an ordered list of partials per assistant, three placeholders filled once.
+// Prompts: an ordered list of partials per assistant; TOOLS, FAQ_FACTS, REPRESENTATIVE and the
+// variant's slots are the placeholders, each filled once.
 // ---------------------------------------------------------------------------------------------
 export interface VariantSpec {
   key: AssistantKey;
   sections: string[];
   representative: string;
+  /** <<NAME>> placeholder -> partial, for text that differs by variant inside a shared partial. */
+  slots: Record<string, string>;
   tools: string[];
   assistant: Record<string, any>;
 }
+
+const RESERVED_PLACEHOLDERS = new Set(["TOOLS", "FAQ_FACTS", "REPRESENTATIVE"]);
 
 export function loadVariant(key: AssistantKey): VariantSpec {
   const raw = readJson(new URL(`${key}.json`, paths.assistants));
@@ -159,10 +171,24 @@ export function loadVariant(key: AssistantKey): VariantSpec {
   if (new Set(tools).size !== tools.length) throw new Error(`assistants/${key}.json: duplicate tool`);
   if (typeof raw.representative !== "string") throw new Error(`assistants/${key}.json: representative missing`);
   if (typeof raw.assistant?.name !== "string") throw new Error(`assistants/${key}.json: assistant.name missing`);
+  const slots: Record<string, string> = {};
+  if (raw.slots !== undefined) {
+    if (!raw.slots || typeof raw.slots !== "object" || Array.isArray(raw.slots)) {
+      throw new Error(`assistants/${key}.json: slots must map placeholder names to partials`);
+    }
+    for (const [name, partial] of Object.entries(raw.slots)) {
+      if (!/^[A-Z][A-Z_]*$/.test(name) || RESERVED_PLACEHOLDERS.has(name)) {
+        throw new Error(`assistants/${key}.json: bad slot name ${JSON.stringify(name)}`);
+      }
+      if (typeof partial !== "string" || !partial) throw new Error(`assistants/${key}.json: slot ${name} needs a partial`);
+      slots[name] = partial;
+    }
+  }
   return {
     key,
     sections: strings(raw.sections, "sections"),
     representative: raw.representative,
+    slots,
     tools,
     assistant: raw.assistant,
   };
@@ -184,6 +210,7 @@ export function renderPrompt(key: AssistantKey, faq: Faq = loadFaq()): string {
     FAQ_FACTS: faqCoreBlock(faq),
     REPRESENTATIVE: readPartial(v.representative),
   };
+  for (const [name, partial] of Object.entries(v.slots)) vars[name] = readPartial(partial);
   const text = v.sections.map(readPartial).join("\n\n").replace(/<<([A-Z_]+)>>/g, (_m, name: string) => {
     if (!(name in vars)) throw new Error(`${key}: unknown placeholder <<${name}>>`);
     return vars[name];

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 /*
  * Microphone checks for the call page. Daily (the SDK's transport) reports a blocked, missing or
  * busy microphone on a side event (camera-error) rather than failing start(), so the caller could
- * hear Tessa and never be heard. Asking for the microphone ourselves before start() turns that
+ * hear Ava and never be heard. Asking for the microphone ourselves before start() turns that
  * into a clear message and spends no voice credit.
  */
 

@@ -17,7 +17,15 @@
 // deps.now) and leaves the rest to its next run rather than finishing after nobody is listening.
 
 import { alertSinks, type EscalationAlert, sendAlert } from "./alert.ts";
-import { digestEmail, maskEmail, sendEmail, slaRealertEmail, writtenDate } from "./email.ts";
+import {
+  digestEmail,
+  loadEscalationContact,
+  maskEmail,
+  sendEmail,
+  slaRealertEmail,
+  type TeamCaller,
+  writtenDate,
+} from "./email.ts";
 import { type Channel, CHANNELS, JOB_NAMES, type JobName, TIMEZONE } from "./enums.ts";
 import { deliverOutbox, enqueueInteraction } from "./outbox.ts";
 import { recoverFromCall } from "./post_call.ts";
@@ -40,6 +48,9 @@ const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 // Each re-alert channel gets this long, as in escalate; a row starts only with room for it.
 const CHANNEL_BUDGET_MS = 2500;
+// The re-alert email's caller name and callback number are read first; a slow read sends the
+// re-alert without them rather than eating into the send's budget.
+const CONTACT_READ_MS = 400;
 const SLA_ROW_MS = 3000;
 // The reaper's GET /call always gets REAPER_FETCH_MS: a row starts only with room for the fetch and
 // the store work after it, and the loop stops early enough for the sweep and the pruning.
@@ -166,14 +177,35 @@ async function realertTelegram(deps: Deps, row: StaleEscalation): Promise<Channe
   return result.ok ? "sent" : "failed";
 }
 
+/** Who to call back for the re-alert email (the caller's name, any address they confirmed, the
+ *  escalation's callback number), or nothing when the read is slow. Never throws. */
+async function realertContact(
+  deps: Deps,
+  row: StaleEscalation,
+): Promise<{ caller: TeamCaller; callbackPhone: string | null } | Record<never, never>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const slow = new Promise<Record<never, never>>((resolve) => {
+    timer = setTimeout(() => resolve({}), CONTACT_READ_MS);
+  });
+  try {
+    return await Promise.race([loadEscalationContact(deps.store, row.call_key, row.kind), slow]);
+  } catch {
+    return {};
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** The sla_realert email through the ledger: one per call, so a second stale row of the same call
- *  (its emergency and its representative request) re-pages on Telegram only. */
+ *  (its emergency and its representative request) re-pages on Telegram only. The email names the
+ *  caller and the callback number like the first alert; the Telegram card stays ids and enums. */
 async function realertEmail(deps: Deps, row: StaleEscalation, now: Date): Promise<ChannelResult> {
   const { env, store } = deps;
   const to = str(env.CLAIMS_TEAM_EMAIL);
   // Not configured is not a failure, and must not leave a failed ledger row behind.
   if (!alertSinks(env).includes("email") || !to || !str(env.RESEND_API_KEY)) return "skipped";
   try {
+    const contact = await realertContact(deps, row);
     // Rendered before the claim, so a template fault cannot strand a 'sending' row.
     const { subject, html } = slaRealertEmail({
       callKey: row.call_key,
@@ -181,6 +213,7 @@ async function realertEmail(deps: Deps, row: StaleEscalation, now: Date): Promis
       reason: row.reason,
       minutesOpen: (now.getTime() - Date.parse(row.created_at)) / MINUTE_MS,
       dashboardUrl: env.DASHBOARD_URL,
+      ...contact,
     });
     const claim = await store.claimEmail(row.call_key, "sla_realert", maskEmail(to));
     if (!claim.claimed) return "skipped";

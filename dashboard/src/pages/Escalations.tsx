@@ -35,7 +35,7 @@ const TAB_COPY: Record<QueueTab, { description: string; listLabel: string; empty
     description: "Oldest first. Claim one before calling back so nobody else dials the same caller.",
     listLabel: "Open escalations, oldest first",
     emptyTitle: "No open escalations",
-    emptyText: "Callback requests and emergencies land here the moment Tessa writes them.",
+    emptyText: "Callback requests and emergencies land here the moment Ava writes them.",
   },
   claimed: {
     description: "Being called back. Mark one done once the caller has been reached.",

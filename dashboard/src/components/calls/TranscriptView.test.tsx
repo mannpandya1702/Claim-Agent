@@ -13,7 +13,7 @@ function rendered(): { kind: string; text: string }[] {
 describe("TranscriptView", () => {
   it("renders stored bubbles and tool chips in time order with mm:ss stamps", () => {
     const items = fromStoredMessages([
-      { role: "assistant", text: "Hi, this is Tessa with Observe Insurance.", t: 0.4 },
+      { role: "assistant", text: "Hi, this is Ava with Observe Insurance.", t: 0.4 },
       { role: "user", text: "I want to check my claim.", t: 4 },
       { role: "tool", tool: "verify_identity", code: "verified", t: 31 },
       { role: "tool", tool: "lookup_customer", code: "needs_dob", t: 12 },
@@ -31,13 +31,13 @@ describe("TranscriptView", () => {
     expect(screen.getByRole("region", { name: "Conversation" })).toBeInTheDocument();
   });
 
-  it("labels the speakers: Tessa (with squad member) on one side, the caller on the other", () => {
+  it("labels the speakers: Ava (with squad member) on one side, the caller on the other", () => {
     const items = fromStoredMessages([
       { role: "assistant", text: "Our policy covers that.", t: 1, name: "Knowledge" },
       { role: "user", text: "Thanks.", t: 3 },
     ]);
     render(<TranscriptView items={items} />);
-    expect(screen.getByText("Tessa · Knowledge")).toBeInTheDocument();
+    expect(screen.getByText("Ava · Knowledge")).toBeInTheDocument();
     expect(screen.getByText("Caller")).toBeInTheDocument();
   });
 

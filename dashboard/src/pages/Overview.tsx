@@ -182,7 +182,7 @@ export default function Overview() {
 
   return (
     <>
-      <PageHeader title="Overview" description="How Tessa is handling calls, and what needs a person." />
+      <PageHeader title="Overview" description="How Ava is handling calls, and what needs a person." />
 
       <div role="group" aria-label="Filters" className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-2">
         <DateRangeSelect value={preset} custom={custom} onPreset={setPreset} onCustom={setRange} />

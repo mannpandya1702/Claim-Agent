@@ -23,7 +23,7 @@
         },
         "callback_phone": {
           "type": "string",
-          "description": "Only when the caller just gave a number to be called back on: the ten digits they said, digits only."
+          "description": "Only when the caller just gave a number to be called back on, or a new caller gave one with their details: the ten digits they said, digits only."
         }
       },
       "required": [
@@ -41,12 +41,12 @@
     {
       "type": "request-start",
       "blocking": false,
-      "content": "Let me flag that for the team."
+      "content": "Of course. Let me get that to our team."
     },
     {
       "type": "request-response-delayed",
       "timingMilliseconds": 3000,
-      "content": "Still working on that, one moment."
+      "content": "Thanks for bearing with me, almost there."
     },
     {
       "type": "request-failed",

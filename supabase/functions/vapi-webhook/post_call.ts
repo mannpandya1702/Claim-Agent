@@ -12,9 +12,10 @@
 
 import { airtableConfigured } from "./airtable.ts";
 import { alertSinks, type EscalationAlert, sendAlert } from "./alert.ts";
-import { callbackRequestEmail, maskEmail, sendEmail } from "./email.ts";
+import { callbackRequestEmail, maskEmail, sendEmail, type TeamCaller, teamCallerOf, UNKNOWN_TEAM_CALLER } from "./email.ts";
 import {
   ANALYSIS_OUTCOMES,
+  type CallerType,
   type Channel,
   CHANNELS,
   CODES,
@@ -25,12 +26,25 @@ import {
   SENTIMENTS,
 } from "./enums.ts";
 import { computeFlags } from "./flags.ts";
-import { callerIdNumber } from "./identity.ts";
+import { callerIdNumber, usableCallbackNumber } from "./identity.ts";
 import { deliverSoon, enqueueInteraction } from "./outbox.ts";
 import type { CallFacts } from "./post_call_facts.ts";
 import { asksForSensitive, MASKED_ANSWER, redactDeep, redactPII } from "./redact.ts";
 import type { StoreExtras } from "./store.ts";
-import type { AttemptRow, Deps, Env, InteractionRow, Session, Store, VapiMessage } from "./types.ts";
+import type {
+  AttemptRow,
+  CallerContact,
+  Customer,
+  Deps,
+  Env,
+  InteractionRow,
+  Session,
+  Store,
+  VapiMessage,
+} from "./types.ts";
+
+/** The server facts plus the call's captured contact (caller_contacts), when the caller gave one. */
+export type PostCallFacts = CallFacts & { contact?: CallerContact | null };
 
 /** Backfill schedule: GET /call/{id} this many ms apart until the analysis shows up. */
 export const BACKFILL_DELAYS_MS: readonly number[] = [5000, 15000, 45000];
@@ -434,10 +448,17 @@ function serverOutcome(facts: CallFacts, escalatedByTransfer: boolean, everVerif
   return null;
 }
 
+/** existing: the session reached an account (a lookup hit, verified or locked after it); new: the
+ *  caller gave their details as a new customer; otherwise unknown. */
+function callerTypeOf(session: Session | null, attempts: AttemptRow[], contact: CallerContact | null): CallerType {
+  if ((session?.level ?? "none") !== "none" || attempts.some((a) => a.kind === "lookup_hit")) return "existing";
+  return contact?.kind === "new_customer" ? "new" : "unknown";
+}
+
 /** Pure: the interaction row from an end-of-call-report plus server facts. */
 export function buildInteractionRow(
   message: VapiMessage,
-  facts: CallFacts,
+  facts: PostCallFacts,
   ownNumberList: string[] = [],
 ): InteractionRow {
   const call = obj(message.call);
@@ -455,10 +476,18 @@ export function buildInteractionRow(
   // A name the caller gave is a claim, not an identity; next to an unverified account match it
   // would most likely be that account holder's name.
   const candidateUnverified = !customer && session?.candidate_customer_id != null;
+  const contact = facts.contact ?? null;
+  // The name the caller gave and confirmed on the read-back comes before the analysis' guess, under
+  // the same guard: never next to an account the caller did not verify.
+  const confirmed = contact?.confirmed === true ? contact : null;
+  const capturedName = confirmed && !candidateUnverified
+    ? `${confirmed.first_name} ${confirmed.last_name}`.replace(/\s+/g, " ").trim() || null
+    : null;
   const givenName = candidateUnverified ? null : structuredCallerName(message);
   const callerName = customer
     ? `${customer.first_name} ${customer.last_name}`.trim() || UNKNOWN_CALLER
-    : givenName ?? UNKNOWN_CALLER;
+    : capturedName ?? givenName ?? UNKNOWN_CALLER;
+  const callerId = callerIdNumber(obj(call.customer).number ?? obj(message.customer).number, ownNumberList);
 
   const summaryText = str(analysis.summary) ?? str(message.summary);
   const summary = summaryText ? redactPII(summaryText) : null;
@@ -483,8 +512,10 @@ export function buildInteractionRow(
     channel: str(call.type),
     customer_id: customer?.id ?? null,
     caller_name: callerName,
-    caller_phone: customer?.phone_e164 ??
-      callerIdNumber(obj(call.customer).number ?? obj(message.customer).number, ownNumberList),
+    // A new caller on the web has no caller id: the number they gave with their details stands in,
+    // under the same guard as the name (never next to an account the caller did not verify).
+    caller_phone: customer?.phone_e164 ?? callerId ??
+      (contact?.kind === "new_customer" && !candidateUnverified ? contact.callback_phone ?? null : null),
     summary,
     sentiment: sentiment?.sentiment ?? null,
     sentiment_source: sentiment?.source ?? null,
@@ -515,23 +546,28 @@ export function buildInteractionRow(
     cost_breakdown: costBreakdownOf(message),
     assistant_name: assistantName,
     analysis_status: summary && sentiment ? "ok" : "pending",
+    caller_type: callerTypeOf(session, attempts, contact),
+    // Only an address the caller confirmed, and never next to an account the caller did not verify
+    // (the name's guard); the account's own email never lands in the call record.
+    caller_email: confirmed && !candidateUnverified ? confirmed.email ?? null : null,
   };
 }
 
 // ---------------------------------------------------------------------------------------------
 // end-of-call-report.
 // ---------------------------------------------------------------------------------------------
-async function readCallFacts(store: Store, callKey: string): Promise<CallFacts> {
-  const [session, attempts, escalations, emails] = await Promise.all([
+async function readCallFacts(store: Store, callKey: string): Promise<PostCallFacts> {
+  const [session, attempts, escalations, emails, contact] = await Promise.all([
     store.getSession(callKey),
     store.listAttempts(callKey),
     store.listEscalations(callKey),
     store.listEmails(callKey),
+    store.getContact(callKey),
   ]);
   const verifiedCustomer = session?.level === "verified" && session.verified_customer_id
     ? await store.getCustomer(session.verified_customer_id)
     : null;
-  return { session, verifiedCustomer, attempts, escalations, emails };
+  return { session, verifiedCustomer, attempts, escalations, emails, contact };
 }
 
 /** The report's analysis inputs with the fetched call's filling the gaps. The report stays the
@@ -606,7 +642,7 @@ async function interactionEnded(store: Store, callKey: string): Promise<boolean>
 async function backfill(
   deps: Deps,
   message: VapiMessage,
-  facts: CallFacts,
+  facts: PostCallFacts,
   own: string[],
   privateKey: string,
   delays: readonly number[],
@@ -891,19 +927,43 @@ async function teamEmailDelivery(
   }
 }
 
+/** Who the transfer's team email names: the verified account holder, else the confirmed captured
+ *  caller (the contact already read for the callback number). A failed read costs the name only. */
+async function forwardingCaller(
+  deps: Deps,
+  callKey: string,
+  session: Session | null,
+  contact: CallerContact | null,
+): Promise<TeamCaller> {
+  const customerId = session?.level === "verified" ? session.verified_customer_id : null;
+  const customer = customerId
+    ? await readOr<Customer | null>(deps, callKey, "getCustomer", () => deps.store.getCustomer(customerId), null)
+    : null;
+  return teamCallerOf(customer, contact);
+}
+
 /** A phone transfer started: the escalation row first, then Telegram and the team email in
  *  parallel. A repeat (redelivery, or escalate already ran) never alerts twice. */
 async function onForwarding(message: VapiMessage, deps: Deps, callKey: string): Promise<void> {
   const { store, env } = deps;
   const channel = channelOf(message);
-  const callerNumber = callerNumberOf(message, ownNumbers(env));
-  const [session, attempts] = await Promise.all([
+  const own = ownNumbers(env);
+  const callerNumber = callerNumberOf(message, own);
+  const [session, attempts, contact] = await Promise.all([
     readOr<Session | null>(deps, callKey, "getSession", () => store.getSession(callKey), null),
     readOr<AttemptRow[]>(deps, callKey, "listAttempts", () => store.listAttempts(callKey), []),
+    // Best effort: without the row the transfer falls back to the caller id, as before contacts.
+    typeof store?.getContact === "function"
+      ? readOr<CallerContact | null>(deps, callKey, "getContact", () => store.getContact(callKey), null)
+      : Promise.resolve(null),
   ]);
   const level: Level = session?.level ?? "none";
   const verified = level === "verified";
   const reason = forwardingReason(level, attempts);
+  // A number the caller said with their details beats the caller id they may have said not to use
+  // ("Is the number you're calling from the best one?" "No, it's ..."), as in escalate.
+  const captured = contact?.callback_source === "argument" ? usableCallbackNumber(contact.callback_phone, own) : null;
+  const callbackPhone = captured ?? callerNumber;
 
   // upsert_escalation merges every non-null value into an existing row, so this first write
   // carries nothing to merge: a row escalate already wrote keeps the number and the details the
@@ -912,12 +972,12 @@ async function onForwarding(message: VapiMessage, deps: Deps, callKey: string): 
   const row = await store.upsertEscalation({ ...base, details: null, callbackPhone: null, callbackSource: "none" });
   if (!row.inserted) return;
   try {
-    // The row is this transfer's own, so the server's words and the caller id go on it.
+    // The row is this transfer's own, so the server's words and the callback number go on it.
     await store.upsertEscalation({
       ...base,
       details: FORWARDING_DETAILS,
-      callbackPhone: callerNumber,
-      callbackSource: callerNumber ? "caller_id" : "none",
+      callbackPhone,
+      callbackSource: captured ? "argument" : callerNumber ? "caller_id" : "none",
     });
   } catch (e) {
     // The alert still goes out; a 5xx would find the row on redelivery and never send it.
@@ -926,15 +986,20 @@ async function onForwarding(message: VapiMessage, deps: Deps, callKey: string): 
 
   const alert: EscalationAlert = { kind: "representative", reason, callKey, channel, verified };
   const timedOut = (): Delivery => ({ ok: false, error: "timeout" });
+  // Best effort: a failed read shows an unknown caller and never holds the alert back.
+  const caller = await withinBudget(forwardingCaller(deps, callKey, session, contact), CHANNEL_BUDGET_MS, () => ({
+    ...UNKNOWN_TEAM_CALLER,
+  }));
   const email = teamEmailDelivery(deps, callKey, () =>
     callbackRequestEmail({
       callKey,
       reason,
       verified,
-      callbackPhone: callerNumber,
+      callbackPhone,
       details: FORWARDING_DETAILS,
       channel,
       dashboardUrl: env.DASHBOARD_URL,
+      caller,
     }));
   // The ledger write-back after a slow send must still land after the budget gives up waiting.
   keepAlive(deps, email);

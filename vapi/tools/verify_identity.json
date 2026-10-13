@@ -34,12 +34,12 @@
     {
       "type": "request-start",
       "blocking": false,
-      "content": "Let me verify that."
+      "content": "Okay, let me check that."
     },
     {
       "type": "request-response-delayed",
       "timingMilliseconds": 3000,
-      "content": "Still checking, thanks for waiting."
+      "content": "Thanks for bearing with me, almost there."
     },
     {
       "type": "request-failed",

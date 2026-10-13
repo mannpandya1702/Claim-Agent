@@ -331,6 +331,49 @@ Deno.test("sla: failed channels still mark the row, and the failures are counted
   assertEquals(h.calls.length, 2, "never re-alerted a second time");
 });
 
+Deno.test("sla: the re-alert email names the caller and the callback number; the Telegram card does not", async () => {
+  const h = harness();
+  await h.store.ensureSession(CALL_A, "inboundPhoneCall", null);
+  await escalation(h.store, CALL_A, { minutesAgo: 31 });
+  await h.store.upsertContact({
+    callKey: CALL_A,
+    kind: "new_customer",
+    firstName: "Jane",
+    lastName: "Doe",
+    email: "jane.doe@gmail.com",
+    callbackPhone: "+16025550177",
+    callbackSource: "argument",
+    customerId: null,
+  });
+  await h.store.setContactConfirmed(CALL_A, true);
+  const out = await runJob("sla", h.deps);
+  assert(!out.skipped);
+  assertEquals([out.result.telegram_sent, out.result.email_sent], [1, 1]);
+
+  const email = JSON.parse(String(h.calls.find((c) => c.host === "api.resend.com")!.init.body));
+  assertStringIncludes(email.html, "Jane Doe (caller-provided, unverified)");
+  assertStringIncludes(email.html, "Email (caller-provided, unverified)");
+  assertStringIncludes(email.html, "jane.doe@gmail.com");
+  // the escalation row's own number, the one staff are asked to call
+  assertStringIncludes(email.html, "(602) 555-0101 (+16025550101)");
+
+  const card = JSON.parse(String(h.calls.find((c) => c.host === "api.telegram.org")!.init.body)).text as string;
+  assertFalse(/Jane|Doe|jane\.doe|555|0101|0177/.test(card), "no name, address or number on the card");
+});
+
+Deno.test("sla: a failed contact read still sends the re-alert, without the caller rows", async () => {
+  const h = harness();
+  await escalation(h.store, CALL_A, { minutesAgo: 31 });
+  h.store.failNext("listEscalations");
+  const out = await runJob("sla", h.deps);
+  assert(!out.skipped);
+  assertEquals([out.result.realerted, out.result.email_sent, out.result.errors], [1, 1, 0]);
+  const email = JSON.parse(String(h.calls.find((c) => c.host === "api.resend.com")!.init.body));
+  assertStringIncludes(email.subject, "Still unclaimed after 31 minutes");
+  assertStringIncludes(email.html, "Unknown caller");
+  assertStringIncludes(email.html, "None known (check the dashboard)");
+});
+
 Deno.test("sla: channels switched off or not configured are skipped without a request or a ledger row", async () => {
   const h = harness({ env: { ALERT_SINKS: "telegram" } });
   const row = await escalation(h.store, CALL_A, { minutesAgo: 31 });
@@ -577,9 +620,9 @@ function endedCall(callKey: string) {
       structuredData: { sentiment: "neutral", outcome: "escalated" },
     },
     artifact: {
-      transcript: "AI: Hi, this is Tessa.\nUser: I need a person, my number is 602 555 0101.",
+      transcript: "AI: Hi, this is Ava.\nUser: I need a person, my number is 602 555 0101.",
       messages: [
-        { role: "bot", message: "Hi, this is Tessa.", secondsFromStart: 0 },
+        { role: "bot", message: "Hi, this is Ava.", secondsFromStart: 0 },
         { role: "user", message: "I need a person, my number is 602 555 0101.", secondsFromStart: 3 },
       ],
     },
@@ -594,7 +637,7 @@ Deno.test("reaper: a stuck call is rebuilt from GET /call before anything is aba
   await interaction(h.store, CALL_A, { createdAgo: 3 * HOUR });
   await escalation(h.store, CALL_A, { minutesAgo: 170 });
   h.store.tables.escalations[0].alert_status = "pending";
-  await h.store.insertTranscriptLine({ call_key: CALL_A, role: "assistant", text: "Hi, this is Tessa.", ts_ms: 1 });
+  await h.store.insertTranscriptLine({ call_key: CALL_A, role: "assistant", text: "Hi, this is Ava.", ts_ms: 1 });
 
   const out = await runJob("reaper", h.deps);
   assert(!out.skipped);
@@ -678,7 +721,7 @@ Deno.test("reaper: a VAPI outage, rate limit or timeout leaves the call open; th
   const h = harness({ env: { ...FULL_ENV, VAPI_PRIVATE_KEY: PRIVATE_KEY }, vapi: (url, init) => vapi(url, init) });
   for (const [i, key] of [CALL_A, CALL_B, CALL_C].entries()) {
     await interaction(h.store, key, { createdAgo: (3 + i) * HOUR });
-    await h.store.insertTranscriptLine({ call_key: key, role: "assistant", text: "Hi, this is Tessa.", ts_ms: 1 });
+    await h.store.insertTranscriptLine({ call_key: key, role: "assistant", text: "Hi, this is Ava.", ts_ms: 1 });
   }
   const before = structuredClone(h.store.tables.call_interactions);
 
@@ -735,7 +778,7 @@ Deno.test("reaper: a row starts only with room for the whole GET /call; the rest
 Deno.test("reaper: a reaped call keeps its live lines, its only transcript, until the 7-day sweep", async () => {
   const h = harness({ env: { ...FULL_ENV, VAPI_PRIVATE_KEY: PRIVATE_KEY } }); // VAPI answers 404
   const row = await interaction(h.store, CALL_A, { createdAgo: 3 * HOUR });
-  await h.store.insertTranscriptLine({ call_key: CALL_A, role: "assistant", text: "Hi, this is Tessa.", ts_ms: 1 });
+  await h.store.insertTranscriptLine({ call_key: CALL_A, role: "assistant", text: "Hi, this is Ava.", ts_ms: 1 });
   await h.store.insertTranscriptLine({ call_key: CALL_A, role: "user", text: "I need help with a claim.", ts_ms: 2 });
   const out = await runJob("reaper", h.deps);
   assert(!out.skipped);
@@ -764,7 +807,7 @@ Deno.test("reaper: a call rebuilt without messages keeps its live lines; one reb
   });
   for (const key of [CALL_A, CALL_B]) {
     await interaction(h.store, key, { createdAgo: 3 * HOUR });
-    await h.store.insertTranscriptLine({ call_key: key, role: "assistant", text: "Hi, this is Tessa.", ts_ms: 1 });
+    await h.store.insertTranscriptLine({ call_key: key, role: "assistant", text: "Hi, this is Ava.", ts_ms: 1 });
   }
   const out = await runJob("reaper", h.deps);
   assert(!out.skipped);

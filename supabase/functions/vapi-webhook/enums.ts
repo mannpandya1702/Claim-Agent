@@ -42,6 +42,20 @@ export type EscalationReason = typeof ESCALATION_REASONS[number];
 export const CALLBACK_SOURCES = ["argument", "account", "caller_id", "none"] as const;
 export type CallbackSource = typeof CALLBACK_SOURCES[number];
 
+// caller_contacts (0006_contacts.sql). new_customer: a caller with no account gave their details;
+// email_update: a verified customer spelled an email for staff to add (never used to send to).
+export const CONTACT_KINDS = ["new_customer", "email_update"] as const;
+export type ContactKind = typeof CONTACT_KINDS[number];
+
+// Where a captured callback number came from: said by the caller, or the call's caller id.
+export const CONTACT_CALLBACK_SOURCES = ["argument", "caller_id", "none"] as const;
+export type ContactCallbackSource = typeof CONTACT_CALLBACK_SOURCES[number];
+
+// call_interactions.caller_type: existing (the session matched an account), new (a new_customer
+// contact was captured), else unknown.
+export const CALLER_TYPES = ["existing", "new", "unknown"] as const;
+export type CallerType = typeof CALLER_TYPES[number];
+
 export const ALERT_STATUSES = ["pending", "sent", "failed", "skipped"] as const;
 export type AlertStatus = typeof ALERT_STATUSES[number];
 
@@ -105,6 +119,8 @@ export const SERVER_TOOLS = [
   "escalate",
   "report_emergency",
   "send_info_email",
+  "capture_contact",
+  "confirm_contact",
 ] as const;
 export type ServerTool = typeof SERVER_TOOLS[number];
 
@@ -145,6 +161,17 @@ export const CODES = [
   "email_already_sent",
   "no_email_on_file",
   "email_failed",
+  // capture_contact
+  "contact_readback",
+  "contact_invalid_email",
+  "contact_needs_name",
+  "contact_needs_phone",
+  "email_on_file",
+  // confirm_contact
+  "not_pending",
+  "contact_retry",
+  "contact_saved_new",
+  "contact_saved_existing",
 ] as const;
 export type Code = typeof CODES[number];
 

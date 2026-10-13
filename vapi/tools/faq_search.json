@@ -12,7 +12,7 @@
     {
       "type": "request-response-delayed",
       "timingMilliseconds": 3000,
-      "content": "Still checking, one moment."
+      "content": "Thanks for bearing with me, almost there."
     },
     {
       "type": "request-failed",

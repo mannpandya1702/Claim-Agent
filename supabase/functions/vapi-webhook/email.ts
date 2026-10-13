@@ -7,7 +7,7 @@
 import { dashboardLink, shortCallId } from "./alert.ts";
 import { CLAIM_TYPES, ESCALATION_REASONS, MAIN_LINE_SPOKEN } from "./enums.ts";
 import { redactPII } from "./redact.ts";
-import type { Claim, Customer, Deps } from "./types.ts";
+import type { CallerContact, Claim, Customer, Deps, Session, Store } from "./types.ts";
 
 export interface EmailMessage {
   to: string;
@@ -236,7 +236,7 @@ function table(rows: [string, string][]): string {
   return `<table cellpadding="0" cellspacing="0" style="border-collapse:collapse">${body.join("")}</table>`;
 }
 
-function greeting(customer: Customer): string {
+function greeting(customer: { first_name?: string | null }): string {
   const name = typeof customer?.first_name === "string" ? customer.first_name.trim() : "";
   return para(name ? `Hello ${escapeHtml(name)},` : "Hello,");
 }
@@ -303,6 +303,91 @@ function claimHeading(c: Claim): string {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Who called, for the team emails. The claims team calls these people back, so the emails carry the
+// name, the full callback number and any address the caller spelled; the Telegram card does not
+// (alert.ts keeps it ids and enums only).
+// ---------------------------------------------------------------------------------------------
+export const UNKNOWN_CALLER_NAME = "Unknown caller";
+export const CALLER_EMAIL_LABEL = "Email (caller-provided, unverified)";
+
+/** The caller as the team emails show them. name: the verified account holder's full name
+ *  (source "account"), else the name the caller gave and confirmed (source "caller"), else null.
+ *  email: the address the caller spelled and confirmed on this call; never the one on the account. */
+export interface TeamCaller {
+  name: string | null;
+  nameSource: "account" | "caller" | null;
+  email: string | null;
+}
+
+export const UNKNOWN_TEAM_CALLER: TeamCaller = { name: null, nameSource: null, email: null };
+
+/** Pure: the verified customer (only for a verified session) and the call's caller_contacts row. An
+ *  unconfirmed capture contributes nothing: what the caller said "no" to is not passed on. */
+export function teamCallerOf(
+  verified: Pick<Customer, "first_name" | "last_name"> | null,
+  contact: CallerContact | null,
+): TeamCaller {
+  const confirmed = contact?.confirmed === true ? contact : null;
+  const email = typeof confirmed?.email === "string" && confirmed.email.trim() ? confirmed.email.trim() : null;
+  const accountName = verified ? `${verified.first_name ?? ""} ${verified.last_name ?? ""}`.replace(/\s+/g, " ").trim() : "";
+  if (accountName) return { name: accountName, nameSource: "account", email };
+  const given = confirmed ? `${confirmed.first_name} ${confirmed.last_name}`.replace(/\s+/g, " ").trim() : "";
+  return given ? { name: given, nameSource: "caller", email } : { name: null, nameSource: null, email };
+}
+
+/** The call's TeamCaller from the store, for a caller that holds only the call key (the forwarding
+ *  path, the sla job). Best effort: a failed read costs the name, never the alert. */
+export async function loadTeamCaller(store: Store, callKey: string, session: Session | null): Promise<TeamCaller> {
+  const safely = async <T>(read: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await read();
+    } catch {
+      return null;
+    }
+  };
+  const customerId = session?.level === "verified" ? session.verified_customer_id : null;
+  const [customer, contact] = await Promise.all([
+    customerId ? safely(() => store.getCustomer(customerId)) : Promise.resolve(null),
+    typeof store?.getContact === "function" ? safely(() => store.getContact(callKey)) : Promise.resolve(null),
+  ]);
+  return teamCallerOf(customer, contact);
+}
+
+/** Who to call back for one escalation, for a job that holds only its call key and kind (the sla
+ *  re-alert): the TeamCaller and the number on the escalation row. Best effort, never throws. */
+export async function loadEscalationContact(
+  store: Store,
+  callKey: string,
+  kind: string,
+): Promise<{ caller: TeamCaller; callbackPhone: string | null }> {
+  let session: Session | null = null;
+  let callbackPhone: string | null = null;
+  try {
+    const [s, rows] = await Promise.all([store.getSession(callKey), store.listEscalations(callKey)]);
+    session = s;
+    callbackPhone = rows.find((r) => r.kind === kind)?.callback_phone ?? null;
+  } catch {
+    // the re-alert still goes out with what is known
+  }
+  return { caller: await loadTeamCaller(store, callKey, session), callbackPhone };
+}
+
+function callerRows(caller: TeamCaller): [string, string][] {
+  const name = typeof caller.name === "string" && caller.name.trim() ? caller.name.trim() : null;
+  const rows: [string, string][] = [[
+    "Caller name",
+    name === null
+      ? UNKNOWN_CALLER_NAME
+      : caller.nameSource === "caller"
+      ? `${escapeHtml(name)} (caller-provided, unverified)`
+      : escapeHtml(name),
+  ]];
+  const email = typeof caller.email === "string" && caller.email.trim() ? caller.email.trim() : null;
+  if (email) rows.push([CALLER_EMAIL_LABEL, escapeHtml(email)]);
+  return rows;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Team templates.
 // ---------------------------------------------------------------------------------------------
 export function callbackRequestEmail(p: {
@@ -313,6 +398,7 @@ export function callbackRequestEmail(p: {
   details: string | null;
   channel: string;
   dashboardUrl?: string;
+  caller?: TeamCaller; // absent: shown as an unknown caller
 }): { subject: string; html: string } {
   const verified = p.verified === true;
   const details = typeof p.details === "string" && p.details.trim() ? redactPII(p.details) : null;
@@ -324,6 +410,7 @@ export function callbackRequestEmail(p: {
       ["Call id", escapeHtml(p.callKey)],
       ["Reason", escapeHtml(reasonText(p.reason))],
       ["Identity verified", verified ? "Yes" : "No"],
+      ...callerRows(p.caller ?? UNKNOWN_TEAM_CALLER),
       ["Callback number", phone ? escapeHtml(writtenPhone(phone)) : "None given yet (check the dashboard)"],
       ["Channel", escapeHtml(p.channel || "unknown")],
       ["Details (redacted)", details ? textBlock(details) : "None"],
@@ -346,6 +433,7 @@ export function emergencyEmail(p: {
   // optional so a caller without them still gets the core alert.
   verified?: boolean;
   callbackPhone?: string | null;
+  caller?: TeamCaller; // absent: shown as an unknown caller
 }): {
   subject: string;
   html: string;
@@ -362,6 +450,7 @@ export function emergencyEmail(p: {
       ["Call id", escapeHtml(p.callKey)],
       ["Reason", escapeHtml(reasonText("emergency"))],
       ["Identity verified", verified ? "Yes" : "No"],
+      ...callerRows(p.caller ?? UNKNOWN_TEAM_CALLER),
       ["Callback number", phone ? escapeHtml(writtenPhone(phone)) : "None known (check the dashboard)"],
       ["Channel", escapeHtml(p.channel || "unknown")],
       ["Note (redacted)", note ? textBlock(note) : "No note given"],
@@ -380,6 +469,10 @@ export function slaRealertEmail(p: {
   reason: string;
   minutesOpen: number;
   dashboardUrl?: string;
+  // Who to call back. Optional so a caller that has not read them still sends the re-alert; when
+  // given they are shown like the first alert's (loadTeamCaller, escalations.callback_phone).
+  caller?: TeamCaller;
+  callbackPhone?: string | null;
 }): { subject: string; html: string } {
   const minutes = Number.isFinite(p.minutesOpen) ? Math.max(0, Math.round(p.minutesOpen)) : null;
   const kind = asciiLine(p.kind, 40) || "escalation";
@@ -393,6 +486,15 @@ export function slaRealertEmail(p: {
       ["Kind", escapeHtml(kind)],
       ["Reason", escapeHtml(reasonText(p.reason))],
       ["Minutes open", minutes === null ? "Unknown" : String(minutes)],
+      ...(p.caller ? callerRows(p.caller) : []),
+      ...(p.caller || p.callbackPhone !== undefined
+        ? [[
+          "Callback number",
+          typeof p.callbackPhone === "string" && p.callbackPhone.trim()
+            ? escapeHtml(writtenPhone(p.callbackPhone))
+            : "None known (check the dashboard)",
+        ] as [string, string]]
+        : []),
     ]),
     linkLine(dashboardLink(p.dashboardUrl, p.callKey)),
   ];
@@ -543,11 +645,22 @@ export function claimSummaryEmail(p: { customer: Customer; claims: Claim[] }): {
   };
 }
 
-export function howToStartEmail(p: { customer: Customer }): { subject: string; html: string } {
-  const policy = typeof p.customer?.policy_number === "string" ? p.customer.policy_number.trim() : "";
+/** The steps to start a claim. A verified customer's copy names their policy number; a new caller's
+ *  (newCustomer: greeted by the first name they gave, sent to the address they spelled) is generic and
+ *  carries nothing from any account. */
+export function howToStartEmail(p: {
+  customer: { first_name?: string | null; policy_number?: string | null };
+  newCustomer?: boolean;
+}): { subject: string; html: string } {
+  const newCustomer = p.newCustomer === true;
+  const policy = !newCustomer && typeof p.customer?.policy_number === "string" ? p.customer.policy_number.trim() : "";
   const content = [
     greeting(p.customer),
-    para("Here is how to start a new claim, as you asked on your call."),
+    para(
+      newCustomer
+        ? "Thanks for calling Observe Insurance. Here is how to start a new claim, as you asked on your call."
+        : "Here is how to start a new claim, as you asked on your call.",
+    ),
     h2("Three ways to start a claim"),
     list("ul", [
       escapeHtml(`Online at ${CLAIMS_URL}`),
@@ -556,7 +669,9 @@ export function howToStartEmail(p: { customer: Customer }): { subject: string; h
     ]),
     h2("Have this ready"),
     list("ul", [
-      escapeHtml(policy ? `Your policy number: ${policy}` : "Your policy number"),
+      escapeHtml(
+        policy ? `Your policy number: ${policy}` : newCustomer ? "Your policy number, if you have one" : "Your policy number",
+      ),
       escapeHtml("The date of the loss"),
       escapeHtml("A short description of what happened"),
     ]),

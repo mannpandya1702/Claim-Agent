@@ -2,6 +2,7 @@
 // details and live transcript lines. Phone numbers and dates of birth arrive in whatever shape
 // the caller, the ASR or the model produced, so matching is by shape (digit runs in any grouping,
 // spoken digit words, full dates with a birth-plausible year), never by one canonical format.
+// Email addresses likewise: written, or spelled aloud since callers give one by voice (capture_contact).
 
 import { MAIN_LINE_SPOKEN } from "./enums.ts";
 
@@ -244,8 +245,32 @@ const DOB_YMD_RE = new RegExp(String.raw`(?<![\w/.\-])((?:19|20)\d{2})([/.\-])(\
 const DOB_SPACED_RE =
   /(?<![\w.,$\-])(?<!\d[ \t])(\d{1,2})[ \t]+(\d{1,2})[ \t]+((?:19|20)\d{2}|\d{2})(?![\w]|[.,\-]\d)/g;
 // A written address: local part, @, a dotted domain. Brackets and quotes end it, so the tokens
-// this file writes are never read as part of one.
-const EMAIL_RE = /[^\s@,;:<>()"'\[\]]+@[^\s@,;:<>()"'\[\]]+\.[A-Za-z]{2,}(?![A-Za-z])/g;
+// this file writes are never read as part of one. Both parts are bounded at the RFC 5321 lengths
+// (64 and 255): unbounded, a long run with no "@" was scanned again from every position (quadratic).
+const EMAIL_RE = /[^\s@,;:<>()"'\[\]]{1,64}@[^\s@,;:<>()"'\[\]]{1,255}\.[A-Za-z]{2,24}(?![A-Za-z])/g;
+// Every spoken-address pattern below must stay linear: this runs on every stored text, including the
+// emergency note before the page goes out, and a synchronous regex cannot be cut off by a timer. So
+// "dot" is never also a label token (each " dot " then ends exactly one label, one way), the
+// alternatives inside a repeat never overlap, and every repeat inside one match is bounded.
+//
+// A spelled address as capture_contact reads it back (speak.ts speakEmail): letters, digits or symbol
+// words joined by commas, "at", then dotted domain labels ("J, A, N, E, at gmail dot com", "A, at
+// gmail dot com", "A, B, at E, X, A, M, P, L, E dot C, O").
+const SPELLED_EMAIL_RE =
+  /\b(?:[a-z0-9]+, ){1,64}at (?:(?!(?:dot|observeinsurance)\b)[a-z0-9]+(?:,? (?!dot\b)[a-z0-9]+){0,63} dot ){1,6}[a-z]+(?:, [a-z]\b){0,23}/gi;
+// An address said aloud, as the ASR writes it without an @: a local part of words joined by spoken
+// separators ("jane dot doe", "jane underscore doe", "jsmith") or of single letters ("j a n e"),
+// then "at", then a domain said with "dot" ("acmecorp dot com", "i cloud dot com") or written
+// ("yahoo.com"). Our own published domain is not caller PII (claims docs at observeinsurance dot com).
+const SPOKEN_SEP = String.raw`(?:dot|period|underscore|dash|hyphen|plus)`;
+const SPOKEN_LOCAL_UNIT = String.raw`(?:(?!(?:${SPOKEN_SEP}|at)\b)[a-z0-9][a-z0-9._+-]{0,62}[a-z0-9]|[a-z0-9]\b(?:,? [a-z0-9]\b){0,63})`;
+const SPOKEN_LABEL = String.raw`(?!(?:dot|observeinsurance)\b)[a-z0-9][a-z0-9-]{0,62}(?: (?!dot\b)[a-z0-9][a-z0-9-]{0,62})?`;
+const SPOKEN_DOMAIN = String.raw`(?:(?:${SPOKEN_LABEL}) dot ){1,6}[a-z]{2,24}\b` +
+  String.raw`|(?!observeinsurance\b)[a-z0-9][a-z0-9-]{0,62}(?:\.[a-z0-9-]{1,63}){0,5}\.[a-z]{2,24}\b`;
+const SPOKEN_EMAIL_RE = new RegExp(
+  String.raw`\b${SPOKEN_LOCAL_UNIT}(?:,? ${SPOKEN_SEP},? ${SPOKEN_LOCAL_UNIT}){0,8},? at (?:${SPOKEN_DOMAIN})`,
+  "gi",
+);
 
 function expandTwoDigitYear(yy: number, refYear: number): number {
   return 2000 + yy <= refYear ? 2000 + yy : 1900 + yy;
@@ -316,7 +341,7 @@ function redactDates(text: string, refYear: number): string {
 }
 
 function redactEmails(text: string): string {
-  return text.replace(EMAIL_RE, EMAIL_TOKEN);
+  return text.replace(EMAIL_RE, EMAIL_TOKEN).replace(SPELLED_EMAIL_RE, EMAIL_TOKEN).replace(SPOKEN_EMAIL_RE, EMAIL_TOKEN);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -331,7 +356,8 @@ export function redactPIIAsOf(text: string, refYear: number): string {
 
 /** Phone-like digit runs (602-555-0101, (602) 555 0101, +16025550101, 6025550101, spaced digits) -> "[phone ending 0101]";
  *  DOB-shaped dates (March 14, 1986 / 3/14/1986 / 1986-03-14 / 14 March 1986 / march fourteenth nineteen eighty six /
- *  march 14th 86 / 3 14 86) -> "[date of birth]"; written email addresses -> "[email]".
+ *  march 14th 86 / 3 14 86) -> "[date of birth]"; email addresses, written or spelled aloud
+ *  ("j, a, n, e, at gmail dot com", "jane at gmail dot com") -> "[email]".
  *  Claim numbers (CLM-240115) and money stay. Idempotent. null/undefined -> same. */
 export function redactPII(text: string): string;
 export function redactPII(text: null | undefined): null;
@@ -344,11 +370,16 @@ export function redactPII(text: string | null | undefined): string | null {
 // plus the other server sentences whose answer is a DOB or a phone number: dob_unreadable asks
 // for "the month, day and year", not_found asks "Is that the right number?", and
 // rep_queued_no_number asks for "the best number". The model words its own follow-ups for a
-// partial date ("When were you born?", "And what year?"), so those count too.
+// partial date ("When were you born?", "And what year?"), so those count too. A caller spelling
+// an email address (or a name) answers "email address", "spell" or the read-back's "your email
+// is", so that answer is withheld the same way: the confirmed address is kept in caller_contacts.
+// The model words its own email questions too ("Could I get your email?", "What email should I
+// use?"), so any question asking for an email counts; "that email" or "email the documents" does not.
+// The window to the question mark is bounded, so a long line costs linear time.
 const SENSITIVE_ASK_RE =
-  /(date of birth|birth ?date|birthday|\bborn\b|\bDOB\b|(month|day|year) of birth|(what|which) year|phone number|number on (the|your) account|ten-digit|ten digit|month, day,? and (the )?year|(best|right) number)/i;
+  /(date of birth|birth ?date|birthday|\bborn\b|\bDOB\b|(month|day|year) of birth|(what|which) year|phone number|number on (the|your) account|ten-digit|ten digit|month, day,? and (the )?year|(best|right) number|reach you|email address|\bspell|your email is|what(?:'s| is) (?:the best |your )?email|\b(?:your|an|which|what) email\b[^.?!]{0,80}\?)/i;
 
-/** True when an assistant line asks for a date of birth or phone number. */
+/** True when an assistant line asks for a date of birth, a phone number or an email address. */
 export function asksForSensitive(assistantText: string | null | undefined): boolean {
   return typeof assistantText === "string" && SENSITIVE_ASK_RE.test(assistantText);
 }

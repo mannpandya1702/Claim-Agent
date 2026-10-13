@@ -180,13 +180,13 @@ describe("vapi store", () => {
     const inst = created[0]!;
     inst.emit("call-start");
     inst.emit("message", { type: "transcript", role: "assistant", transcriptType: "partial", transcript: "Hi this" });
-    inst.emit("message", { type: "transcript", role: "assistant", transcriptType: "partial", transcript: "Hi this is Tessa" });
-    expect(vapi.getCallState().partial.assistant).toBe("Hi this is Tessa");
-    inst.emit("message", { type: "transcript", role: "assistant", transcriptType: "final", transcript: "Hi, this is Tessa." });
+    inst.emit("message", { type: "transcript", role: "assistant", transcriptType: "partial", transcript: "Hi this is Ava" });
+    expect(vapi.getCallState().partial.assistant).toBe("Hi this is Ava");
+    inst.emit("message", { type: "transcript", role: "assistant", transcriptType: "final", transcript: "Hi, this is Ava." });
     inst.emit("message", { type: "transcript", role: "user", transcriptType: "partial", transcript: "my cl" });
     inst.emit("message", { type: "status-update", status: "in-progress" });
     const s = vapi.getCallState();
-    expect(s.finals.map((l) => `${l.role}:${l.text}`)).toEqual(["assistant:Hi, this is Tessa."]);
+    expect(s.finals.map((l) => `${l.role}:${l.text}`)).toEqual(["assistant:Hi, this is Ava."]);
     expect(s.partial).toEqual({ user: "my cl", assistant: null });
   });
 

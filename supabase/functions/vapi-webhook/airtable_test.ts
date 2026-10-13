@@ -25,6 +25,8 @@ const row: InteractionForMirror = {
   duration_seconds: 130,
   cost: "0.1234",
   analysis_status: "ok",
+  caller_type: "existing",
+  caller_email: null,
 };
 
 function deps(env: Partial<Env>, fetchImpl: typeof fetch): Deps {
@@ -168,4 +170,42 @@ Deno.test("airtableConfigured: both the token and the base id, ignoring blanks",
   assertFalse(airtableConfigured({ AIRTABLE_TOKEN: "pat123" }));
   assertFalse(airtableConfigured({ AIRTABLE_BASE_ID: "appBASE" }));
   assertFalse(airtableConfigured({ AIRTABLE_TOKEN: " ", AIRTABLE_BASE_ID: "appBASE" }));
+});
+
+Deno.test("interactionToFields: Caller Type always, and the confirmed caller-given Email when there is one", () => {
+  const at = new Date("2026-10-12T15:03:00Z");
+  const existing = interactionToFields(row, at);
+  assertEquals(existing["Caller Type"], "existing");
+  assertFalse("Email" in existing, "no address: the cell is left alone");
+  const fresh = interactionToFields(
+    { ...row, caller_name: "Jane Doe", caller_type: "new", caller_email: " jane.doe@gmail.com ", caller_phone: "+16025550177" },
+    at,
+  );
+  assertEquals([fresh["Caller Name"], fresh["Caller Type"], fresh["Email"], fresh["Caller Phone"]], [
+    "Jane Doe",
+    "new",
+    "jane.doe@gmail.com",
+    "ending 0177",
+  ]);
+  // a row from before the column existed reads as unknown
+  assertEquals(interactionToFields({ ...row, caller_type: null, caller_email: "" }, at)["Caller Type"], "unknown");
+  assertFalse("Email" in interactionToFields({ ...row, caller_email: "" }, at));
+});
+
+Deno.test("upsertCallRecord: a field the table lacks pauses the outbox (config) instead of killing the row", async () => {
+  const respond = (body: unknown) =>
+    (() => Promise.resolve(new Response(JSON.stringify(body), { status: 422 }))) as unknown as typeof fetch;
+  const unknownField = await upsertCallRecord(
+    deps(configured, respond({ error: { type: "UNKNOWN_FIELD_NAME", message: 'Unknown field name: "Caller Type"' } })),
+    {},
+  );
+  assert(!unknownField.ok);
+  assertEquals([unknownField.retryable, unknownField.config], [false, true]);
+  // any other 422 is still this record's value, which a retry cannot fix
+  const badValue = await upsertCallRecord(
+    deps(configured, respond({ error: { type: "INVALID_VALUE_FOR_COLUMN", message: "m" } })),
+    {},
+  );
+  assert(!badValue.ok);
+  assertEquals([badValue.retryable, badValue.config === true], [false, false]);
 });

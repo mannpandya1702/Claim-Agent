@@ -26,6 +26,7 @@ export const PRIMARY_KEYS: Record<RealtimeTable, readonly string[]> = {
   transcript_lines: ["id"],
   attempts: ["call_key", "tool_call_id"],
   outbox_events: ["id"],
+  caller_contacts: ["call_key"],
 };
 
 export interface ChangePayload {

@@ -16,13 +16,14 @@ import {
   onEndOfCallReport,
   onStatusUpdate,
   onTranscript,
+  type PostCallFacts,
   type StoredMessage,
   UNKNOWN_CALLER,
 } from "./post_call.ts";
 import type { CallFacts } from "./post_call_facts.ts";
 import { MASKED_ANSWER, redactPII } from "./redact.ts";
 import { OUTBOX_LEASE_MS } from "./store_rules.ts";
-import type { AttemptRow, Customer, Deps, Env, EscalationRow, Session, VapiMessage } from "./types.ts";
+import type { AttemptRow, CallerContact, Customer, Deps, Env, EscalationRow, Session, VapiMessage } from "./types.ts";
 
 const ORG = "4f1c2d3e-0000-4000-8000-00000000a0a0";
 const SECRET = "whsec-post-call-test";
@@ -1649,4 +1650,226 @@ Deno.test("status-update forwarding: a failed second write still alerts, with th
   assertEquals(resend.length, 1);
   assertStringIncludes(JSON.parse(String(resend[0].init.body)).html, "0104");
   assert(logs.some((l) => l.event === "post_call_error" && l.step === "upsertEscalation"));
+});
+
+// ---------------------------------------------------------------------------------------------
+// Who called: the confirmed captured name in the chain, caller_type, caller_email, caller_phone.
+// ---------------------------------------------------------------------------------------------
+const NOT_FOUND_ID = "3f6c1a2e-7b4d-4e8a-9c01-5d2e8f0a1b07";
+
+function contact(callKey: string, over: Partial<CallerContact> = {}): CallerContact {
+  return {
+    call_key: callKey,
+    kind: "new_customer",
+    first_name: "Jane",
+    last_name: "Doe",
+    email: "jane.doe@gmail.com",
+    callback_phone: "+16025550177",
+    callback_source: "argument",
+    customer_id: null,
+    confirmed: true,
+    confirmed_at: "2026-10-12T14:59:00Z",
+    ...over,
+  };
+}
+
+function newCallerFacts(c: CallerContact | null): PostCallFacts {
+  return {
+    ...facts({
+      session: session(NOT_FOUND_ID, "none"),
+      attempts: [
+        attempt(NOT_FOUND_ID, "lookup_customer", "lookup_miss", "not_found"),
+        attempt(NOT_FOUND_ID, "lookup_customer", "lookup_miss", "not_found_final"),
+      ],
+    }),
+    contact: c,
+  };
+}
+
+Deno.test("name chain: a new caller's confirmed name comes before the analysis' name; type new; their email", () => {
+  const row = buildInteractionRow(fixture("not_found"), newCallerFacts(contact(NOT_FOUND_ID)));
+  assertEquals([row.caller_name, row.caller_type, row.caller_email, row.customer_id, row.outcome], [
+    "Jane Doe",
+    "new",
+    "jane.doe@gmail.com",
+    null,
+    "not_found",
+  ]);
+  // a web call has no caller id: the number they gave with their details stands in
+  assertEquals(row.caller_phone, "+16025550177");
+
+  // unconfirmed: the analysis' name, still a new caller, and no address in the record
+  const unconfirmed = buildInteractionRow(
+    fixture("not_found"),
+    newCallerFacts(contact(NOT_FOUND_ID, { confirmed: false, confirmed_at: null })),
+  );
+  assertEquals([unconfirmed.caller_name, unconfirmed.caller_type, unconfirmed.caller_email], ["Dana", "new", null]);
+
+  // no capture at all: unknown, as before
+  const none = buildInteractionRow(fixture("not_found"), newCallerFacts(null));
+  assertEquals([none.caller_name, none.caller_type, none.caller_email], ["Dana", "unknown", null]);
+  assertEquals(buildInteractionRow(fixture("never_connected"), facts()).caller_type, "unknown");
+});
+
+Deno.test("name chain: the verified name wins; a pending email update is the record's email, never the account's", () => {
+  const verified: PostCallFacts = {
+    ...verifiedFacts(),
+    contact: contact(FULL_ID, { kind: "email_update", first_name: "Tobias", last_name: "Halvorsen", customer_id: TOBIAS.id, email: "tobias.new@gmail.com" }),
+  };
+  const row = buildInteractionRow(fixture("full"), verified);
+  assertEquals([row.caller_name, row.caller_type, row.caller_email, row.caller_phone], [
+    "Tobias Halvorsen",
+    "existing",
+    "tobias.new@gmail.com",
+    "+16025550101",
+  ]);
+  // the customer's on-file email is never written to the call record
+  const plain = buildInteractionRow(fixture("full"), verifiedFacts());
+  assertEquals([plain.caller_type, plain.caller_email], ["existing", null]);
+  assertFalse(JSON.stringify(plain).includes(String(TOBIAS.email)));
+});
+
+Deno.test("name chain: a name captured next to an account the caller did not verify is not used", () => {
+  const message = fixture("auth_failed");
+  const id = message.call!.id!;
+  const locked: PostCallFacts = {
+    ...facts({
+      session: session(id, "locked", SLOANE.id),
+      attempts: [
+        attempt(id, "lookup_customer", "lookup_hit", "needs_dob"),
+        attempt(id, "verify_identity", "dob_wrong", "auth_failed"),
+        attempt(id, "verify_identity", "dob_wrong", "locked"),
+      ],
+    }),
+    contact: contact(id, { first_name: "Sloane", last_name: "Marchetti" }),
+  };
+  const row = buildInteractionRow(message, locked);
+  // the session reached an account, so the caller is an existing customer, but not that name
+  assertEquals([row.caller_name, row.caller_type, row.customer_id], [UNKNOWN_CALLER, "existing", null]);
+  // nor the address or number they gave: an attacker's details never sit on that account's record
+  // (and so never reach the call log mirror's Email field)
+  assertEquals([row.caller_email, row.caller_phone], [null, null]);
+  // a phone_found session is existing too
+  const found = buildInteractionRow(fixture("not_found"), {
+    ...facts({ session: session(NOT_FOUND_ID, "phone_found", SLOANE.id) }),
+    contact: null,
+  });
+  assertEquals(found.caller_type, "existing");
+});
+
+Deno.test("eocr: a new caller's capture lands in the stored row and the call log mirror", async () => {
+  const { store, deps, calls, settle } = harness({
+    env: { AIRTABLE_TOKEN: "pat_test", AIRTABLE_BASE_ID: "appTEST" },
+  });
+  for (const id of ["t1", "t2"]) {
+    await store.lookupCustomerAttempt({
+      callKey: NOT_FOUND_ID,
+      channel: "webCall",
+      phoneE164: "+16025550199",
+      toolCallId: id,
+      callerNumber: null,
+    });
+  }
+  await store.upsertContact({
+    callKey: NOT_FOUND_ID,
+    kind: "new_customer",
+    firstName: "Jane",
+    lastName: "Doe",
+    email: "jane.doe@gmail.com",
+    callbackPhone: "+16025550177",
+    callbackSource: "argument",
+    customerId: null,
+  });
+  await store.setContactConfirmed(NOT_FOUND_ID, true);
+  const out = await onEndOfCallReport(fixture("not_found"), deps, { backfillDelaysMs: ZEROS });
+  assertEquals(out.status, 200);
+  await settle();
+  const row = interaction(store, NOT_FOUND_ID);
+  assertEquals(
+    [row.caller_name, row.caller_type, row.caller_email, row.caller_email_masked, row.caller_phone],
+    ["Jane Doe", "new", "jane.doe@gmail.com", "j***@gmail.com", "+16025550177"],
+  );
+  const airtable = calls.filter((c) => c.url.startsWith("https://api.airtable.com/"));
+  assertEquals(airtable.length, 1);
+  const fields = JSON.parse(String(airtable[0].init.body)).records[0].fields;
+  assertEquals([fields["Caller Name"], fields["Caller Type"], fields["Email"], fields["Caller Phone"]], [
+    "Jane Doe",
+    "new",
+    "jane.doe@gmail.com",
+    "ending 0177",
+  ]);
+});
+
+Deno.test("eocr: a failed contact read throws (5xx, VAPI redelivers) and writes nothing", async () => {
+  const { store, deps } = harness();
+  store.failNext("getContact");
+  await assertRejects(() => onEndOfCallReport(fixture("not_found"), deps, { backfillDelaysMs: ZEROS }));
+  assertEquals(store.tables.call_interactions.length, 0);
+});
+
+Deno.test("status-update forwarding: the callback email names a caller who confirmed their details", async () => {
+  const { store, deps, calls } = harness({ env: ALERT_ENV });
+  await store.upsertContact({
+    callKey: PHONE_CALL_ID,
+    kind: "new_customer",
+    firstName: "Jane",
+    lastName: "Doe",
+    email: "jane.doe@gmail.com",
+    callbackPhone: null,
+    callbackSource: "caller_id",
+    customerId: null,
+  });
+  await store.setContactConfirmed(PHONE_CALL_ID, true);
+  await onStatusUpdate(statusUpdate("forwarding"), deps);
+  const resend = calls.filter((c) => c.url === "https://api.resend.com/emails");
+  const html = JSON.parse(String(resend[0].init.body)).html as string;
+  assertStringIncludes(html, "Jane Doe (caller-provided, unverified)");
+  assertStringIncludes(html, "jane.doe@gmail.com");
+  assertStringIncludes(html, "(602) 555-0104 (+16025550104)");
+  const text = JSON.parse(String(calls.find((c) => c.url.startsWith("https://api.telegram.org/"))!.init.body)).text;
+  for (const leak of ["Jane", "Doe", "@", "0104"]) assertFalse(String(text).includes(leak), leak);
+});
+
+Deno.test("status-update forwarding: a number the caller said with their details beats the caller id", async () => {
+  // "Is the number you're calling from the best one to reach you?" "No, it's six zero two..."
+  const { store, deps, calls } = harness({ env: ALERT_ENV });
+  await store.upsertContact({
+    callKey: PHONE_CALL_ID,
+    kind: "new_customer",
+    firstName: "Jane",
+    lastName: "Doe",
+    email: null,
+    callbackPhone: "+16025550177",
+    callbackSource: "argument",
+    customerId: null,
+  });
+  await store.setContactConfirmed(PHONE_CALL_ID, true);
+  await onStatusUpdate(statusUpdate("forwarding"), deps);
+  const [row] = store.tables.escalations;
+  assertEquals([row.callback_phone, row.callback_source], ["+16025550177", "argument"]);
+  const resend = calls.filter((c) => c.url === "https://api.resend.com/emails");
+  const html = JSON.parse(String(resend[0].init.body)).html as string;
+  assertStringIncludes(html, "(602) 555-0177 (+16025550177)");
+  assertFalse(html.includes("555-0104"), "the caller id they said not to use is not the callback number");
+  assertStringIncludes(html, "Jane Doe (caller-provided, unverified)");
+});
+
+Deno.test("status-update forwarding: a contact from caller id, or a failed contact read, keeps the caller id", async () => {
+  for (const failRead of [false, true]) {
+    const { store, deps } = harness({ env: ALERT_ENV });
+    await store.upsertContact({
+      callKey: PHONE_CALL_ID,
+      kind: "new_customer",
+      firstName: "Jane",
+      lastName: "Doe",
+      email: null,
+      callbackPhone: failRead ? "+16025550177" : "+16025550104",
+      callbackSource: failRead ? "argument" : "caller_id",
+      customerId: null,
+    });
+    if (failRead) store.failNext("getContact");
+    await onStatusUpdate(statusUpdate("forwarding"), deps);
+    const [row] = store.tables.escalations;
+    assertEquals([row.callback_phone, row.callback_source], ["+16025550104", "caller_id"], `failRead=${failRead}`);
+  }
 });

@@ -1,0 +1,1 @@
+ask "Is the number you're calling from the best one to reach you?" If they say yes, leave callback_phone out. If they say no, ask for the best number to reach them and pass the digits they say; if they point to a number they already gave you on this call, pass those digits.

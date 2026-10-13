@@ -7,7 +7,9 @@
 // after a backfill improved the row.
 //
 // Only already-redacted, slim fields cross the boundary: no transcript, no messages, no DOB, and
-// the caller's number as its last four digits only.
+// the caller's number as its last four digits only. The one address that crosses is the email a new
+// caller spelled and confirmed (caller_email), which the claims team needs to follow up; the
+// account's own email is never in the record.
 
 import { dashboardLink } from "./alert.ts";
 import type { Deps } from "./types.ts";
@@ -32,6 +34,8 @@ export interface InteractionForMirror {
   duration_seconds: number | null;
   cost: number | string | null;
   analysis_status: string | null;
+  caller_type: string | null;
+  caller_email: string | null;
 }
 
 /** Exactly the InteractionForMirror columns, in the select list store.ts sends. */
@@ -51,6 +55,8 @@ export const MIRROR_COLUMNS = [
   "duration_seconds",
   "cost",
   "analysis_status",
+  "caller_type",
+  "caller_email",
 ] as const satisfies readonly (keyof InteractionForMirror)[];
 // A column added to the interface but not to the list fails the type check here.
 const _everyMirrorColumn: Exclude<keyof InteractionForMirror, typeof MIRROR_COLUMNS[number]> extends never ? true
@@ -86,6 +92,8 @@ export function interactionToFields(row: InteractionForMirror, syncedAt: Date, d
     [MERGE_FIELD]: row.vapi_call_id,
     "Caller Name": row.caller_name ?? "Unknown caller",
     "Caller Phone": phoneEnding(row.caller_phone),
+    "Caller Type": row.caller_type ?? "unknown",
+    "Email": typeof row.caller_email === "string" && row.caller_email.trim() ? row.caller_email.trim() : null,
     "Channel": row.channel,
     "Outcome": row.outcome,
     "Sentiment": row.sentiment,
@@ -143,6 +151,11 @@ export async function upsertCallRecord(deps: Deps, fields: Record<string, unknow
   // outbox pauses with the row's attempt given back. 429 (5 req/s per base) and 5xx are transient.
   // Anything else (422: a value this record holds) a retry cannot fix, so that row stops.
   if (res.status === 401 || res.status === 403 || res.status === 404) {
+    return { ok: false, status: res.status, error, retryable: false, config: true };
+  }
+  // A field the table does not have yet (the code shipped before `deno task airtable:setup` added
+  // it) is the table's schema, not this record: every row would fail the same way until it is fixed.
+  if (res.status === 422 && body?.error?.type === "UNKNOWN_FIELD_NAME") {
     return { ok: false, status: res.status, error, retryable: false, config: true };
   }
   return { ok: false, status: res.status, error, retryable: res.status === 429 || res.status >= 500 };

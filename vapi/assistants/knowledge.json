@@ -1,5 +1,5 @@
 {
-  "comment": "Second squad member. Knowledge-base questions plus the floor tools; no identity or claim tools, so a policy question can never touch account data. Arrives silently after a handoff.",
+  "comment": "Second squad member. Knowledge-base questions plus the floor tools; no identity, claim or contact-capture tools, so a policy question can never touch account data and a caller who wants to give their details is handed back to Concierge. Arrives silently after a handoff.",
   "sections": [
     "header",
     "role-knowledge",
@@ -15,6 +15,7 @@
     "style"
   ],
   "representative": "representative-web",
+  "slots": { "EMAIL": "email-knowledge", "DISCLOSURE": "disclosure-web" },
   "tools": ["faq_search", "handoff_to_concierge", "escalate", "report_emergency", "send_info_email", "endCall"],
   "assistant": {
     "name": "Knowledge",

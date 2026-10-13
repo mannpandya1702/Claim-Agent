@@ -5,7 +5,11 @@ import {
   type IdentityEvent,
   type IdentityState,
   initialIdentity,
+  isPlainEmail,
   lastFour,
+  MAX_EMAIL_CHARS,
+  normaliseEmail,
+  normaliseName,
   normaliseNanp,
   normalisePhone,
   parseDobParts,
@@ -18,6 +22,8 @@ interface Vectors {
   phones: { input: unknown; expected: string | null; note: string }[];
   callbacks: { input: unknown; expected: string | null; note: string }[];
   dobs: { month: unknown; day: unknown; year: unknown; refYear: number; valid: boolean; note: string }[];
+  emails: { input: unknown; expected: string | null; note: string }[];
+  names: { input: unknown; expected: string | null; note: string }[];
 }
 const vectors: Vectors = JSON.parse(
   Deno.readTextFileSync(new URL("../../../fixtures/vectors.json", import.meta.url)),
@@ -259,4 +265,46 @@ Deno.test("normaliseNanp and usableCallbackNumber: a callback must be dialable, 
   // answers not found and the caller can correct a digit), but never become a callback target.
   assertEquals(normalisePhone("9601550123"), "+19601550123");
   assertEquals(usableCallbackNumber("9601550123", []), null);
+});
+
+Deno.test("normaliseEmail: shared email vectors (spoken forms, spacing, and what is refused)", () => {
+  assert(vectors.emails.length > 0);
+  for (const v of vectors.emails) {
+    assertEquals(
+      normaliseEmail(v.input),
+      v.expected,
+      `${v.note}: ${JSON.stringify(v.input)}`,
+    );
+  }
+});
+
+Deno.test("normaliseEmail: every accepted address is a plain address the sender accepts", () => {
+  for (const v of vectors.emails.filter((x) => x.expected !== null)) {
+    const got = normaliseEmail(v.input)!;
+    assert(isPlainEmail(got), v.note);
+    assert(
+      /^[^\s@,;<>()"]+@[^\s@,;<>()"]+\.[^\s@,;<>()".]+$/.test(got),
+      `email.ts would refuse ${got}`,
+    );
+    assertEquals(got, got.toLowerCase());
+  }
+  // the cap applies to the stored address, not to the spoken input around it
+  const local = "a".repeat(64);
+  assertEquals(normaliseEmail(`${local}@example.com`), `${local}@example.com`);
+  assertEquals(normaliseEmail(`${"a".repeat(65)}@example.com`), null);
+  assertEquals(isPlainEmail(`a@${"b".repeat(MAX_EMAIL_CHARS)}.com`), false);
+  for (const raw of [undefined, null, true, {}, ["a@b.co"], "x".repeat(1000)]) {
+    assertEquals(normaliseEmail(raw), null);
+  }
+});
+
+Deno.test("normaliseName: shared name vectors", () => {
+  assert(vectors.names.length > 0);
+  for (const v of vectors.names) {
+    assertEquals(
+      normaliseName(v.input),
+      v.expected,
+      `${v.note}: ${JSON.stringify(v.input)}`,
+    );
+  }
 });

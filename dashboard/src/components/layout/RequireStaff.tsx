@@ -63,7 +63,7 @@ export function NotStaffScreen() {
           <Button variant="outline" asChild className="sm:flex-1">
             <Link to="/call">
               <Mic aria-hidden="true" />
-              Talk to Tessa
+              Talk to Ava
             </Link>
           </Button>
         </div>

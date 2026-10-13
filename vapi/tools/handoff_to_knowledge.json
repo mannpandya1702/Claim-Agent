@@ -8,7 +8,7 @@
     {
       "type": "assistant",
       "assistantName": "Knowledge",
-      "description": "A general question about how claims work, appeals, timelines, documents in general or terms; not the caller's own claim, not what they still need to send, not a request for a person.",
+      "description": "A general question about how claims work, appeals, timelines, documents in general or terms; not the caller's own claim, not what they still need to send, not taking a new caller's details, not a request for a person.",
       "contextEngineeringPlan": {
         "type": "all"
       },

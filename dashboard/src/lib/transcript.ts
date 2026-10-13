@@ -225,7 +225,7 @@ export function transcriptToText(items: readonly TranscriptItem[]): string {
   return items
     .map((item) => {
       if (item.kind === "tool") return `[${item.stamp}] tool ${item.tool}${item.code ? `: ${item.code}` : ""}`;
-      const who = item.speaker === "caller" ? "Caller" : item.name ? `Tessa (${item.name})` : "Tessa";
+      const who = item.speaker === "caller" ? "Caller" : item.name ? `Ava (${item.name})` : "Ava";
       return `[${item.stamp}] ${who}: ${item.text}`;
     })
     .join("\n");

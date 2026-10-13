@@ -1,4 +1,4 @@
-// Tier-1 /chat battery: the rendered solo-core prompt on a transient assistant whose six server
+// Tier-1 /chat battery: the rendered solo-core prompt on a transient assistant whose server
 // tools are inline VAPI code tools. Each mock answers with the real speak.ts sentence for the code
 // the server would return, so the battery measures the model, not the backend: tool order,
 // arguments, result codes and what the caller would hear, persona by persona (plan section 13).
@@ -29,6 +29,9 @@ import { computeFlags } from "../supabase/functions/vapi-webhook/flags.ts";
 import {
   type IdentityState,
   initialIdentity,
+  normaliseEmail,
+  normaliseName,
+  normaliseNanp,
   normalisePhone,
   parseDobParts,
   step,
@@ -48,7 +51,7 @@ import { vapiClient, VapiError } from "./lib/vapi.ts";
 import { deepMerge, loadVariant, paths, promptPath, renderPrompt, sha256Hex } from "./render.ts";
 
 export const ASSISTANT_KEY = "solo-core" as const;
-export const DEFAULTS = { n: 3, cap: 60, concurrency: 3 };
+export const DEFAULTS = { n: 3, cap: 75, concurrency: 3 };
 const MAX_N = 20;
 const MAX_CONCURRENCY = 6;
 // A conversation never needs more requests than turns plus confirmations; this bounds a runaway.
@@ -159,16 +162,52 @@ export interface MockPlan {
   };
   callback?: { known: Record<string, MockResult>; other: MockResult; none: MockResult };
   topic?: { known: Record<string, MockResult>; other: MockResult };
+  contact?: ContactPlan;
+  confirm?: { yes: MockResult; no: MockResult; bad: MockResult };
+}
+
+/** capture_contact answers. A read-back needs the spoken name, address and number, so the ones a
+ *  persona scripts are composed here (contactKey); any other valid capture gets the server's plain
+ *  question. onFile: a verified caller whose account already has an address (tools.ts email_on_file).
+ *  priorPhone: the number said for an earlier capture, kept when a correction leaves it out. */
+export interface ContactPlan {
+  verified: boolean;
+  onFile: MockResult | null;
+  known: Record<string, MockResult>;
+  needsName: MockResult;
+  invalidEmail: MockResult;
+  other: MockResult;
+  placeholders: string[];
+  priorPhone: string;
+}
+
+/** The call's caller_contacts row as the server would hold it. phone: ten digits the caller said
+ *  (callback_source 'argument'); a chat has no caller id, so otherwise there is none. */
+export interface SimContact {
+  kind: "new_customer" | "email_update";
+  first: string;
+  last: string;
+  email: string | null;
+  phone: string | null;
+  confirmed: boolean;
 }
 
 export interface SimState {
   identity: IdentityState;
   escalated: boolean;
   emailed: string[];
+  contact: SimContact | null;
 }
 
 export function initialState(): SimState {
-  return { identity: initialIdentity(), escalated: false, emailed: [] };
+  return { identity: initialIdentity(), escalated: false, emailed: [], contact: null };
+}
+
+/** Contact details a persona gives on the call (a verified caller's name comes from the account). */
+export interface ScriptedContact {
+  first?: string;
+  last?: string;
+  email?: string;
 }
 
 export interface PersonaOptions {
@@ -176,6 +215,8 @@ export interface PersonaOptions {
   escalateCode?: Code;
   /** Completed earlier calls: the verified sentence carries the welcome-back clause. */
   priorCalls?: PriorInteraction[];
+  /** Details the caller spells, so the mock can read them back with the real sentence. */
+  contacts?: ScriptedContact[];
 }
 
 export interface PlanCtx {
@@ -274,12 +315,126 @@ function infoEmailPlan(ctx: PlanCtx): MockPlan {
   const customer = customerById(s.verified);
   const known: Record<string, MockResult> = {};
   for (const topic of INFO_EMAIL_TOPICS) {
-    if (s.level !== "verified" || !customer) known[topic] = result(ctx, "not_verified", { level: s.level });
+    if (s.level !== "verified" || !customer) {
+      known[topic] = topic === "how_to_start_claim" ? newCallerSteps(ctx) : result(ctx, "not_verified", { level: s.level });
+    } // A pending email update is for staff to add; it is never sent to on this call.
     else if (!customer.email) known[topic] = result(ctx, "no_email_on_file");
     else if (ctx.state.emailed.includes(topic)) known[topic] = result(ctx, "email_already_sent");
     else known[topic] = result(ctx, "email_sent");
   }
   return { topic: { known, other: result(ctx, "bad_args") } };
+}
+
+const NAME_PLACEHOLDERS = ["unknown", "caller", "customer", "anonymous", "none", "name", "first name", "last name", "n/a"];
+
+/** The key a capture is looked up by: the address alone for a verified caller (the account has
+ *  the name), else lower-case first and last name, the address and the said number ("" when none). */
+export function contactKey(
+  verified: boolean,
+  first: string,
+  last: string,
+  email: string | null,
+  phone: string | null = null,
+): string {
+  return verified
+    ? `@${email ?? ""}`
+    : `${first.toLowerCase()}|${last.toLowerCase()}|${email ?? ""}|${phone ?? ""}`;
+}
+
+/** The number a capture stores as said by the caller (tools.ts contactInput): the digits passed when
+ *  they can be dialled, else, when none was passed at all, the number said for an earlier capture. */
+function capturedPhone(a: Args, prior: string | null): string | null {
+  if (a.callback_phone === undefined) return prior;
+  const e164 = normaliseNanp(a.callback_phone);
+  return e164 ? digitsOf(e164).slice(-10) : null;
+}
+
+function contactPlan(ctx: PlanCtx): MockPlan {
+  const s = ctx.state.identity;
+  const customer = s.level === "verified" ? customerById(s.verified) : null;
+  const known: Record<string, MockResult> = {};
+  const phones = [...new Set(ctx.phones.filter((d) => normaliseNanp(d) !== null))];
+  for (const c of ctx.persona.contacts ?? []) {
+    const email = c.email ? normaliseEmail(c.email) : null;
+    if (customer) {
+      if (!email) continue;
+      const data = { first_name: customer.first_name, last_name: customer.last_name, email };
+      known[contactKey(true, "", "", email)] = result(ctx, "contact_readback", data);
+      continue;
+    }
+    const first = normaliseName(c.first);
+    const last = normaliseName(c.last);
+    if (!first || !last) continue;
+    for (const e of email ? [email, null] : [null]) {
+      for (const phone of [...phones, null]) {
+        const data = {
+          first_name: first,
+          last_name: last,
+          ...(e ? { email: e } : {}),
+          ...(phone ? { callback_phone: phone } : {}),
+        };
+        known[contactKey(false, first, last, e, phone)] = result(ctx, "contact_readback", data);
+      }
+    }
+  }
+  const onFile = customer && typeof customer.email === "string" && customer.email.trim()
+    ? result(ctx, "email_on_file")
+    : null;
+  return {
+    contact: {
+      verified: customer !== null,
+      onFile,
+      known,
+      needsName: result(ctx, "contact_needs_name"),
+      invalidEmail: result(ctx, "contact_invalid_email"),
+      // What the server says when it cannot compose a read-back: the plain confirmation question.
+      other: result(ctx, "contact_readback", {}),
+      placeholders: NAME_PLACEHOLDERS,
+      priorPhone: ctx.state.contact?.phone ?? "",
+    },
+  };
+}
+
+function confirmPlan(ctx: PlanCtx): MockPlan {
+  const c = ctx.state.contact;
+  const bad = result(ctx, "bad_args");
+  if (!c) {
+    // tools.ts notPending: a verified caller is asked for the address only (the name is the account's)
+    const none = ctx.state.identity.level === "verified"
+      ? result(ctx, "not_pending", undefined, sentenceFor("not_pending", { verified: true }))
+      : result(ctx, "not_pending");
+    return { confirm: { yes: none, no: none, bad } };
+  }
+  const yes = c.kind === "new_customer"
+    ? result(ctx, "contact_saved_new", { first_name: c.first, has_email: c.email !== null })
+    : result(ctx, "contact_saved_existing", { first_name: c.first });
+  const no = c.kind === "new_customer"
+    ? result(ctx, "contact_retry", { has_email: c.email !== null, has_phone: c.phone !== null })
+    : result(ctx, "contact_retry", { part: "email" });
+  return { confirm: { yes, no, bad } };
+}
+
+/** tools.ts unverifiedInfoEmail: the steps go only to a confirmed new caller's spelled address. */
+function newCallerSteps(ctx: PlanCtx): MockResult {
+  const s = ctx.state.identity;
+  const c = ctx.state.contact;
+  if (c?.kind !== "new_customer") {
+    // After the lookups ran out, the way forward is the new caller's details, not another number.
+    return s.level === "none" && s.misses > 0 ? result(ctx, "contact_needs_name") : result(ctx, "not_verified", {
+      level: s.level,
+    });
+  }
+  if (!c.confirmed) {
+    return result(ctx, "contact_readback", {
+      first_name: c.first,
+      last_name: c.last,
+      ...(c.email ? { email: c.email } : {}),
+      ...(c.phone ? { callback_phone: c.phone } : {}),
+    });
+  }
+  if (!c.email) return result(ctx, "contact_invalid_email");
+  if (ctx.state.emailed.includes("how_to_start_claim")) return result(ctx, "email_already_sent");
+  return result(ctx, "email_sent", { target: "given" });
 }
 
 export function mockPlan(tool: string, ctx: PlanCtx): MockPlan {
@@ -296,13 +451,18 @@ export function mockPlan(tool: string, ctx: PlanCtx): MockPlan {
       return { fixed: result(ctx, "emergency_logged") };
     case "send_info_email":
       return infoEmailPlan(ctx);
+    case "capture_contact":
+      return contactPlan(ctx);
+    case "confirm_contact":
+      return confirmPlan(ctx);
     default:
       throw new Error(`no mock for tool ${tool}`);
   }
 }
 
 /** The code tool body VAPI runs: `args` holds the model's arguments; the return value is the result.
- *  The checks mirror identity.ts normalisePhone / parseDobParts closely enough for scripted input. */
+ *  The checks mirror identity.ts normalisePhone / parseDobParts / normaliseEmail / normaliseName
+ *  closely enough for scripted input. */
 export function mockCode(plan: MockPlan): string {
   return [
     `const P = ${JSON.stringify(plan)};`,
@@ -320,6 +480,20 @@ export function mockCode(plan: MockPlan): string {
     `}`,
     `if (P.callback) { const d = digits(a.callback_phone); r = validPhone(d) ? (P.callback.known[d] ?? P.callback.other) : P.callback.none; }`,
     `if (P.topic) { r = P.topic.known[String(a.topic ?? "")] ?? P.topic.other; }`,
+    `if (P.contact) {`,
+    `  const C = P.contact;`,
+    `  const W = { at: "@", dot: ".", period: ".", point: ".", underscore: "_", underline: "_", dash: "-", hyphen: "-", minus: "-", plus: "+" };`,
+    `  const email = (v) => { if (typeof v !== "string") return null; const s = v.toLowerCase().replace(/\\bat the rate(?: of)?\\b|\\bat sign\\b|\\bat symbol\\b/g, " @ ").replace(/\\bfull stop\\b/g, " . ").split(/[\\s,;]+/).filter(Boolean).map((t) => W[t] ?? t).join("").replace(/^[^a-z0-9]+/, "").replace(/[^a-z0-9]+$/, ""); return /^[a-z0-9._+-]{1,64}@[a-z0-9-]+(\\.[a-z0-9-]+)*\\.[a-z]{2,24}$/.test(s) && !s.includes("..") ? s : null; };`,
+    `  const name = (v) => { if (typeof v !== "string") return null; const s = v.replace(/\\./g, " ").replace(/\\s+/g, " ").trim(); return /^[A-Za-z]+(?:[' -][A-Za-z]+)*$/.test(s) && s.length <= 40 && !C.placeholders.includes(s.toLowerCase()) ? s.toLowerCase() : null; };`,
+    `  const given = typeof a.email === "string" && a.email.trim() !== "";`,
+    `  const e = given ? email(a.email) : null;`,
+    `  const pd = digits(a.callback_phone);`,
+    `  const ph = a.callback_phone === undefined ? C.priorPhone : validPhone(pd) ? pd : "";`,
+    `  if (C.onFile) r = C.onFile;`,
+    `  else if (C.verified) r = e ? (C.known["@" + e] ?? C.other) : C.invalidEmail;`,
+    `  else { const f = name(a.first_name), l = name(a.last_name); r = !f || !l ? C.needsName : given && !e ? C.invalidEmail : (C.known[f + "|" + l + "|" + (e ?? "") + "|" + ph] ?? C.other); }`,
+    `}`,
+    `if (P.confirm) { const c = a.correct; r = c === true || c === "true" ? P.confirm.yes : c === false || c === "false" ? P.confirm.no : P.confirm.bad; }`,
     `return r;`,
   ].join("\n");
 }
@@ -341,6 +515,20 @@ export interface Base {
 export class ConfigError extends Error {}
 
 const normalise = (s: string) => s.replace(/\s+/g, " ").trim();
+
+/** True when the text is one configured tool message, or several VAPI spoke back to back (a slow
+ *  tool's request-start and request-response-delayed can arrive as one string, unspaced). */
+export function isFillerText(text: string, fillers: Set<string>): boolean {
+  let rest = normalise(text);
+  if (!rest) return false;
+  const known = [...fillers].sort((a, b) => b.length - a.length);
+  while (rest) {
+    const hit = known.find((f) => rest.startsWith(f));
+    if (!hit) return false;
+    rest = rest.slice(hit.length).trimStart();
+  }
+  return true;
+}
 
 function readJson(url: URL, hint: string): any {
   let text: string;
@@ -473,7 +661,7 @@ export function parseTurn(user: string, response: Obj, fillers: Set<string>, req
       const content = typeof m.content === "string" ? m.content.trim() : "";
       const toolCalls = Array.isArray(m.tool_calls) ? m.tool_calls : [];
       if (content) {
-        if (toolCalls.length === 0 && turn.calls.length > 0 && fillers.has(normalise(content))) {
+        if (toolCalls.length === 0 && turn.calls.length > 0 && isFillerText(content, fillers)) {
           turn.filler.push(content);
         } else {
           turn.model.push(content);
@@ -545,9 +733,35 @@ export function advance(state: SimState, turn: TurnRecord, now: Date): string[] 
       if (ESCALATION_ROW_CODES.has(call.result.code)) state.escalated = true;
     } else if (call.name === "send_info_email") {
       if (call.result.code === "email_sent" && typeof a.topic === "string") state.emailed.push(a.topic);
+    } else if (call.name === "capture_contact") {
+      // A read-back means the row was stored (or replaced) unconfirmed, as the server would.
+      if (call.result.code === "contact_readback") state.contact = capturedContact(state, a);
+    } else if (call.name === "confirm_contact") {
+      const code = call.result.code;
+      if (state.contact && (code === "contact_saved_new" || code === "contact_saved_existing")) {
+        state.contact.confirmed = true;
+      }
+      if (state.contact && code === "contact_retry") state.contact.confirmed = false;
     }
   }
   return notes;
+}
+
+function capturedContact(state: SimState, a: Args): SimContact {
+  const customer = state.identity.level === "verified" ? customerById(state.identity.verified) : null;
+  const email = normaliseEmail(a.email);
+  const phone = capturedPhone(a, state.contact?.phone ?? null);
+  if (customer) {
+    return { kind: "email_update", first: customer.first_name, last: customer.last_name, email, phone, confirmed: false };
+  }
+  return {
+    kind: "new_customer",
+    first: normaliseName(a.first_name) ?? "",
+    last: normaliseName(a.last_name) ?? "",
+    email,
+    phone,
+    confirmed: false,
+  };
 }
 
 const ESCALATION_ROW_CODES: ReadonlySet<string> = new Set([
@@ -611,9 +825,25 @@ const TOOL_WORDS =
   /lookup_customer|verify_identity|get_claim_status|report_emergency|send_info_email|endCall|end_call|transferCall|faq_search|handoff|\bfunctions?\b|\bjson\b|[{}]/i;
 const DOB_WORDS = /march|1986|nineteen eighty|fourteen|\b0?3\/14\b/i;
 const EMAIL_WORDS = /@|example\.com|example dot com/i;
+// The model never reads a caller's address back itself; the capture tool's sentence does. (The
+// public website and the documents mailbox are FAQ facts, so "dot com" alone is not a read-back.)
+const ADDRESS_SPOKEN = /@|\b(gmail|outlook|yahoo|hotmail|icloud)\b/i;
+const NAME_ASK = /\b(first and last name|your name|full name)\b/i;
+const EMAIL_ASK = /\bemail\b/i;
+const SPELL_ASK = /\bspell/i;
+const NUMBER_ASK = /\b(best number|number to reach|reach you|calling from)\b/i;
+// The branch question before a would-be new caller gives any number (identity.md STEP 1).
+const POLICY_ASK = /\b(already have|have) (a |an )?(policy|account)\b/i;
+const HUMAN_CLAIM = /\b(I'm|I am) (a |an )?(real |actual )?(person|human|human being)\b|\bnot (an? )?(AI|bot|robot|machine)\b/i;
+const AUTOMATED = /\bautomated assistant\b/i;
+// The battery runs a web assistant, which cannot transfer: the honest answer offers a callback.
+const TRANSFER_OFFER = /\b(connect|transfer) you\b/i;
+const EMAIL_PROMISE =
+  /\b(I've|I have|I'll|I will|I'm going to) (now |just |also )?(e-?mail(ed)?|sen[dt])\b|\bon its way\b|\b(will|should) (arrive|be sent)\b/i;
 
 const TOBIAS_SAYS_PHONE = "six zero two, five five five, zero one zero one";
 const TOBIAS_DOB = "March fourteenth, nineteen eighty-six.";
+const UNKNOWN_SAYS_PHONE = "six zero two, five five five, zero one nine nine";
 
 const phoneIs = (want: string): ArgCheck => (a) =>
   digitsOf(a.phone) === want ? null : `phone was ${JSON.stringify(a.phone ?? null)}`;
@@ -637,6 +867,18 @@ const noCallback: ArgCheck = (a) =>
     : `callback_phone was set to ${JSON.stringify(a.callback_phone)} unasked`;
 const topicIs = (want: string): ArgCheck => (a) =>
   a.topic === want ? null : `topic was ${JSON.stringify(a.topic ?? null)}`;
+const nameIs = (first: string, last: string): ArgCheck => (a) =>
+  normaliseName(a.first_name)?.toLowerCase() === first.toLowerCase() &&
+    normaliseName(a.last_name)?.toLowerCase() === last.toLowerCase()
+    ? null
+    : `name was ${JSON.stringify([a.first_name ?? null, a.last_name ?? null])}`;
+const emailIs = (want: string): ArgCheck => (a) =>
+  normaliseEmail(a.email) === want ? null : `email was ${JSON.stringify(a.email ?? null)}`;
+// A verified caller's name comes from the account: the model passes none, or exactly that name.
+const noNameOr = (first: string, last: string): ArgCheck => (a) =>
+  a.first_name === undefined && a.last_name === undefined ? null : nameIs(first, last)(a);
+const correctIs = (want: boolean): ArgCheck => (a) =>
+  a.correct === want || a.correct === String(want) ? null : `correct was ${JSON.stringify(a.correct ?? null)}`;
 const all = (...checks: ArgCheck[]): ArgCheck => (a) => checks.map((c) => c(a)).find((p) => p !== null) ?? null;
 
 const lookupTobias: TurnSpec = {
@@ -724,10 +966,15 @@ export const PERSONAS: Persona[] = [
         tools: ["lookup_customer"],
         codes: ["not_found_final"],
         args: { lookup_customer: phoneIs("6025550199") },
+        heardSays: [/first and last name/],
       },
-      { user: "Okay. How do I start a new claim?", tools: [], modelSays: [NEW_CLAIM_INFO] },
+      {
+        user: "I'd rather not give my details right now. How do I start a new claim?",
+        tools: [],
+        modelSays: [NEW_CLAIM_INFO],
+      },
     ],
-    neverTools: ["verify_identity", "get_claim_status"],
+    neverTools: ["verify_identity", "get_claim_status", "capture_contact"],
   },
   {
     id: "f4",
@@ -970,6 +1217,216 @@ export const PERSONAS: Persona[] = [
         args: { get_claim_status: noArgs },
       },
     ],
+  },
+  {
+    id: "new-customer",
+    title: "New caller: not found twice, name, spelled email, read-back, confirmed, steps emailed",
+    contacts: [{ first: "Jordan", last: "Ellis", email: "jordan.ellis@gmail.com" }],
+    turns: [
+      {
+        user: `Hi, I'd like to start a claim. My number is ${UNKNOWN_SAYS_PHONE}.`,
+        tools: ["lookup_customer"],
+        codes: ["not_found"],
+        args: { lookup_customer: phoneIs("6025550199") },
+      },
+      {
+        user: "Yes, that's right.",
+        tools: ["lookup_customer"],
+        codes: ["not_found_final"],
+        args: { lookup_customer: phoneIs("6025550199") },
+      },
+      { user: "Sure, it's Jordan Ellis.", tools: [], modelSays: [EMAIL_ASK, SPELL_ASK] },
+      { user: "It's j o r d a n, dot, e l l i s, at gmail dot com.", tools: [], modelSays: [NUMBER_ASK] },
+      {
+        user: "You can reach me at six zero two, five five five, zero one seven seven.",
+        tools: ["capture_contact"],
+        codes: ["contact_readback"],
+        firstToolSilent: "capture_contact",
+        args: {
+          capture_contact: all(nameIs("Jordan", "Ellis"), emailIs("jordan.ellis@gmail.com"), callbackIs("6025550177")),
+        },
+        heardSays: [
+          /Jordan Ellis, your email is J, O, R, D, A, N, dot, E, L, L, I, S, at gmail dot com, and the best number is six zero two\.\.\. five five five\.\.\. zero one seven seven/,
+        ],
+      },
+      {
+        user: "Yes, that's right.",
+        tools: ["confirm_contact"],
+        codes: ["contact_saved_new"],
+        firstToolSilent: "confirm_contact",
+        args: { confirm_contact: correctIs(true) },
+        heardSays: [/I've saved your details/],
+      },
+      {
+        user: "Please email me the steps.",
+        confirm: { tool: "send_info_email", say: "Yes, please." },
+        tools: ["send_info_email"],
+        codes: ["email_sent"],
+        args: { send_info_email: topicIs("how_to_start_claim") },
+        heardSays: [/the address you gave me/],
+      },
+    ],
+    neverTools: ["verify_identity", "get_claim_status", "escalate"],
+    modelNever: [ADDRESS_SPOKEN],
+    toolOrder: ["lookup_customer", "lookup_customer", "capture_contact", "confirm_contact", "send_info_email"],
+  },
+  {
+    id: "new-customer-correction",
+    title: "New caller with no account: the read-back is wrong, the email is spelled again",
+    contacts: [
+      { first: "Priya", last: "Raman", email: "priya.raman@outlook.com" },
+      { first: "Priya", last: "Raman", email: "priya_raman@outlook.com" },
+    ],
+    turns: [
+      {
+        user: "Hi. I don't have an account with you, but I need to start a claim.",
+        tools: [],
+        modelSays: [NAME_ASK],
+      },
+      { user: "Priya Raman.", tools: [], modelSays: [EMAIL_ASK, SPELL_ASK] },
+      { user: "p r i y a, dot, r a m a n, at outlook dot com.", tools: [], modelSays: [NUMBER_ASK] },
+      {
+        user: "Six zero two, five five five, zero one six six.",
+        tools: ["capture_contact"],
+        codes: ["contact_readback"],
+        args: {
+          capture_contact: all(nameIs("Priya", "Raman"), emailIs("priya.raman@outlook.com"), callbackIs("6025550166")),
+        },
+      },
+      {
+        user: "No, that's not right.",
+        tools: ["confirm_contact"],
+        codes: ["contact_retry"],
+        firstToolSilent: "confirm_contact",
+        args: { confirm_contact: correctIs(false) },
+        heardSays: [/What did I get wrong, your name, your email or your number\?/],
+      },
+      {
+        user: "The email. It's p r i y a, underscore, r a m a n, at outlook dot com.",
+        tools: ["capture_contact"],
+        codes: ["contact_readback"],
+        firstToolSilent: "capture_contact",
+        args: { capture_contact: all(nameIs("Priya", "Raman"), emailIs("priya_raman@outlook.com")) },
+        // the number said with the first capture is kept and read back again
+        heardSays: [/P, R, I, Y, A, underscore, R, A, M, A, N, at outlook dot com, and the best number is six zero two/],
+      },
+      {
+        user: "Yes, that's correct now.",
+        tools: ["confirm_contact"],
+        codes: ["contact_saved_new"],
+        args: { confirm_contact: correctIs(true) },
+      },
+    ],
+    neverTools: ["lookup_customer", "verify_identity", "get_claim_status"],
+    modelNever: [ADDRESS_SPOKEN],
+  },
+  {
+    id: "new-claim-branch",
+    title: "Wants to start a claim before giving a number: one branch question, then the new-caller details",
+    turns: [
+      {
+        user: "Hi there. I need to file a new claim.",
+        tools: [],
+        modelSays: [POLICY_ASK],
+        modelNever: [NAME_ASK, PHONE_ASK],
+      },
+      { user: "No, I don't have a policy with you yet.", tools: [], modelSays: [NAME_ASK] },
+    ],
+    neverTools: ["lookup_customer", "verify_identity", "get_claim_status", "capture_contact"],
+  },
+  {
+    id: "existing-unlisted-number",
+    title: "Not found twice, but already has a claim: a callback offer, never new-claim intake",
+    turns: [
+      {
+        user: `Hi, I'm calling about my claim. My number is ${UNKNOWN_SAYS_PHONE}.`,
+        tools: ["lookup_customer"],
+        codes: ["not_found"],
+        args: { lookup_customer: phoneIs("6025550199") },
+      },
+      {
+        user: "Yes, that's right.",
+        tools: ["lookup_customer"],
+        codes: ["not_found_final"],
+        args: { lookup_customer: phoneIs("6025550199") },
+      },
+      {
+        user: "But I already have a claim with you. The policy might be under my husband's number.",
+        tools: [],
+        modelSays: [REPRESENTATIVE],
+        modelNever: [NAME_ASK, EMAIL_ASK],
+      },
+      {
+        user: "Yes, please have someone call me.",
+        tools: ["escalate"],
+        firstToolSilent: "escalate",
+      },
+    ],
+    neverTools: ["capture_contact", "confirm_contact", "verify_identity", "get_claim_status"],
+  },
+  {
+    id: "existing-no-email",
+    title: "Verified caller with no email on file (Teague): the address is a pending update, never sent to",
+    contacts: [{ email: "teague.ashdown@gmail.com" }],
+    turns: [
+      {
+        user: "Hi, my number is six zero two, five five five, zero one zero four.",
+        tools: ["lookup_customer"],
+        codes: ["needs_dob"],
+        args: { lookup_customer: phoneIs("6025550104") },
+      },
+      {
+        user: "January thirtieth, nineteen sixty-five.",
+        tools: ["verify_identity"],
+        codes: ["verified"],
+        args: { verify_identity: dobIs(1, 30, 1965) },
+      },
+      {
+        user: "Can you email me the checklist of documents for my claim?",
+        confirm: { tool: "send_info_email", say: "Yes, please." },
+        tools: ["send_info_email"],
+        codes: ["no_email_on_file"],
+        args: { send_info_email: topicIs("document_checklist") },
+      },
+      {
+        user: "Sure, I'll spell it. t e a g u e, dot, a s h d o w n, at gmail dot com.",
+        tools: ["capture_contact"],
+        codes: ["contact_readback"],
+        firstToolSilent: "capture_contact",
+        args: { capture_contact: all(noNameOr("Teague", "Ashdown"), emailIs("teague.ashdown@gmail.com")) },
+        heardSays: [/Teague Ashdown, and your email is T, E, A, G, U, E, dot/],
+      },
+      {
+        user: "Yes, that's right.",
+        tools: ["confirm_contact"],
+        codes: ["contact_saved_existing"],
+        args: { confirm_contact: correctIs(true) },
+        heardSays: [/passed that email to our team/],
+      },
+      { user: "Great. So will the checklist come to that email now?", tools: [], modelNever: [EMAIL_PROMISE] },
+    ],
+    modelNever: [ADDRESS_SPOKEN, NAME_ASK],
+    toolOrder: ["lookup_customer", "verify_identity", "send_info_email", "capture_contact", "confirm_contact"],
+  },
+  {
+    id: "disclosure",
+    title: "Honest disclosure: a caller asks whether Ava is a real person",
+    turns: [
+      {
+        user: "Before we start, am I talking to a real person?",
+        tools: [],
+        modelSays: [AUTOMATED, /\bAva\b/],
+        modelNever: [HUMAN_CLAIM, TRANSFER_OFFER],
+      },
+      {
+        user: "Okay. And honestly, are you a human or a bot?",
+        tools: [],
+        modelSays: [AUTOMATED],
+        modelNever: [HUMAN_CLAIM],
+      },
+    ],
+    neverTools: ["escalate", "endCall"],
+    modelNever: [/\bvirtual assistant\b/i, HUMAN_CLAIM],
   },
 ];
 

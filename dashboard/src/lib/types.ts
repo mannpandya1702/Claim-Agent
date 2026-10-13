@@ -1,5 +1,5 @@
-// Row shapes the browser can read (0003_dashboard.sql grants). customers and claims are never
-// granted, so they have no type here on purpose.
+// Row shapes the browser can read (0003_dashboard.sql and later grants). customers and claims are
+// never granted, so they have no type here on purpose.
 
 export const OUTCOMES = [
   "resolved",
@@ -26,6 +26,13 @@ export const FLAGS = [
   "email_promised_without_send",
 ] as const;
 export type Flag = (typeof FLAGS)[number];
+
+/**
+ * Who called, as the end-of-call writer records it (0006_contacts.sql): existing = the session
+ * matched an account, new = a caller with no account gave their details, unknown = neither.
+ */
+export const CALLER_TYPES = ["existing", "new", "unknown"] as const;
+export type CallerType = (typeof CALLER_TYPES)[number];
 
 export const CHANNELS = ["webCall", "inboundPhoneCall", "outboundPhoneCall", "chat", "unknown"] as const;
 export type Channel = (typeof CHANNELS)[number];
@@ -93,6 +100,10 @@ export interface CallInteraction {
   staff_notes: string | null;
   assistant_name: string | null;
   analysis_status: AnalysisStatus;
+  /** 0006_contacts.sql; absent before it is applied (fetchCall then reads the older columns). */
+  caller_type?: CallerType;
+  /** The address a caller confirmed on the read-back (never the account's own email). Detail page only. */
+  caller_email?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -106,6 +117,10 @@ export interface CallListRow {
   caller_name: string | null;
   /** "+1 602 ... 0101", masked in SQL. */
   caller_phone_masked: string | null;
+  /** 0006_contacts.sql; absent before it is applied. */
+  caller_type?: CallerType | null;
+  /** "j***@gmail.com", masked in SQL; the full address stays on the detail page. Absent before 0006. */
+  caller_email_masked?: string | null;
   outcome: Outcome | null;
   sentiment: Sentiment | null;
   escalated: boolean;
@@ -194,6 +209,32 @@ export interface EmailRow {
   status: EmailStatus;
   error: string | null;
   created_at: string;
+}
+
+export type ContactKind = "new_customer" | "email_update";
+/** Where a captured callback number came from (caller_contacts has no "account" source). */
+export type ContactCallbackSource = Extract<CallbackSource, "argument" | "caller_id" | "none">;
+
+/**
+ * caller_contacts (0006_contacts.sql): the name, email and callback number a caller gave on this
+ * call, one row per call. new_customer is a caller with no account; email_update is a verified
+ * customer with no email on file asking staff to add one (never written to the account, never
+ * used to send anything). Every address here was spoken by the caller and is unverified.
+ */
+export interface CallerContact {
+  call_key: string;
+  kind: ContactKind;
+  first_name: string;
+  last_name: string;
+  email: string | null;
+  /** E.164; the full number, detail page only. */
+  callback_phone: string | null;
+  callback_source: ContactCallbackSource;
+  /** The caller said yes to the read-back. */
+  confirmed: boolean;
+  confirmed_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface TranscriptLineRow {
@@ -290,7 +331,7 @@ export interface DeliveryGapRow {
 /** Alert channels from escalation_delivery_gap, plus the Airtable call log from the outbox. */
 export type DeliveryChannel = "telegram" | "email" | "airtable";
 
-/** Tables published to supabase_realtime (0003_dashboard.sql, 0005_outbox.sql). */
+/** Tables published to supabase_realtime (0003_dashboard.sql, 0005_outbox.sql, 0006_contacts.sql). */
 export type RealtimeTable =
   | "call_interactions"
   | "call_sessions"
@@ -298,4 +339,5 @@ export type RealtimeTable =
   | "emails"
   | "transcript_lines"
   | "attempts"
-  | "outbox_events";
+  | "outbox_events"
+  | "caller_contacts";

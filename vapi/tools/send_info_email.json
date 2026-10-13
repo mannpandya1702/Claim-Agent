@@ -4,7 +4,7 @@
   "function": {
     "name": "send_info_email",
     "strict": false,
-    "description": "Email information to the address already on the verified caller's account. Call it after the caller said yes to having it emailed. Never takes an address. Its result is a sentence that has already been spoken to the caller.",
+    "description": "Email information to the caller. A verified caller's goes to the address already on their account; a new caller whose details were confirmed on this call can be sent only the steps to start a claim, at the address they gave. Call it after the caller said yes to having it emailed. Never takes an address. Its result is a sentence that has already been spoken to the caller.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -27,12 +27,12 @@
     {
       "type": "request-start",
       "blocking": false,
-      "content": "Let me send that over."
+      "content": "Sure, let me check on that."
     },
     {
       "type": "request-response-delayed",
       "timingMilliseconds": 3000,
-      "content": "Still sending, one moment."
+      "content": "Thanks for bearing with me, almost there."
     },
     {
       "type": "request-failed",

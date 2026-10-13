@@ -25,7 +25,7 @@ export function chipLabel(chip: Pick<ToolChip, "tool" | "code">): string {
 
 /**
  * The conversation as chat bubbles with mm:ss stamps, and tool results as chips in between.
- * Tessa sits on the left, the caller on the right. The same view renders live transcript_lines
+ * Ava sits on the left, the caller on the right. The same view renders live transcript_lines
  * and the stored messages; the page decides which source it passes in.
  */
 export function TranscriptView({ items, live = false, empty, maxHeightClass = "max-h-[34rem]", className }: TranscriptViewProps) {
@@ -111,7 +111,7 @@ export function TranscriptView({ items, live = false, empty, maxHeightClass = "m
 
 function BubbleRow({ bubble }: { bubble: Bubble }) {
   const agent = bubble.speaker === "agent";
-  const who = agent ? (bubble.name ? `Tessa · ${bubble.name}` : "Tessa") : "Caller";
+  const who = agent ? (bubble.name ? `Ava · ${bubble.name}` : "Ava") : "Caller";
   return (
     <li
       className={cn("flex flex-col gap-1", agent ? "items-start pr-6 sm:pr-12" : "items-end pl-6 sm:pl-12")}

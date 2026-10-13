@@ -80,6 +80,139 @@ export function callerIdNumber(raw: unknown, ownNumbers: string[]): string | nul
   return usableCallbackNumber(raw, ownNumbers);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Caller-given contact details (capture_contact). The model passes what it heard, sometimes in the
+// spoken form ("j o h n dot smith at gmail dot com"); these turn it into one stored value or null.
+// ---------------------------------------------------------------------------------------------
+// Whole spoken phrases first, then single spoken words; everything else is kept as written.
+const EMAIL_PHRASES: [RegExp, string][] = [
+  [/\bat the rate(?: of)?\b|\bat sign\b|\bat symbol\b/g, " @ "],
+  [/\bfull stop\b/g, " . "],
+];
+const EMAIL_WORDS: Readonly<Record<string, string>> = {
+  at: "@",
+  dot: ".",
+  period: ".",
+  point: ".",
+  underscore: "_",
+  underline: "_",
+  dash: "-",
+  hyphen: "-",
+  minus: "-",
+  plus: "+",
+};
+/** Longest address accepted from a caller; real ones are far shorter, and the read-back of a longer
+ *  one would not fit VAPI's spoken-message limit. */
+export const MAX_EMAIL_CHARS = 100;
+const EMAIL_LOCAL_RE = /^[a-z0-9._+-]{1,64}$/;
+const DOMAIN_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const TLD_RE = /^[a-z]{2,24}$/;
+
+/** A plain address: one @, a local part of letters, digits and . _ + - (no leading, trailing or
+ *  doubled dot), and a domain of at least two labels ending in a letters-only top-level domain. */
+export function isPlainEmail(address: unknown): address is string {
+  if (typeof address !== "string" || address.length > MAX_EMAIL_CHARS) {
+    return false;
+  }
+  const parts = address.split("@");
+  if (parts.length !== 2) return false;
+  const [local, domain] = parts;
+  if (
+    !EMAIL_LOCAL_RE.test(local) || local.startsWith(".") ||
+    local.endsWith(".") || local.includes("..")
+  ) {
+    return false;
+  }
+  const labels = domain.split(".");
+  return labels.length >= 2 && labels.every((l) => DOMAIN_LABEL_RE.test(l)) &&
+    TLD_RE.test(labels[labels.length - 1]);
+}
+
+/** Caller-given email -> lower-case plain address, or null. Spoken forms are read (" at " -> "@",
+ *  " dot " -> ".", underscore, dash, plus), spaces and commas between spelled letters are dropped,
+ *  and the result must be a plain address (isPlainEmail). Spoken digit words are kept as words: a
+ *  name like "fourseasons" is as likely as a digit, and the read-back lets the caller correct it. */
+export function normaliseEmail(raw: unknown): string | null {
+  if (typeof raw !== "string" || raw.length > 4 * MAX_EMAIL_CHARS) return null;
+  let s = raw.normalize("NFKC").toLowerCase().replace(
+    /[\u2010-\u2015\u2212]/g,
+    "-",
+  ).replace(/^\s*mailto:/, "");
+  for (const [re, to] of EMAIL_PHRASES) s = s.replace(re, to);
+  const joined = s.split(/[\s,;]+/).filter(Boolean).map((t) => EMAIL_WORDS[t] ?? t).join("");
+  // Quotes, brackets or closing punctuation around the address are not part of it.
+  const address = joined.replace(/^[<("'\[]+/, "").replace(
+    /[>)"'\].,;:!?]+$/,
+    "",
+  );
+  return isPlainEmail(address) ? address : null;
+}
+
+/** Longest single name part (first or last) accepted from a caller. */
+export const MAX_NAME_PART_CHARS = 40;
+// What a model writes when it has no name, or a form label instead of one.
+const NAME_PLACEHOLDERS: ReadonlySet<string> = new Set([
+  "unknown",
+  "caller",
+  "customer",
+  "anonymous",
+  "n/a",
+  "na",
+  "none",
+  "nobody",
+  "no name",
+  "not provided",
+  "not given",
+  "name",
+  "first",
+  "last",
+  "first name",
+  "last name",
+  "surname",
+  "test",
+  "user",
+  "sir",
+  "madam",
+  "mr",
+  "mrs",
+  "ms",
+  "miss",
+  "dr",
+]);
+// Words of letters joined by single spaces, apostrophes or hyphens (checked on the accent-folded
+// form, so "Jose" and "Jose" with an accent are both accepted and both speakable).
+const NAME_SHAPE_RE = /^[A-Za-z]+(?:[' -][A-Za-z]+)*$/;
+
+function titleCase(name: string): string {
+  return name.toLowerCase().replace(
+    /(^|[' -])(\p{L})/gu,
+    (_m, sep: string, ch: string) => sep + ch.toUpperCase(),
+  );
+}
+
+/** One caller-given name part -> trimmed name, or null. Letters, spaces, apostrophes and hyphens
+ *  only (full stops are dropped: "St. John" -> "St John"), 1 to 40 characters, no placeholder
+ *  ("unknown", "first name"). An all-lower or all-upper name is title-cased; any other casing is
+ *  kept as the caller's own ("McDonald", "van der Berg"). */
+export function normaliseName(raw: unknown): string | null {
+  if (typeof raw !== "string" || raw.length > 4 * MAX_NAME_PART_CHARS) {
+    return null;
+  }
+  const s = raw.normalize("NFC")
+    .replace(/[\u2018\u2019\u02bc`]/g, "'")
+    .replace(/[\u2010-\u2015]/g, "-")
+    .replace(/\./g, " ")
+    .replace(/\s*([-'])\s*/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (s.length < 1 || s.length > MAX_NAME_PART_CHARS) return null;
+  const folded = s.normalize("NFKD").replace(/\p{M}/gu, "");
+  if (
+    !NAME_SHAPE_RE.test(folded) || NAME_PLACEHOLDERS.has(folded.toLowerCase())
+  ) return null;
+  return s === s.toLowerCase() || s === s.toUpperCase() ? titleCase(s) : s;
+}
+
 /** Last four digits for logs and sentences; never more. */
 export function lastFour(e164: string): string {
   return typeof e164 === "string" ? e164.replace(/\D/g, "").slice(-4) : "";

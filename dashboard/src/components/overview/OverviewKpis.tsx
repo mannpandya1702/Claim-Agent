@@ -147,7 +147,7 @@ export function performanceTiles(m: DashboardMetrics, rangeQuery: string): KpiDe
       label: "Avg turn latency",
       value: formatLatency(m.avg_latency_ms),
       icon: Gauge,
-      hint: "Caller stops talking to Tessa replying",
+      hint: "Caller stops talking to Ava replying",
     },
     {
       id: "emails",

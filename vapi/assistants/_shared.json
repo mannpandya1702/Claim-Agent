@@ -11,11 +11,14 @@
     },
     "voice": {
       "provider": "11labs",
-      "model": "eleven_flash_v2_5",
-      "voiceId": "EXAVITQu4vr4xnSDxMaL",
-      "stability": 0.5,
+      "voiceId": "bP6y87KyX5lwNEi7xOkX",
+      "model": "eleven_turbo_v2_5",
+      "speed": 0.88,
+      "stability": 0.7,
+      "style": 0.3,
       "similarityBoost": 0.75,
-      "optimizeStreamingLatency": 2
+      "useSpeakerBoost": true,
+      "optimizeStreamingLatency": 3
     },
     "transcriber": {
       "provider": "deepgram",
@@ -25,7 +28,7 @@
       "smartFormat": false,
       "confidenceThreshold": 0.3,
       "endpointing": 300,
-      "keyterm": ["Observe Insurance", "claim number", "policy number", "date of birth"]
+      "keyterm": ["Observe Insurance", "claim number", "policy number", "date of birth", "Ava", "Gmail", "Outlook", "Hotmail", "iCloud"]
     },
     "startSpeakingPlan": {
       "waitSeconds": 0.4,
@@ -33,7 +36,13 @@
       "customEndpointingRules": [
         {
           "type": "assistant",
-          "regex": "(phone number|date of birth)",
+          "regex": "(spell|letter by letter)",
+          "regexOptions": [{ "type": "ignore-case", "enabled": true }],
+          "timeoutSeconds": 3
+        },
+        {
+          "type": "assistant",
+          "regex": "(phone number|date of birth|best number|reach you|first and last name|get that right|get wrong)",
           "regexOptions": [{ "type": "ignore-case", "enabled": true }],
           "timeoutSeconds": 2
         }
@@ -41,7 +50,7 @@
     },
     "stopSpeakingPlan": { "numWords": 2, "voiceSeconds": 0.3, "backoffSeconds": 2 },
     "backgroundSound": "off",
-    "firstMessage": "Thanks for calling Observe Insurance claims support. This is Tessa, a virtual assistant, and this call may be recorded. To get started, what's the phone number on your account?",
+    "firstMessage": "Hi, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. What's the phone number on your account?",
     "firstMessageMode": "assistant-speaks-first",
     "hooks": [
       {
@@ -86,7 +95,7 @@
         "messages": [
           {
             "role": "system",
-            "content": "You summarise insurance claims support calls for a representative. Write 2-3 sentences: who called (first name only if known), what they asked, what was resolved, and any next step. Never include a date of birth, a full phone number or a policy number."
+            "content": "You summarise insurance claims support calls for a representative. Write 2-3 sentences: who called (first name only if known), whether they are an existing customer or a new caller, what they asked, what was resolved, and any next step. Never include a date of birth, a full phone number, an email address or a policy number."
           },
           { "role": "user", "content": "{{transcript}}" }
         ]
@@ -98,7 +107,7 @@
         "messages": [
           {
             "role": "system",
-            "content": "Extract the fields from the transcript of an insurance claims support call. caller_name is the name the caller gave on the call, else \"unknown\". Never include a date of birth, a phone number or a policy number in any field."
+            "content": "Extract the fields from the transcript of an insurance claims support call. caller_name is the name the caller gave on the call, else \"unknown\". Never include a date of birth, a phone number, an email address or a policy number in any field."
           },
           { "role": "user", "content": "{{transcript}}" }
         ]

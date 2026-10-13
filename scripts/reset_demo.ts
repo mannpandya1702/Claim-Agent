@@ -1,6 +1,6 @@
 // Resets the demo project before a demo or a re-run of the flows: every per-call row goes
-// (sessions, attempts, escalations, emails, live transcript lines, interactions and their queued
-// call-log deliveries, which would otherwise be given up as "record missing") and the seeded
+// (sessions, attempts, escalations, emails, caller contacts, live transcript lines, interactions
+// and their queued call-log deliveries, which would otherwise be given up as "record missing") and the seeded
 // customers get OWNER_EMAIL as their address on file, except Teague Ashdown, who keeps none (the
 // no_email_on_file branch). Identity counters are per call, so a clean slate means the next F1
 // hears the plain verified sentence and F2 can lock and then F1 verify again.
@@ -24,6 +24,8 @@ export const CALL_TABLES = [
   { table: "call_sessions", key: "call_key" },
   { table: "escalations", key: "call_key" },
   { table: "emails", key: "call_key" },
+  // 0006_contacts.sql: the names, emails and callback numbers callers gave on demo calls.
+  { table: "caller_contacts", key: "call_key" },
   { table: "transcript_lines", key: "call_key" },
   { table: "call_interactions", key: "vapi_call_id" },
   { table: "outbox_events", key: "ref_id" },

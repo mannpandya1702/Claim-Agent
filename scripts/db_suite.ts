@@ -34,14 +34,16 @@ const sql = sqlClient(env);
 const run = crypto.randomUUID().slice(0, 8);
 const DOB = [1986, 3, 14] as const;
 
-// Grants the dashboard migration (0003) and the outbox migration (0005, the staff read of
-// outbox_events) give to authenticated. Anything outside this list is a failure; before 0003 is
+// Grants the dashboard migration (0003), the outbox migration (0005, the staff read of
+// outbox_events) and the contacts migration (0006, the staff read of caller_contacts) give to
+// authenticated. Anything outside this list is a failure; before 0003 is
 // applied authenticated must hold nothing at all.
 const AUTHENTICATED_ALLOWLIST = [
   ...["staff", "call_interactions", "attempts", "call_sessions", "escalations", "emails", "job_runs"]
     .map((t) => `table:${t}:SELECT`),
   "table:transcript_lines:SELECT",
   "table:outbox_events:SELECT",
+  "table:caller_contacts:SELECT",
   "table:ops_health:SELECT",
   "column:call_interactions.staff_notes:UPDATE",
   ...[
@@ -63,6 +65,8 @@ const SERVER_FUNCTIONS = [
   "upsert_interaction(jsonb)",
   "enqueue_outbox(text,text,text)",
   "claim_outbox(integer)",
+  "upsert_caller_contact(text,text,text,text,text,text,text,uuid)",
+  "set_caller_contact_confirmed(text,boolean)",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -444,6 +448,120 @@ await test("upsert_interaction merge order: stub, full, partial, stub after full
 });
 
 // ---------------------------------------------------------------------------------------------
+// Caller contacts and the post-call caller columns (0006)
+// ---------------------------------------------------------------------------------------------
+await test("caller_contacts: captured unconfirmed, confirmed once, kept by an identical capture, reset by a change", async () => {
+  const f = fixture("contact");
+  const k = lit(f.callKey);
+  const upsert = (email: string | null, phone: string | null = "+16025550177", source = "argument") =>
+    `upsert_caller_contact(${k}, 'new_customer', 'Jane', 'Doe', ${lit(email)}, ${lit(phone)}, ${lit(source)}, null)`;
+  await sql(tx(
+    insertCustomer(f),
+    doBlock(
+      `
+  select * into r from ${upsert("jane.doe@example.com")};
+  assert r.kind = 'new_customer' and r.first_name = 'Jane' and r.email = 'jane.doe@example.com'
+    and r.callback_phone = '+16025550177' and r.callback_source = 'argument' and r.customer_id is null
+    and not r.confirmed and r.confirmed_at is null, format('capture: %s', row_to_json(r));
+
+  select * into r from set_caller_contact_confirmed(${k}, true);
+  assert r.confirmed and r.confirmed_at is not null, format('confirm: %s', row_to_json(r));
+  -- the first confirmation time is kept
+  update caller_contacts set confirmed_at = '2001-01-01T00:00:00Z' where call_key = ${k};
+  select * into r from set_caller_contact_confirmed(${k}, true);
+  assert r.confirmed_at = '2001-01-01T00:00:00Z', format('second confirm moved the time: %s', r.confirmed_at);
+
+  -- the same read-back again keeps the yes, even with another callback number (not read back)
+  select * into r from ${upsert("jane.doe@example.com", null, "none")};
+  assert r.confirmed and r.confirmed_at = '2001-01-01T00:00:00Z' and r.callback_phone is null
+    and r.callback_source = 'none', format('identical capture: %s', row_to_json(r));
+  -- a changed address needs a new yes
+  select * into r from ${upsert("jayne.doe@example.com")};
+  assert not r.confirmed and r.confirmed_at is null, format('changed capture: %s', row_to_json(r));
+  perform set_caller_contact_confirmed(${k}, true);
+  select * into r from set_caller_contact_confirmed(${k}, false);
+  assert not r.confirmed and r.confirmed_at is null, format('no: %s', row_to_json(r));
+  assert (select count(*) from caller_contacts where call_key = ${k}) = 1, 'one row per call';
+  assert not exists (select 1 from set_caller_contact_confirmed(${lit(`${f.callKey}-none`)}, true)), 'no row, no confirm';
+
+  -- an email update carries the verified customer; an unknown customer is refused
+  select * into r from upsert_caller_contact(${lit(`${f.callKey}-upd`)}, 'email_update', 'Dbtest', 'Customer',
+    'dbtest@example.com', null, 'none', ${lit(f.customerId)});
+  assert r.kind = 'email_update' and r.customer_id = ${lit(f.customerId)}, format('update: %s', row_to_json(r));
+  begin
+    perform upsert_caller_contact(${lit(`${f.callKey}-fk`)}, 'email_update', 'A', 'B', null, null, 'none', gen_random_uuid());
+    assert false, 'an unknown customer was accepted';
+  exception when foreign_key_violation then null;
+  end;
+
+  -- the CHECKs
+  begin perform upsert_caller_contact(${k}, 'prospect', 'A', 'B', null, null, 'none', null);
+    assert false, 'kind'; exception when check_violation then null; end;
+  begin perform upsert_caller_contact(${k}, 'new_customer', 'A', 'B', null, null, 'account', null);
+    assert false, 'callback_source'; exception when check_violation then null; end;
+  begin perform upsert_caller_contact(${k}, 'new_customer', '', 'B', null, null, 'none', null);
+    assert false, 'empty first name'; exception when check_violation then null; end;
+  begin perform upsert_caller_contact(${k}, 'new_customer', 'A', repeat('b', 41), null, null, 'none', null);
+    assert false, 'long last name'; exception when check_violation then null; end;
+  begin perform upsert_caller_contact(${k}, 'new_customer', 'A', 'B', 'Jane@Example.com', null, 'none', null);
+    assert false, 'upper-case email'; exception when check_violation then null; end;
+  begin perform upsert_caller_contact(${k}, 'new_customer', 'A', 'B', 'jane@example', null, 'none', null);
+    assert false, 'email without a top-level domain'; exception when check_violation then null; end;
+  begin perform upsert_caller_contact(${k}, 'new_customer', 'A', 'B', null, '6025550177', 'argument', null);
+    assert false, 'callback not E.164'; exception when check_violation then null; end;
+  begin update caller_contacts set confirmed = true, confirmed_at = null where call_key = ${k};
+    assert false, 'confirmed without a time'; exception when check_violation then null; end;`,
+      "r record;",
+    ),
+  ));
+});
+
+await test("upsert_interaction: caller_type replaces unknown, never downgrades; caller_email kept; search_calls returns both", async () => {
+  const f = fixture("ctype");
+  const k = f.callKey;
+  const j = (v: Record<string, unknown>) => `${lit(JSON.stringify({ vapi_call_id: k, ...v }))}::jsonb`;
+  const row = `select * into c from call_interactions where vapi_call_id = ${lit(k)};`;
+  await sql(tx(doBlock(
+    `
+  perform upsert_interaction(${j({ outcome: "in_progress", started_at: "2026-10-12T14:00:00Z" })});
+  ${row}
+  assert c.caller_type = 'unknown' and c.caller_email is null and c.caller_email_masked is null,
+    format('stub: %s/%s', c.caller_type, c.caller_email);
+
+  perform upsert_interaction(${j({ caller_type: "new", caller_email: "jane.doe@example.com" })});
+  ${row}
+  assert c.caller_type = 'new' and c.caller_email = 'jane.doe@example.com' and c.caller_email_masked = 'j***@example.com',
+    format('new: %s/%s/%s', c.caller_type, c.caller_email, c.caller_email_masked);
+
+  perform upsert_interaction(${j({ outcome: "in_progress" })});
+  perform upsert_interaction(${j({ caller_type: "unknown", caller_email: "" })});
+  perform upsert_interaction(${j({ caller_type: null, caller_email: null })});
+  ${row}
+  assert c.caller_type = 'new' and c.caller_email = 'jane.doe@example.com',
+    format('downgraded: %s/%s', c.caller_type, c.caller_email);
+
+  perform upsert_interaction(${j({ caller_type: "existing", ended_at: "2026-10-12T14:03:00Z", outcome: "resolved" })});
+  ${row}
+  assert c.caller_type = 'existing', format('replace: %s', c.caller_type);
+  -- forward-only: a stub after the end changes nothing, caller_type included
+  perform upsert_interaction(${j({ caller_type: "new" })});
+  ${row}
+  assert c.caller_type = 'existing', format('stub after end: %s', c.caller_type);
+
+  begin
+    perform upsert_interaction(${lit(JSON.stringify({ vapi_call_id: `${k}-bad`, caller_type: "prospect" }))}::jsonb);
+    assert false, 'an unknown caller_type was accepted';
+  exception when check_violation then null;
+  end;
+
+  select * into s from search_calls(p_q => ${lit(k)}, p_limit => 5);
+  assert s.vapi_call_id = ${lit(k)} and s.caller_type = 'existing' and s.caller_email_masked = 'j***@example.com',
+    format('search_calls: %s', row_to_json(s));`,
+    "c record; s record;",
+  )));
+});
+
+// ---------------------------------------------------------------------------------------------
 // Catalog: privileges and RLS
 // ---------------------------------------------------------------------------------------------
 
@@ -578,6 +696,21 @@ await test("runtime: anon and authenticated are denied the customer data and the
   begin
     perform public.claim_outbox(1);
     assert false, '${role} can call claim_outbox';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform public.upsert_caller_contact('dbtest-denied', 'new_customer', 'A', 'B', null, null, 'none', null);
+    assert false, '${role} can call upsert_caller_contact';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform public.set_caller_contact_confirmed('dbtest-denied', true);
+    assert false, '${role} can call set_caller_contact_confirmed';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    insert into public.caller_contacts (call_key, kind, first_name, last_name) values ('dbtest-denied', 'new_customer', 'A', 'B');
+    assert false, '${role} can insert caller_contacts';
   exception when insufficient_privilege then null;
   end;
   begin
@@ -875,6 +1008,63 @@ await test("store.ts round trip through PostgREST maps every method onto the sch
       delete from call_sessions where call_key = ${kk};
       delete from webhook_captures where call_key = ${kk};
       delete from claims where customer_id = ${lit(f.customerId)};
+      delete from customers where id = ${lit(f.customerId)};
+      commit;`);
+  }
+});
+
+await test("store.ts round trip: caller contacts and the post-call caller columns", async () => {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return "skip";
+  const f = fixture("contactrt");
+  const k = f.callKey;
+  await sql(`begin; ${insertCustomer(f, "dbtest@example.com")} commit;`);
+  const store = createStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+  const jane = {
+    callKey: k,
+    kind: "new_customer" as const,
+    firstName: "Jane",
+    lastName: "Doe",
+    email: "jane.doe@example.com",
+    callbackPhone: "+16025550177",
+    callbackSource: "argument" as const,
+    customerId: null,
+  };
+  try {
+    assertEquals(await store.getContact(k), null);
+    assertEquals(await store.setContactConfirmed(k, true), null);
+    assertEquals(await store.upsertContact(jane), {
+      call_key: k,
+      kind: "new_customer",
+      first_name: "Jane",
+      last_name: "Doe",
+      email: "jane.doe@example.com",
+      callback_phone: "+16025550177",
+      callback_source: "argument",
+      customer_id: null,
+      confirmed: false,
+      confirmed_at: null,
+    });
+    const yes = await store.setContactConfirmed(k, true);
+    assert(yes?.confirmed && typeof yes.confirmed_at === "string", "confirmed with a time");
+    assertEquals((await store.upsertContact(jane)).confirmed, true, "an identical capture keeps the yes");
+    const update = await store.upsertContact({ ...jane, kind: "email_update", customerId: f.customerId });
+    assertEquals([update.kind, update.customer_id, update.confirmed], ["email_update", f.customerId, false]);
+    assertEquals(await store.getContact(k), update);
+    assertEquals((await store.setContactConfirmed(k, false))?.confirmed_at, null);
+    await assertRejects(() => store.upsertContact({ ...jane, email: "Jane@Example.com" }), Error, "store.upsertContact");
+
+    await store.upsertInteraction({ vapi_call_id: k, caller_type: "new", caller_email: "jane.doe@example.com" });
+    await store.upsertInteraction({ vapi_call_id: k, caller_type: "unknown" });
+    assertEquals(
+      await sql(`select caller_type, caller_email, caller_email_masked from call_interactions where vapi_call_id = ${lit(k)}`),
+      [{ caller_type: "new", caller_email: "jane.doe@example.com", caller_email_masked: "j***@example.com" }],
+    );
+    const mirror = await store.getInteractionForMirror(k);
+    assertEquals([mirror?.caller_type, mirror?.caller_email], ["new", "jane.doe@example.com"]);
+  } finally {
+    await sql(`begin;
+      delete from caller_contacts where call_key = ${lit(k)};
+      delete from call_interactions where vapi_call_id = ${lit(k)};
       delete from customers where id = ${lit(f.customerId)};
       commit;`);
   }

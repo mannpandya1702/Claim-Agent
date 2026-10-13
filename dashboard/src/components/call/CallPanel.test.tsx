@@ -6,7 +6,7 @@ import { CallPanel, type CallPanelProps } from "./CallPanel";
 import { CheatSheet } from "./CheatSheet";
 
 const MODES: CallModeInfo[] = [
-  { mode: "solo", label: "Web assistant", description: "Tessa with the FAQ knowledge base.", targetId: "asst-solo" },
+  { mode: "solo", label: "Web assistant", description: "Ava with the FAQ knowledge base.", targetId: "asst-solo" },
   { mode: "core", label: "Core", description: "The frozen assistant.", targetId: null },
   { mode: "squad", label: "Squad", description: "Concierge and Knowledge.", targetId: "squad-1" },
 ];
@@ -108,7 +108,7 @@ describe("CallPanel", () => {
         startedAt: Date.now() - 5000,
         assistantSpeaking: true,
         finals: [
-          { id: 1, role: "assistant", text: "Hi, this is Tessa.", at: 1200 },
+          { id: 1, role: "assistant", text: "Hi, this is Ava.", at: 1200 },
           { id: 2, role: "user", text: "I want my claim status.", at: 4100 },
         ],
         partial: { user: "my number is", assistant: "Sure, can" },

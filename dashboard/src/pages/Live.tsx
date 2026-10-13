@@ -25,7 +25,7 @@ import { IN_PROGRESS_REFETCH_MS, useRealtimeRows } from "@/lib/realtime";
  * call_key for transcript lines, tool attempts, identity level and escalations.
  */
 
-function TalkToTessaLink() {
+function TalkToAvaLink() {
   return (
     <Button asChild variant="outline" size="sm">
       <Link to="/call" target="_blank" rel="noopener">
@@ -67,7 +67,7 @@ export default function Live({ now: fixedNow }: { now?: Date } = {}) {
                 {active.length === 1 ? "1 call in progress" : `${active.length} calls in progress`}
               </Badge>
             )}
-            <TalkToTessaLink />
+            <TalkToAvaLink />
           </>
         }
       />
@@ -99,8 +99,8 @@ export default function Live({ now: fixedNow }: { now?: Date } = {}) {
               <EmptyState
                 icon={Radio}
                 title="No calls in progress"
-                description="A card appears within seconds of Tessa's greeting and closes when the end-of-call report arrives."
-                action={<TalkToTessaLink />}
+                description="A card appears within seconds of Ava's greeting and closes when the end-of-call report arrives."
+                action={<TalkToAvaLink />}
               />
             </Card>
           ) : (

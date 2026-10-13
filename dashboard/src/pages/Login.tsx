@@ -138,7 +138,7 @@ export default function Login() {
         >
           {/* Baseline alignment keeps the link text on the sentence's line; only the icon centres. */}
           <Mic className="size-3.5 self-center" aria-hidden="true" />
-          Talk to Tessa
+          Talk to Ava
         </Link>{" "}
         without signing in.
       </p>

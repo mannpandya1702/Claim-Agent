@@ -81,7 +81,7 @@ export default function Calls() {
     <>
       <PageHeader
         title="Calls"
-        description="Every call Tessa handled, newest first. Search covers redacted transcripts, summaries, caller names and call ids."
+        description="Every call Ava handled, newest first. Search covers redacted transcripts, summaries, caller names and call ids."
       />
 
       <Filters value={filters} onChange={update} onReset={reset} />
@@ -135,7 +135,7 @@ export default function Calls() {
             description={
               filters.q
                 ? "Search matches words in redacted transcripts and summaries, part of a caller name, or the start of a call id. Try All time or fewer filters."
-                : "Start a web call from Talk to Tessa and it appears here within seconds."
+                : "Start a web call from Talk to Ava and it appears here within seconds."
             }
             action={
               <div className="flex flex-wrap justify-center gap-2">
@@ -153,7 +153,7 @@ export default function Calls() {
                   <Button asChild size="sm">
                     <Link to="/call">
                       <Mic aria-hidden="true" />
-                      Talk to Tessa
+                      Talk to Ava
                     </Link>
                   </Button>
                 )}

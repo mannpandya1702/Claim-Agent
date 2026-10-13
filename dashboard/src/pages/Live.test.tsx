@@ -49,7 +49,7 @@ function call(over: Partial<CallSummary>): CallSummary {
     started_at: ago(125),
     ended_at: null,
     duration_seconds: null,
-    assistant_name: "Tessa",
+    assistant_name: "Ava",
     created_at: ago(125),
     updated_at: ago(10),
     ...over,
@@ -57,7 +57,7 @@ function call(over: Partial<CallSummary>): CallSummary {
 }
 
 const LINES: TranscriptLineRow[] = [
-  { id: 1, call_key: "call-1", role: "assistant", text: "Hi, this is Tessa with Observe Insurance.", ts_ms: 1000, created_at: ago(120) },
+  { id: 1, call_key: "call-1", role: "assistant", text: "Hi, this is Ava with Observe Insurance.", ts_ms: 1000, created_at: ago(120) },
   { id: 2, call_key: "call-1", role: "user", text: "I want to check my claim.", ts_ms: 6000, created_at: ago(115) },
 ];
 const ATTEMPTS: Attempt[] = [
@@ -94,7 +94,7 @@ describe("Live", () => {
     renderLive();
     const card = await screen.findByRole("article", { name: /Tobias Halvorsen/ });
 
-    await waitFor(() => expect(within(card).getByText("Hi, this is Tessa with Observe Insurance.")).toBeInTheDocument());
+    await waitFor(() => expect(within(card).getByText("Hi, this is Ava with Observe Insurance.")).toBeInTheDocument());
     expect(within(card).getByText("I want to check my claim.")).toBeInTheDocument();
     expect(within(card).getByText("Verified")).toBeInTheDocument();
     expect(within(card).getByTitle("Last tool result: verify_identity: verified")).toBeInTheDocument();

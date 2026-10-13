@@ -50,7 +50,7 @@ export const CALL_MODES: CallModeInfo[] = [
   {
     mode: "solo",
     label: "Web assistant",
-    description: "Tessa with the FAQ knowledge base. The default.",
+    description: "Ava with the FAQ knowledge base. The default.",
     targetId: env.assistantSoloId,
   },
   {

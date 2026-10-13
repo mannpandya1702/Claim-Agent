@@ -28,12 +28,12 @@
     {
       "type": "request-start",
       "blocking": false,
-      "content": "One moment while I look that up."
+      "content": "Sure, one moment."
     },
     {
       "type": "request-response-delayed",
       "timingMilliseconds": 3000,
-      "content": "Still looking, thanks for waiting."
+      "content": "Thanks for bearing with me, almost there."
     },
     {
       "type": "request-failed",

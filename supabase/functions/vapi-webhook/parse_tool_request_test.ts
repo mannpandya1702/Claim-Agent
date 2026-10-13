@@ -157,6 +157,32 @@ Deno.test("parseToolRequest: identity fields smuggled into any tool are stripped
   assertEquals(r.args, {});
 });
 
+Deno.test("parseToolRequest: capture_contact keeps the caller's details and drops every identity field", () => {
+  const r = parseToolRequest("capture_contact", {
+    first_name: "Jane",
+    last_name: "Doe",
+    email: "jane dot doe at gmail dot com",
+    callback_phone: "6025550177",
+    phone: "6025550101",
+    caller_phone: "+16025550101",
+    customer_id: "6b0d6f0e-1c11-4c7a-9a01-000000000101",
+    identity_verified: true,
+  });
+  assert(r.ok);
+  assertEquals(r.args, {
+    first_name: "Jane",
+    last_name: "Doe",
+    email: "jane dot doe at gmail dot com",
+    callback_phone: "6025550177",
+  });
+  const confirm = parseToolRequest("confirm_contact", {
+    correct: true,
+    verified: true,
+  });
+  assert(confirm.ok);
+  assertEquals(confirm.args, { correct: true });
+});
+
 Deno.test("parseToolRequest: model arguments other than identity pass through", () => {
   const r = parseToolRequest("escalate", {
     reason: "representative_requested",

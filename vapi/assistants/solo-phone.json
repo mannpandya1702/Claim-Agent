@@ -1,5 +1,5 @@
 {
-  "comment": "solo-core plus transferCall to REP_PHONE_E164. Bound to the phone number; never used for web calls.",
+  "comment": "solo-core plus transferCall to REP_PHONE_E164. Bound to the phone number; never used for web calls, so it may ask whether the number the caller is calling from is the best one to reach them.",
   "sections": [
     "header",
     "role",
@@ -9,6 +9,7 @@
     "claims",
     "branches",
     "branches-identity",
+    "contact",
     "faq",
     "knowledge-core",
     "errors",
@@ -16,6 +17,11 @@
     "style"
   ],
   "representative": "representative-phone",
+  "slots": {
+    "EMAIL": "email-capture",
+    "CALLBACK": "callback-phone",
+    "DISCLOSURE": "disclosure-phone"
+  },
   "tools": [
     "lookup_customer",
     "verify_identity",
@@ -23,6 +29,8 @@
     "escalate",
     "report_emergency",
     "send_info_email",
+    "capture_contact",
+    "confirm_contact",
     "transferCall",
     "endCall"
   ],

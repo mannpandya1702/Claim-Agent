@@ -229,6 +229,19 @@ describe("startRealtimeSync", () => {
     expect(queryClient.getQueryData(["attempts", "k1"])).toEqual([{ call_key: "k1", tool_call_id: "t1" }]);
   });
 
+  it("DELETE of a caller contact (keyed by call_key) clears that call's cached contact only", () => {
+    const { channel, queryClient } = setup({
+      table: "caller_contacts",
+      filter: "call_key=eq.k1",
+      keys: [["call", "k1", "contact"]],
+    });
+    queryClient.setQueryData(["call", "k1", "contact"], { call_key: "k1", kind: "new_customer", first_name: "Priya" });
+    channel.emitChange({ eventType: "DELETE", old: { call_key: "k2" } });
+    expect(queryClient.getQueryData(["call", "k1", "contact"])).toMatchObject({ call_key: "k1" });
+    channel.emitChange({ eventType: "DELETE", old: { call_key: "k1" } });
+    expect(queryClient.getQueryData(["call", "k1", "contact"])).toBeNull();
+  });
+
   it("DELETE invalidates a query whose shape it cannot edit, or when the key is missing", () => {
     const { channel, queryClient, invalidate } = setup({ keys: [["metrics"]] });
     channel.setStatus("SUBSCRIBED");

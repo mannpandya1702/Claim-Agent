@@ -4,6 +4,7 @@ import {
   CircleCheck,
   CircleX,
   ClipboardCopy,
+  ContactRound,
   Copy,
   Download,
   FileText,
@@ -26,6 +27,8 @@ import {
 import { useMemo, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { AudioPlayer } from "@/components/calls/AudioPlayer";
+import { CallerContactCard } from "@/components/calls/CallerContactCard";
+import { CallerTypeBadge } from "@/components/calls/CallerTypeBadge";
 import { ChannelLabel } from "@/components/calls/CallTable";
 import { CostBreakdown, costParts } from "@/components/calls/CostBreakdown";
 import { EmailList } from "@/components/calls/EmailList";
@@ -62,6 +65,7 @@ import {
 import {
   fetchCall,
   fetchCallAttempts,
+  fetchCallContact,
   fetchCallEmails,
   fetchCallEscalations,
   fetchCallOutbox,
@@ -153,6 +157,7 @@ export default function CallDetail() {
   const emailsQ = useQuery({ queryKey: qk.callEmails(id), queryFn: () => fetchCallEmails(id), enabled: id !== "", refetchInterval: poll });
   // The outbox row is written by the end-of-call writer, so it arrives after hangup (Realtime).
   const outboxQ = useQuery({ queryKey: qk.callOutbox(id), queryFn: () => fetchCallOutbox(id), enabled: id !== "" });
+  const contactQ = useQuery({ queryKey: qk.callContact(id), queryFn: () => fetchCallContact(id), enabled: id !== "", refetchInterval: poll });
 
   // Per-call subscriptions. The streaming tables only matter while the call is live.
   const on = id !== "";
@@ -163,6 +168,7 @@ export default function CallDetail() {
   useRealtimeRows("escalations", `call_key=eq.${id}`, [qk.callEscalations(id)], { enabled: on });
   useRealtimeRows("emails", `call_key=eq.${id}`, [qk.callEmails(id)], { enabled: on });
   useRealtimeRows("outbox_events", `ref_id=eq.${id}`, [qk.callOutbox(id)], { enabled: on });
+  useRealtimeRows("caller_contacts", `call_key=eq.${id}`, [qk.callContact(id)], { enabled: on });
 
   const attempts = useMemo(() => attemptsQ.data ?? [], [attemptsQ.data]);
   const liveItems = useMemo(() => fromLiveLines(linesQ.data ?? [], attempts), [linesQ.data, attempts]);
@@ -242,12 +248,15 @@ export default function CallDetail() {
   const lookups = attempts.filter((a) => a.tool_name === "lookup_customer" || a.tool_name === "verify_identity").length;
   const hasSplit = costParts(call?.cost_breakdown).some((p) => p.value !== null);
   const emailsView = view(emailsQ);
+  const contact = contactQ.data ?? null;
+  const contactView = view(contactQ);
 
   const exportRecord = () =>
     downloadJson(`call-${id}.json`, {
       exported_at: new Date().toISOString(),
       call,
       identity: session,
+      contact,
       attempts,
       escalations,
       emails,
@@ -262,6 +271,8 @@ export default function CallDetail() {
         description={
           <div className="mt-1 space-y-2">
             <div className="flex flex-wrap items-center gap-1.5">
+              {/* Decided at hangup (the live stub row is still "unknown"); absent before 0006_contacts.sql. */}
+              {call && !live && call.caller_type !== undefined && <CallerTypeBadge type={call.caller_type} />}
               {sessionView === "loading" ? (
                 <Skeleton className="h-6 w-24" />
               ) : sessionView === "error" ? null : (
@@ -411,13 +422,29 @@ export default function CallDetail() {
         </div>
 
         <div className="min-w-0 space-y-4">
+          <Section title="Caller contact" icon={ContactRound}>
+            {contactView === "error" ? (
+              <ErrorState compact title="Could not load the caller contact" error={contactQ.error} onRetry={() => void contactQ.refetch()} />
+            ) : contactView === "loading" ? (
+              <SectionSkeleton rows={2} />
+            ) : contact ? (
+              <CallerContactCard contact={contact} />
+            ) : (
+              <p className="text-sm text-ink-2">
+                {live
+                  ? "None yet. A new caller's name, email and callback number appear here as Ava takes them."
+                  : "No contact details were taken on this call."}
+              </p>
+            )}
+          </Section>
+
           <Section title="Escalations" icon={LifeBuoy} count={escalations.length}>
             {view(escalationsQ) === "error" ? (
               <ErrorState compact title="Could not load escalations" error={escalationsQ.error} onRetry={() => void escalationsQ.refetch()} />
             ) : view(escalationsQ) === "loading" ? (
               <SectionSkeleton rows={2} />
             ) : escalations.length === 0 ? (
-              <p className="text-sm text-ink-2">{live ? "None yet. An escalation appears here the moment Tessa queues one." : "No escalation for this call."}</p>
+              <p className="text-sm text-ink-2">{live ? "None yet. An escalation appears here the moment Ava queues one." : "No escalation for this call."}</p>
             ) : (
               <div className="space-y-3">
                 {escalations.map((e) => (
@@ -459,7 +486,7 @@ export default function CallDetail() {
             ) : attemptsView === "loading" ? (
               <SectionSkeleton rows={2} />
             ) : attempts.length === 0 ? (
-              <p className="text-sm text-ink-2">{live ? "No tool calls yet." : "Tessa made no tool calls on this call."}</p>
+              <p className="text-sm text-ink-2">{live ? "No tool calls yet." : "Ava made no tool calls on this call."}</p>
             ) : (
               <ToolTimeline attempts={attempts} startedAt={call?.started_at ?? null} />
             )}

@@ -81,6 +81,66 @@ Deno.test("redactPII: written email addresses become [email], before any digit i
   }
 });
 
+Deno.test("redactPII: adversarial inputs finish in linear time (no catastrophic backtracking)", () => {
+  // Each of these once took seconds or worse: "dot" read both as a label and as the separator gave
+  // 2^n ways to split a spelled domain, and an unbounded written local part rescanned a long run
+  // from every position. A synchronous regex cannot be cut off by a tool budget's timer, so a stall
+  // here would hold the emergency path and the post-call write.
+  const inputs = [
+    "a, b, at " + Array(200).fill("1").join(" dot "),
+    "a, b, at " + Array(800).fill("x").join(" dot ") + "!",
+    Array(1300).fill("a").join(", ") + " at",
+    Array(1300).fill("a").join(" ") + " at x",
+    Array(500).fill("jane dot").join(" ") + " at",
+    "x at " + Array(600).fill("ab cd").join(" dot ") + ",",
+    Array(600).fill("j underscore").join(" ") + " at foo dot",
+    "a.".repeat(8000),
+    "q".repeat(16000) + " at",
+    "your email is " + "a, ".repeat(400) + "at gmail dot com",
+  ];
+  redactPII("warm up: j, a, at gmail dot com");
+  for (const input of inputs) {
+    const started = performance.now();
+    redactPII(input);
+    asksForSensitive(input);
+    const ms = performance.now() - started;
+    assert(ms < 500, `${input.slice(0, 24)}... (${input.length} chars) took ${Math.round(ms)} ms`);
+  }
+});
+
+Deno.test("redactPII: spoken and spelled addresses are redacted whole, our own address is not", () => {
+  for (
+    const [input, output] of [
+      ["it's jane dot doe at gmail dot com", "it's [email]"],
+      ["my email is jane underscore doe at hotmail dot com", "my email is [email]"],
+      ["it's jsmith at acmecorp dot com", "it's [email]"],
+      ["jane at yahoo.com", "[email]"],
+      ["your email is a, at gmail dot com.", "your email is [email]."],
+      ["your email is T, E, A, G, U, E, at A, O, L dot com.", "your email is [email]."],
+    ]
+  ) {
+    assertEquals(redactPII(input), output, input);
+  }
+  for (
+    const kept of [
+      "email them to claims docs at observeinsurance dot com",
+      "Sure, at observeinsurance dot com slash claims.",
+      "I was at the office, dot com or not.",
+    ]
+  ) {
+    assertEquals(redactPII(kept), kept, kept);
+  }
+});
+
+Deno.test("asksForSensitive: any question asking for an email masks the answer", () => {
+  for (const q of ["What email should I use?", "Could I get your email?", "And your email, please?"]) {
+    assert(asksForSensitive(q), q);
+  }
+  for (const q of ["Would you like me to email the documents?", "I've passed that email to our team. Anything else?"]) {
+    assertFalse(asksForSensitive(q), q);
+  }
+});
+
 Deno.test("asksForSensitive: the model's own wording of a DOB question counts", () => {
   for (
     const q of [

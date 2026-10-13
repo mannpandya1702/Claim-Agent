@@ -13,6 +13,8 @@ function row(over: Partial<CallListRow>): CallListRow {
     channel: "webCall",
     caller_name: "Tobias Halvorsen",
     caller_phone_masked: "+1 602 ... 0101",
+    caller_type: "existing",
+    caller_email_masked: null,
     outcome: "resolved",
     sentiment: "positive",
     escalated: false,
@@ -104,6 +106,39 @@ describe("CallTable", () => {
     expect(clean.queryByText("+1 602 555 0101")).not.toBeInTheDocument();
     expect(clean.getByText("n/a")).toBeInTheDocument();
     expect(within(rowFor("flagged-1")).getByText("$0.142")).toBeInTheDocument();
+  });
+
+  it("shows the caller type as a badge once the call has ended, and a dash while it is live", () => {
+    renderTable([
+      ...ROWS,
+      row({ vapi_call_id: "new-1", caller_name: "Priya Raman", caller_type: "new", caller_phone_masked: "+1 602 ... 0188", caller_email_masked: "p***@gmail.com" }),
+      row({ vapi_call_id: "unknown-1", caller_name: null, caller_type: "unknown", outcome: "abandoned" }),
+    ]);
+    expect(screen.getByRole("columnheader", { name: "Type" })).toBeInTheDocument();
+
+    const existing = rowFor("clean-1").querySelector("[data-caller-type]");
+    expect(existing).toHaveAttribute("data-caller-type", "existing");
+    expect(existing).toHaveTextContent("Existing");
+    expect(rowFor("new-1").querySelector("[data-caller-type]")).toHaveTextContent("New");
+    expect(rowFor("unknown-1").querySelector("[data-caller-type]")).toHaveTextContent("Unknown");
+
+    // a live row's type is still the stub's default, so it is not shown as a fact
+    expect(rowFor("live-1").querySelector("[data-caller-type]")).toBeNull();
+    expect(within(rowFor("live-1")).getByTitle("Decided when the call ends")).toBeInTheDocument();
+  });
+
+  it("shows the masked email under the masked phone, never the full address", () => {
+    renderTable([row({ vapi_call_id: "new-1", caller_type: "new", caller_email_masked: "p***@gmail.com" })]);
+    const cells = within(rowFor("new-1"));
+    expect(cells.getByText("p***@gmail.com")).toBeInTheDocument();
+    expect(cells.getByText("+1 602 ... 0101")).toBeInTheDocument();
+    expect(rowFor("new-1")).not.toHaveTextContent(/priya/i);
+  });
+
+  it("leaves the type empty for a list from before caller types were recorded", () => {
+    renderTable([row({ vapi_call_id: "old-1", caller_type: undefined, caller_email_masked: undefined })]);
+    expect(rowFor("old-1").querySelector("[data-caller-type]")).toBeNull();
+    expect(within(rowFor("old-1")).getByText("Not recorded")).toHaveClass("sr-only");
   });
 
   it("opens the call when a row is clicked", async () => {

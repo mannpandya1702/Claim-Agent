@@ -13,6 +13,9 @@ import {
   ANALYSIS_STATUSES,
   ATTEMPT_KINDS,
   CALLBACK_SOURCES,
+  CALLER_TYPES,
+  CONTACT_CALLBACK_SOURCES,
+  CONTACT_KINDS,
   EMAIL_KINDS,
   EMAIL_STATUSES,
   ESCALATION_KINDS,
@@ -39,6 +42,7 @@ import {
 } from "./store_rules.ts";
 import type {
   AttemptRow,
+  CallerContact,
   Claim,
   Customer,
   EmailRow,
@@ -100,6 +104,8 @@ const INTERACTION_COLUMNS = [
   "cost_breakdown",
   "assistant_name",
   "analysis_status",
+  "caller_type",
+  "caller_email",
 ] as const;
 
 // Text columns where the SQL merge treats '' like null (coalesce(nullif(excluded.x, ''), ci.x)).
@@ -113,6 +119,7 @@ const TEXT_KEEP_ON_EMPTY = new Set([
   "recording_url",
   "success_evaluation",
   "assistant_name",
+  "caller_email",
 ]);
 // Columns the SQL merge keeps when the new value is null (coalesce(excluded.x, ci.x)).
 const KEEP_ON_NULL = new Set([
@@ -128,6 +135,22 @@ const KEEP_ON_NULL = new Set([
   "latency_avg_ms",
   "cost_breakdown",
 ]);
+
+// caller_contacts CHECKs (0006_contacts.sql).
+const CONTACT_EMAIL_RE = /^[a-z0-9._+-]+@[a-z0-9.-]+\.[a-z]{2,24}$/;
+const E164_RE = /^\+1[0-9]{10}$/;
+const CONTACT_COLUMNS = [
+  "call_key",
+  "kind",
+  "first_name",
+  "last_name",
+  "email",
+  "callback_phone",
+  "callback_source",
+  "customer_id",
+  "confirmed",
+  "confirmed_at",
+] as const;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // store.ts CAPTURE_RETENTION_MS; a value import would load supabase-js into every unit test.
@@ -210,6 +233,18 @@ function interactionStatus(r: Row): string {
   return "incomplete";
 }
 
+// The generated caller_email_masked column (0006_contacts.sql), the same mask as email.ts maskEmail.
+function maskedCallerEmail(email: unknown): string | null {
+  if (typeof email !== "string" || email === "") return null;
+  const at = email.indexOf("@");
+  return at < 0 ? "***" : `${email.slice(0, Math.min(1, at))}***${email.slice(at)}`;
+}
+
+function withGenerated(r: Row): void {
+  r.status = interactionStatus(r);
+  r.caller_email_masked = maskedCallerEmail(r.caller_email);
+}
+
 export function createFakeStore(
   seed?: { customers?: (Customer & { date_of_birth: string })[]; claims?: Claim[] },
   options: { now?: () => Date } = {},
@@ -233,6 +268,7 @@ export function createFakeStore(
     escalations: [],
     emails: [],
     call_interactions: [],
+    caller_contacts: [],
     transcript_lines: [],
     webhook_captures: [],
     outbox_events: [],
@@ -337,6 +373,8 @@ export function createFakeStore(
     checkIn("call_interactions", "sentiment_source", r.sentiment_source, SENTIMENT_SOURCES);
     checkIn("call_interactions", "outcome", r.outcome, OUTCOMES);
     checkIn("call_interactions", "analysis_status", r.analysis_status, ANALYSIS_STATUSES);
+    notNull("call_interactions", "caller_type", r.caller_type);
+    checkIn("call_interactions", "caller_type", r.caller_type, CALLER_TYPES);
     integerOrNull("duration_seconds", r.duration_seconds);
     integerOrNull("latency_avg_ms", r.latency_avg_ms);
     timestampOrNull("started_at", r.started_at);
@@ -349,6 +387,38 @@ export function createFakeStore(
     if (customerId === null || customerId === undefined) return;
     if (!customers.some((c) => c.id === customerId)) {
       throw dbError("23503", 'insert or update on table "call_interactions" violates foreign key constraint');
+    }
+  }
+
+  function contactOf(row: Row): CallerContact {
+    const out: Row = {};
+    for (const c of CONTACT_COLUMNS) out[c] = clone(row[c]);
+    return out as CallerContact;
+  }
+
+  // The caller_contacts CHECKs, NOT NULLs and the customers foreign key, as Postgres applies them.
+  function validateContact(r: Row): void {
+    for (const c of ["call_key", "kind", "first_name", "last_name", "callback_source", "confirmed"]) {
+      notNull("caller_contacts", c, r[c]);
+    }
+    checkIn("caller_contacts", "kind", r.kind, CONTACT_KINDS);
+    checkIn("caller_contacts", "callback_source", r.callback_source, CONTACT_CALLBACK_SOURCES);
+    const violates = (column: string) => dbError("23514", `new row for relation "caller_contacts" violates check constraint on ${column}`);
+    for (const c of ["first_name", "last_name"]) {
+      if (typeof r[c] !== "string" || [...r[c]].length < 1 || [...r[c]].length > 40) throw violates(c);
+    }
+    if (r.email !== null && (typeof r.email !== "string" || r.email.length > 100 || !CONTACT_EMAIL_RE.test(r.email))) {
+      throw violates("email");
+    }
+    if (r.callback_phone !== null && (typeof r.callback_phone !== "string" || !E164_RE.test(r.callback_phone))) {
+      throw violates("callback_phone");
+    }
+    if (r.confirmed !== (r.confirmed_at !== null)) throw violates("confirmed");
+    if (r.customer_id !== null) {
+      uuidArg(r.customer_id);
+      if (!customers.some((c) => c.id === r.customer_id)) {
+        throw dbError("23503", 'insert or update on table "caller_contacts" violates foreign key constraint');
+      }
     }
   }
 
@@ -371,7 +441,7 @@ export function createFakeStore(
     checkCustomerFk(values.customer_id);
     const at = nowIso();
     const row: Row = { id: crypto.randomUUID(), ...values, staff_notes: null, created_at: at, updated_at: at };
-    row.status = interactionStatus(row);
+    withGenerated(row);
     tables.call_interactions.push(row);
   }
 
@@ -628,6 +698,55 @@ export function createFakeStore(
         }));
     },
 
+    // upsert_caller_contact: insert or replace; the confirmation survives only an identical read-back
+    // (same kind, names and email).
+    upsertContact(p): CallerContact {
+      const next: Row = {
+        call_key: p.callKey,
+        kind: p.kind,
+        first_name: p.firstName,
+        last_name: p.lastName,
+        email: p.email ?? null,
+        callback_phone: p.callbackPhone ?? null,
+        callback_source: p.callbackSource ?? "none",
+        customer_id: p.customerId ?? null,
+        confirmed: false,
+        confirmed_at: null,
+      };
+      const existing = tables.caller_contacts.find((c) => c.call_key === p.callKey);
+      if (existing) {
+        const same = existing.kind === next.kind && existing.first_name === next.first_name &&
+          existing.last_name === next.last_name && existing.email === next.email;
+        next.confirmed = same && existing.confirmed;
+        next.confirmed_at = same ? existing.confirmed_at : null;
+      }
+      validateContact(next);
+      const at = nowIso();
+      if (existing) {
+        Object.assign(existing, next, { updated_at: touched(existing.updated_at) });
+        return contactOf(existing);
+      }
+      const row = { ...next, created_at: at, updated_at: at };
+      tables.caller_contacts.push(row);
+      return contactOf(row);
+    },
+
+    getContact(callKey): CallerContact | null {
+      const row = tables.caller_contacts.find((c) => c.call_key === callKey);
+      return row ? contactOf(row) : null;
+    },
+
+    // set_caller_contact_confirmed: true keeps the first confirmation time, false clears it.
+    setContactConfirmed(callKey, confirmed): CallerContact | null {
+      const row = tables.caller_contacts.find((c) => c.call_key === callKey);
+      if (!row) return null;
+      const on = confirmed === true;
+      row.confirmed = on;
+      row.confirmed_at = on ? row.confirmed_at ?? nowIso() : null;
+      row.updated_at = touched(row.updated_at);
+      return contactOf(row);
+    },
+
     priorInteractions(customerId, excludeCallKey, limit): PriorInteraction[] {
       uuidArg(customerId);
       const time = (r: Row) => (r.started_at === null ? null : Date.parse(r.started_at));
@@ -663,6 +782,7 @@ export function createFakeStore(
       if (!("emergency" in row) || row.emergency === undefined) r.emergency = false;
       if (!("flags" in row) || row.flags === undefined) r.flags = [];
       if (!("analysis_status" in row) || row.analysis_status === undefined) r.analysis_status = "pending";
+      if (!("caller_type" in row) || row.caller_type === undefined) r.caller_type = "unknown";
       validateInteraction(r);
       if (tables.call_interactions.some((x) => x.vapi_call_id === r.vapi_call_id)) return;
       insertInteraction(r);
@@ -681,6 +801,8 @@ export function createFakeStore(
         emergency: r.emergency ?? false,
         flags: r.flags ?? [],
         analysis_status: r.analysis_status ?? "pending",
+        caller_type: r.caller_type ?? "unknown",
+        caller_email: r.caller_email === "" ? null : r.caller_email,
       };
       validateInteraction(values);
 
@@ -705,9 +827,11 @@ export function createFakeStore(
       next.emergency = ci.emergency || values.emergency;
       next.flags = values.flags.length > 0 ? values.flags : ci.flags;
       next.analysis_status = values.analysis_status === "pending" ? ci.analysis_status : values.analysis_status;
+      // existing/new replace unknown; nothing is ever downgraded to unknown
+      next.caller_type = values.caller_type === "unknown" ? ci.caller_type : values.caller_type;
       if (next.customer_id !== ci.customer_id) checkCustomerFk(next.customer_id);
       next.updated_at = nowIso();
-      next.status = interactionStatus(next);
+      withGenerated(next);
       Object.assign(ci, next);
     },
 
@@ -953,7 +1077,7 @@ export function createFakeStore(
         ended_reason: row.ended_reason ?? "reaped",
         updated_at: at,
       });
-      row.status = interactionStatus(row);
+      withGenerated(row);
       return true;
     },
 

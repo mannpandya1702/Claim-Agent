@@ -7,13 +7,13 @@ const chips = (items: ReturnType<typeof fromStoredMessages>) => items.filter((i)
 describe("fromStoredMessages", () => {
   it("maps both role vocabularies and drops system", () => {
     const items = fromStoredMessages([
-      { role: "system", text: "You are Tessa", t: 0 },
-      { role: "assistant", text: "Hi, this is Tessa.", t: 0.5 },
+      { role: "system", text: "You are Ava", t: 0 },
+      { role: "assistant", text: "Hi, this is Ava.", t: 0.5 },
       { role: "user", text: "Checking my claim.", t: 3 },
       { role: "bot", text: "Sure, what number are you calling from?", t: 5 },
     ]);
     expect(items.map((i) => (i.kind === "bubble" ? i.speaker : i.kind))).toEqual(["agent", "caller", "agent"]);
-    expect(items.some((i) => i.kind === "bubble" && i.text.includes("You are Tessa"))).toBe(false);
+    expect(items.some((i) => i.kind === "bubble" && i.text.includes("You are Ava"))).toBe(false);
   });
 
   it("stamps mm:ss from t (seconds from start), with secondsFromStart as an alias", () => {
@@ -64,7 +64,7 @@ describe("fromLiveLines", () => {
   it("stamps from ts_ms offsets relative to the first line, whatever order rows arrive in", () => {
     const items = fromLiveLines([
       { id: 2, role: "user", text: "My claim please", ts_ms: 1_700_000_065_000, created_at: at(66) },
-      { id: 1, role: "assistant", text: "Hi, this is Tessa", ts_ms: 1_700_000_000_000, created_at: at(1) },
+      { id: 1, role: "assistant", text: "Hi, this is Ava", ts_ms: 1_700_000_000_000, created_at: at(1) },
     ]);
     expect(items.map((i) => i.stamp)).toEqual(["00:00", "01:05"]);
     expect(bubbles(items).map((b) => b.speaker)).toEqual(["agent", "caller"]);
@@ -156,6 +156,6 @@ describe("transcriptToText", () => {
         { role: "tool", tool: "lookup_customer", code: "needs_dob", t: 3 },
       ]),
     );
-    expect(text).toBe("[00:00] Tessa (Concierge): Hello\n[00:02] Caller: Hi\n[00:03] tool lookup_customer: needs_dob");
+    expect(text).toBe("[00:00] Ava (Concierge): Hello\n[00:02] Caller: Hi\n[00:03] tool lookup_customer: needs_dob");
   });
 });

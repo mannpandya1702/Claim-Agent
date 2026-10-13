@@ -2,6 +2,8 @@ import { formatDistanceStrict } from "date-fns";
 import type {
   AlertStatus,
   CallbackSource,
+  CallerType,
+  ContactKind,
   EmailKind,
   EmailStatus,
   EscalationReason,
@@ -245,7 +247,7 @@ export const OUTCOME_META: Record<Outcome | "unknown", OutcomeMeta> = {
   escalated: { label: "Escalated", description: "Handed to a representative", color: "var(--series-2)" },
   auth_failed: { label: "Auth failed", description: "Date of birth did not match", color: "var(--series-3)" },
   not_found: { label: "Not found", description: "No customer for that phone number", color: FOLD },
-  unsupported: { label: "Unsupported", description: "Question outside what Tessa handles", color: FOLD },
+  unsupported: { label: "Unsupported", description: "Question outside what Ava handles", color: FOLD },
   abandoned: { label: "Abandoned", description: "Caller left before an outcome", color: FOLD },
   in_progress: { label: "In progress", description: "Call has not ended", color: FOLD },
   emergency: { label: "Emergency", description: "Caller reported present danger", color: FOLD },
@@ -284,7 +286,7 @@ export interface FlagMeta {
 export const FLAG_META: Record<Flag, FlagMeta> = {
   promised_callback_without_escalation: {
     label: "Callback promised, none queued",
-    explanation: "Tessa told the caller someone would call back, but no escalation row was written for this call.",
+    explanation: "Ava told the caller someone would call back, but no escalation row was written for this call.",
   },
   status_read_without_verified_identity: {
     label: "Status read before verification",
@@ -292,11 +294,11 @@ export const FLAG_META: Record<Flag, FlagMeta> = {
   },
   tool_markup_spoken: {
     label: "Tool markup spoken",
-    explanation: "Tessa read raw tool output or markup aloud instead of a sentence.",
+    explanation: "Ava read raw tool output or markup aloud instead of a sentence.",
   },
   email_promised_without_send: {
     label: "Email promised, not sent",
-    explanation: "Tessa said an email was on its way, but no email was sent for this call.",
+    explanation: "Ava said an email was on its way, but no email was sent for this call.",
   },
 };
 
@@ -324,6 +326,28 @@ export const LEVEL_META: Record<Level, { label: string; description: string }> =
   phone_found: { label: "Phone found", description: "Phone matched a customer; date of birth pending" },
   verified: { label: "Verified", description: "Phone and date of birth matched" },
   locked: { label: "Locked", description: "Two date-of-birth misses; nothing is disclosed" },
+};
+
+export interface CallerTypeMeta {
+  label: string;
+  description: string;
+}
+
+/** Caller type words. Missing (a row from before 0006_contacts.sql) reads as unknown, never a guess. */
+export const CALLER_TYPE_META: Record<CallerType, CallerTypeMeta> = {
+  existing: { label: "Existing", description: "Existing customer: the phone number matched an account" },
+  new: { label: "New", description: "New caller: no account, gave their name and details" },
+  unknown: { label: "Unknown", description: "Never matched an account or gave their details" },
+};
+
+export function callerTypeMeta(type: string | null | undefined): CallerTypeMeta & { type: CallerType } {
+  const t: CallerType = type === "existing" || type === "new" ? type : "unknown";
+  return { type: t, ...CALLER_TYPE_META[t] };
+}
+
+export const CONTACT_KIND_LABELS: Record<ContactKind, string> = {
+  new_customer: "New customer",
+  email_update: "Email update request",
 };
 
 export const ESCALATION_REASON_LABELS: Record<EscalationReason, string> = {

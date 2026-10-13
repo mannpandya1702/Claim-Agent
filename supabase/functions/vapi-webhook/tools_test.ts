@@ -237,7 +237,7 @@ Deno.test("not_found twice gives not_found_final, and it is sticky", async () =>
   assertEquals(final.code, "not_found_final");
   assertEquals(
     final.sentence,
-    "I'm sorry, I can't find an account for that number. I can explain how to start a new claim, or have a representative call you back. Which would you like?",
+    "I'm sorry, I still can't find an account for that number. If you're new with us, I can help you get started. Could I get your first and last name?",
   );
   // even a real customer's number is not looked up any more on this call
   assertEquals((await h.run("lookup_customer", { phone: "6025550101" })).code, "not_found_final");
@@ -351,7 +351,7 @@ Deno.test("send_info_email: no_email_on_file for Teague, with no fetch and no le
   assertEquals(await h.run("send_info_email", { topic: "document_checklist" }), {
     code: "no_email_on_file",
     sentence:
-      "I don't have an email address on your account, and I can't take one over the phone. You can find the same information at observeinsurance dot com slash claims. Is there anything else I can help you with?",
+      "I don't see an email address on your account. If you'd like, you can spell one for me and I'll pass it to our team to add. Or you can find the same information at observeinsurance dot com slash claims. Which would you prefer?",
   });
   assertEquals(h.calls.length, 0);
   assertEquals(h.store.tables.emails.length, 0);

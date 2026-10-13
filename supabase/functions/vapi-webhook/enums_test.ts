@@ -9,9 +9,12 @@ import {
   ANALYSIS_STATUSES,
   ATTEMPT_KINDS,
   CALLBACK_SOURCES,
+  CALLER_TYPES,
   CLAIM_STATUSES,
   CLAIM_TYPES,
   CODES,
+  CONTACT_CALLBACK_SOURCES,
+  CONTACT_KINDS,
   EMAIL_KINDS,
   EMAIL_STATUSES,
   ESCALATION_KINDS,
@@ -33,6 +36,7 @@ const SQL = await Deno.readTextFile(new URL("../../migrations/0001_init.sql", im
 
 const OUTBOX_SQL = await Deno.readTextFile(new URL("../../migrations/0005_outbox.sql", import.meta.url));
 const AUTOMATION_SQL = await Deno.readTextFile(new URL("../../migrations/0004_automation.sql", import.meta.url));
+const CONTACTS_SQL = await Deno.readTextFile(new URL("../../migrations/0006_contacts.sql", import.meta.url));
 
 function tableBody(table: string, sql = SQL): string {
   const start = sql.indexOf(`create table ${table} (`);
@@ -79,6 +83,32 @@ Deno.test("the outbox lists equal the CHECK constraints in 0005_outbox.sql", () 
   assertEquals(checkList("outbox_events", "destination", OUTBOX_SQL), [...OUTBOX_DESTINATIONS]);
 });
 
+Deno.test("the contact lists equal the CHECK constraints in 0006_contacts.sql", () => {
+  assertEquals(checkList("caller_contacts", "kind", CONTACTS_SQL), [
+    ...CONTACT_KINDS,
+  ]);
+  assertEquals(checkList("caller_contacts", "callback_source", CONTACTS_SQL), [
+    ...CONTACT_CALLBACK_SOURCES,
+  ]);
+  // caller_type arrives with alter table, not inside a create table body
+  const added = /add column caller_type text\b[^\n]*?check \(caller_type in \(([^)]*)\)\)/
+    .exec(CONTACTS_SQL);
+  assert(added, "caller_type's CHECK list was found");
+  assertEquals([...added[1].matchAll(/'([^']*)'/g)].map((m) => m[1]), [
+    ...CALLER_TYPES,
+  ]);
+  assert(
+    /caller_type text not null default 'unknown'/.test(CONTACTS_SQL),
+    "caller_type defaults to unknown",
+  );
+  for (const source of CONTACT_CALLBACK_SOURCES) {
+    assert(
+      (CALLBACK_SOURCES as readonly string[]).includes(source),
+      `${source} is also an escalation source`,
+    );
+  }
+});
+
 Deno.test("JOB_NAMES are exactly the jobs invoke_job accepts and pg_cron schedules (0004_automation.sql)", () => {
   const accepted = /if p_name not in \(([^)]*)\)/.exec(AUTOMATION_SQL);
   assert(accepted, "invoke_job's name list was found");
@@ -121,4 +151,14 @@ Deno.test("no list has duplicates", () => {
     assertEquals(new Set(values).size, values.length, `${table}.${column}`);
   }
   assertEquals(new Set(CODES).size, CODES.length, "CODES");
+  for (
+    const list of [
+      SERVER_TOOLS,
+      CONTACT_KINDS,
+      CONTACT_CALLBACK_SOURCES,
+      CALLER_TYPES,
+    ]
+  ) {
+    assertEquals(new Set(list).size, list.length);
+  }
 });

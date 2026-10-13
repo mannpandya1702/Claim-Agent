@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthTestProvider } from "@/lib/auth";
 import { ROUTER_FUTURE } from "@/lib/router";
-import type { Attempt, CallInteraction, CallSession, Escalation, OutboxEvent, TranscriptLineRow } from "@/lib/types";
+import type { Attempt, CallerContact, CallInteraction, CallSession, Escalation, OutboxEvent, TranscriptLineRow } from "@/lib/types";
 
 const api = {
   fetchCall: vi.fn(),
@@ -14,6 +14,7 @@ const api = {
   fetchCallEscalations: vi.fn(),
   fetchCallEmails: vi.fn(),
   fetchCallOutbox: vi.fn(),
+  fetchCallContact: vi.fn(),
 };
 const invoke = vi.fn();
 const useRealtimeRows = vi.fn((..._args: unknown[]) => ({ status: "SUBSCRIBED", isLive: true }));
@@ -28,6 +29,7 @@ vi.mock("@/lib/queries", async (importOriginal) => ({
   fetchCallEscalations: (id: string) => api.fetchCallEscalations(id),
   fetchCallEmails: (id: string) => api.fetchCallEmails(id),
   fetchCallOutbox: (id: string) => api.fetchCallOutbox(id),
+  fetchCallContact: (id: string) => api.fetchCallContact(id),
 }));
 vi.mock("@/lib/realtime", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/realtime")>()),
@@ -63,7 +65,7 @@ function call(over: Partial<CallInteraction> = {}): CallInteraction {
     success_evaluation: "true",
     analysis_raw: null,
     messages: [
-      { role: "assistant", text: "Hi, this is Tessa.", t: 0.5 },
+      { role: "assistant", text: "Hi, this is Ava.", t: 0.5 },
       { role: "tool", tool: "lookup_customer", code: "needs_dob", t: 9 },
       { role: "user", text: "My number is on file.", t: 4 },
     ],
@@ -72,10 +74,34 @@ function call(over: Partial<CallInteraction> = {}): CallInteraction {
     staff_notes: null,
     assistant_name: null,
     analysis_status: "ok",
+    caller_type: "existing",
+    caller_email: null,
     created_at: "2026-10-12T15:00:00Z",
     updated_at: "2026-10-12T15:03:10Z",
     ...over,
   };
+}
+
+function contact(over: Partial<CallerContact> = {}): CallerContact {
+  return {
+    call_key: ID,
+    kind: "new_customer",
+    first_name: "Priya",
+    last_name: "Raman",
+    email: "priya.raman42@gmail.com",
+    callback_phone: "+16025550188",
+    callback_source: "argument",
+    confirmed: true,
+    confirmed_at: "2026-10-12T15:01:30Z",
+    created_at: "2026-10-12T15:01:10Z",
+    updated_at: "2026-10-12T15:01:30Z",
+    ...over,
+  };
+}
+
+/** The header's caller type badge (the only CallerTypeBadge on the page). */
+function headerCallerType(): Element | null {
+  return document.querySelector("[data-caller-type]");
 }
 
 const session: CallSession = {
@@ -115,6 +141,7 @@ beforeEach(() => {
   api.fetchCallEscalations.mockResolvedValue([]);
   api.fetchCallEmails.mockResolvedValue([]);
   api.fetchCallOutbox.mockResolvedValue([]);
+  api.fetchCallContact.mockResolvedValue(null);
 });
 
 describe("CallDetail after hangup", () => {
@@ -193,6 +220,74 @@ describe("CallDetail after hangup", () => {
     expect(useRealtimeRows.mock.calls.map((c) => `${c[0]} ${c[1]}`)).toContain(`outbox_events ref_id=eq.${ID}`);
   });
 
+  it("shows a new caller's type in the header and their confirmed contact details in a card", async () => {
+    api.fetchCall.mockResolvedValue(
+      call({ caller_name: "Priya Raman", caller_type: "new", caller_email: "priya.raman42@gmail.com", outcome: "not_found" }),
+    );
+    api.fetchCallSession.mockResolvedValue({ ...session, level: "none" });
+    api.fetchCallContact.mockResolvedValue(contact());
+    renderDetail();
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Priya Raman" })).toBeInTheDocument();
+    expect(headerCallerType()).toHaveAttribute("data-caller-type", "new");
+    expect(headerCallerType()).toHaveTextContent("New");
+
+    const card = screen.getByRole("region", { name: "Caller contact" });
+    expect(await within(card).findByText("New customer")).toBeInTheDocument();
+    expect(within(card).getByText("Priya Raman")).toBeInTheDocument();
+    expect(within(card).getByText("Confirmed")).toBeInTheDocument();
+    // the call page is the one place the full address and number appear
+    expect(within(card).getByRole("link", { name: "priya.raman42@gmail.com" })).toHaveAttribute("href", "mailto:priya.raman42@gmail.com");
+    expect(within(card).getByRole("link", { name: "+1 602 555 0188" })).toHaveAttribute("href", "tel:+16025550188");
+
+    expect(api.fetchCallContact).toHaveBeenCalledWith(ID);
+    expect(useRealtimeRows.mock.calls.map((c) => `${c[0]} ${c[1]}`)).toContain(`caller_contacts call_key=eq.${ID}`);
+    const sub = useRealtimeRows.mock.calls.find((c) => c[0] === "caller_contacts")!;
+    expect(sub[2]).toEqual([["call", ID, "contact"]]);
+  });
+
+  it("shows a pending email update request from a verified customer", async () => {
+    api.fetchCall.mockResolvedValue(call({ caller_type: "existing" }));
+    api.fetchCallContact.mockResolvedValue(contact({ kind: "email_update", confirmed: false, confirmed_at: null, first_name: "Teague", last_name: "Ashdown" }));
+    renderDetail();
+    const card = await screen.findByRole("region", { name: "Caller contact" });
+    expect(await within(card).findByText("Email update request")).toBeInTheDocument();
+    expect(within(card).getByText("Pending")).toBeInTheDocument();
+    expect(headerCallerType()).toHaveTextContent("Existing");
+  });
+
+  it("says no contact details were taken when the call has none", async () => {
+    api.fetchCall.mockResolvedValue(call());
+    renderDetail();
+    const card = await screen.findByRole("region", { name: "Caller contact" });
+    expect(await within(card).findByText("No contact details were taken on this call.")).toBeInTheDocument();
+  });
+
+  it("says the contact read failed instead of claiming there was none", async () => {
+    api.fetchCall.mockResolvedValue(call());
+    api.fetchCallContact.mockRejectedValue(new Error("caller_contacts: permission denied"));
+    renderDetail();
+    const card = await screen.findByRole("region", { name: "Caller contact" });
+    expect(await within(card).findByText("Could not load the caller contact")).toBeInTheDocument();
+    expect(within(card).queryByText(/No contact details/)).not.toBeInTheDocument();
+  });
+
+  it("shows a loading placeholder in the contact card while its read is pending", async () => {
+    api.fetchCall.mockResolvedValue(call());
+    api.fetchCallContact.mockReturnValue(new Promise(() => {}));
+    renderDetail();
+    const card = await screen.findByRole("region", { name: "Caller contact" });
+    expect(within(card).getByText("Loading")).toBeInTheDocument();
+    expect(within(card).queryByText(/No contact details/)).not.toBeInTheDocument();
+  });
+
+  it("shows no caller type for a call recorded before caller types existed", async () => {
+    api.fetchCall.mockResolvedValue(call({ caller_type: undefined, caller_email: undefined }));
+    renderDetail();
+    await screen.findByRole("heading", { level: 1, name: "Tobias Halvorsen" });
+    expect(headerCallerType()).toBeNull();
+  });
+
   it("says a per-call read failed instead of claiming there was nothing", async () => {
     api.fetchCall.mockResolvedValue(call());
     api.fetchCallAttempts.mockRejectedValue(new Error("attempts: permission denied"));
@@ -236,6 +331,9 @@ describe("CallDetail while live", () => {
     expect(screen.getByText("This call is live.")).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "AI summary" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Play recording" })).not.toBeInTheDocument();
+    // the live stub's caller type is only the default, so the header does not state it
+    expect(headerCallerType()).toBeNull();
+    expect(within(screen.getByRole("region", { name: "Caller contact" })).getByText(/None yet/)).toBeInTheDocument();
 
     const subs = useRealtimeRows.mock.calls.map((c) => `${c[0]} ${c[1]}`);
     expect(subs).toEqual(
@@ -246,6 +344,7 @@ describe("CallDetail while live", () => {
         `call_sessions call_key=eq.${ID}`,
         `escalations call_key=eq.${ID}`,
         `emails call_key=eq.${ID}`,
+        `caller_contacts call_key=eq.${ID}`,
       ]),
     );
   });

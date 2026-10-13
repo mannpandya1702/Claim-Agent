@@ -20,12 +20,12 @@
     {
       "type": "request-start",
       "blocking": false,
-      "content": "Pulling up your claims now."
+      "content": "Alright, let me pull up your claims."
     },
     {
       "type": "request-response-delayed",
       "timingMilliseconds": 3000,
-      "content": "Still pulling that up, thanks for waiting."
+      "content": "Thanks for bearing with me, almost there."
     },
     {
       "type": "request-failed",

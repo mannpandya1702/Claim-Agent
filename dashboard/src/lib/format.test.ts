@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   HUED_OUTCOMES,
+  CALLER_TYPE_META,
   callerLabel,
+  callerTypeMeta,
   channelLabel,
   etDayKey,
   flagMeta,
@@ -26,7 +28,7 @@ import {
   outcomeMeta,
   sentimentMeta,
 } from "./format";
-import { FLAGS, OUTCOMES } from "./types";
+import { CALLER_TYPES, FLAGS, OUTCOMES } from "./types";
 
 describe("durations and stamps", () => {
   it.each([
@@ -139,6 +141,15 @@ describe("badge maps", () => {
   it("explains every flag in plain English and humanizes unknown ones", () => {
     for (const f of FLAGS) expect(FLAG_META[f].explanation.length).toBeGreaterThan(20);
     expect(flagMeta("new_flag_kind").label).toBe("New flag kind");
+  });
+  it("words every caller type and reads anything else as unknown, never a guess", () => {
+    for (const t of CALLER_TYPES) expect(CALLER_TYPE_META[t].description.length).toBeGreaterThan(10);
+    expect(callerTypeMeta("existing")).toMatchObject({ type: "existing", label: "Existing" });
+    expect(callerTypeMeta("new")).toMatchObject({ type: "new", label: "New" });
+    expect(callerTypeMeta("unknown")).toMatchObject({ type: "unknown", label: "Unknown" });
+    expect(callerTypeMeta(null).type).toBe("unknown");
+    expect(callerTypeMeta(undefined).type).toBe("unknown");
+    expect(callerTypeMeta("returning").type).toBe("unknown");
   });
   it("labels callers, channels and live state", () => {
     expect(callerLabel(null)).toBe("Unknown caller");

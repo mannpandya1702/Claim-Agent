@@ -20,6 +20,7 @@ import {
 } from "./store_rules.ts";
 import type {
   AttemptRow,
+  CallerContact,
   Claim,
   Customer,
   EmailRow,
@@ -57,6 +58,8 @@ const ATTEMPT_COLUMNS = "call_key, tool_call_id, tool_name, kind, code, created_
 const ESCALATION_COLUMNS = "id, call_key, kind, reason, details, callback_phone, channel, verified, callback_source, " +
   "alert_status, delivery_error, status, created_at";
 const EMAIL_COLUMNS = "call_key, kind, to_masked, resend_id, status, error";
+const CONTACT_COLUMNS = "call_key, kind, first_name, last_name, email, callback_phone, callback_source, customer_id, " +
+  "confirmed, confirmed_at";
 const STALE_COLUMNS = "id, call_key, kind, reason, channel, verified, created_at";
 const DIGEST_COLUMNS = "outcome, sentiment, flags, cost, ended_at";
 const OUTBOX_COLUMNS = "id, kind, ref_id, destination, attempts, delivered_at, last_error, external_id, created_at, " +
@@ -114,6 +117,22 @@ function toOutboxRow(row: any): OutboxRow {
     external_id: row.external_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+/** A caller_contacts row (the functions return every column) as the Store contract's shape. */
+function toContact(row: any): CallerContact {
+  return {
+    call_key: row.call_key,
+    kind: row.kind,
+    first_name: row.first_name,
+    last_name: row.last_name,
+    email: row.email ?? null,
+    callback_phone: row.callback_phone ?? null,
+    callback_source: row.callback_source,
+    customer_id: row.customer_id ?? null,
+    confirmed: row.confirmed === true,
+    confirmed_at: row.confirmed_at ?? null,
   };
 }
 
@@ -323,6 +342,38 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
         .abortSignal(signal());
       if (error) fail("listEmails", error);
       return rows<EmailRow>(data);
+    },
+
+    async upsertContact(p) {
+      const { data, error } = await db.rpc("upsert_caller_contact", {
+        p_call_key: p.callKey,
+        p_kind: p.kind,
+        p_first_name: p.firstName,
+        p_last_name: p.lastName,
+        p_email: p.email,
+        p_callback_phone: p.callbackPhone,
+        p_callback_source: p.callbackSource,
+        p_customer_id: p.customerId,
+      }).abortSignal(signal());
+      if (error) fail("upsertContact", error);
+      return toContact(firstRow("upsertContact", data));
+    },
+
+    async getContact(callKey) {
+      const { data, error } = await db.from("caller_contacts").select(CONTACT_COLUMNS).eq("call_key", callKey)
+        .abortSignal(signal()).maybeSingle();
+      if (error) fail("getContact", error);
+      return data ? toContact(data) : null;
+    },
+
+    async setContactConfirmed(callKey, confirmed) {
+      const { data, error } = await db.rpc("set_caller_contact_confirmed", {
+        p_call_key: callKey,
+        p_confirmed: confirmed,
+      }).abortSignal(signal());
+      if (error) fail("setContactConfirmed", error);
+      const row = rows<any>(data)[0];
+      return row ? toContact(row) : null;
     },
 
     async priorInteractions(customerId, excludeCallKey, limit) {

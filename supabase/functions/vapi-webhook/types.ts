@@ -7,9 +7,12 @@ import type {
   AttemptKind,
   CallbackSource,
   Channel,
+  CallerType,
   ClaimStatus,
   ClaimType,
   Code,
+  ContactCallbackSource,
+  ContactKind,
   EmailKind,
   EmailStatus,
   EscalationKind,
@@ -129,6 +132,21 @@ export interface EmailRow {
   error: string | null;
 }
 
+/** One caller_contacts row (0006_contacts.sql): the name, email and callback number a caller gave
+ *  on this call, one row per call, replaced by a new capture and confirmed by the read-back. */
+export interface CallerContact {
+  call_key: string;
+  kind: ContactKind;
+  first_name: string;
+  last_name: string;
+  email: string | null; // normalised; caller-provided by voice, never verified
+  callback_phone: string | null; // E.164
+  callback_source: ContactCallbackSource;
+  customer_id: string | null; // the verified customer for an email_update, else null
+  confirmed: boolean;
+  confirmed_at: string | null;
+}
+
 export interface PriorInteraction {
   vapi_call_id: string;
   started_at: string; // ISO timestamp
@@ -164,6 +182,8 @@ export interface InteractionRow {
   cost_breakdown?: unknown;
   assistant_name?: string | null;
   analysis_status?: string;
+  caller_type?: CallerType | null; // the merge keeps existing/new over unknown
+  caller_email?: string | null; // the confirmed captured email only, never the account's
 }
 
 export interface TranscriptLine {
@@ -291,6 +311,24 @@ export interface Store {
   >;
   finishEmail(callKey: string, kind: EmailKind, status: "sent" | "failed", resendId: string | null, error: string | null): Promise<void>;
   listEmails(callKey: string): Promise<EmailRow[]>;
+
+  // caller_contacts (0006_contacts.sql, upsert_caller_contact / set_caller_contact_confirmed).
+  // upsertContact stores or replaces the call's row unconfirmed; a capture identical to the stored
+  // row keeps its confirmation, so a retried delivery never undoes a confirm.
+  upsertContact(p: {
+    callKey: string;
+    kind: ContactKind;
+    firstName: string;
+    lastName: string;
+    email: string | null;
+    callbackPhone: string | null;
+    callbackSource: ContactCallbackSource;
+    customerId: string | null;
+  }): Promise<CallerContact>;
+  getContact(callKey: string): Promise<CallerContact | null>;
+  // confirmed true sets confirmed_at once (the first confirmation is kept); false clears both.
+  // null when the call has no row.
+  setContactConfirmed(callKey: string, confirmed: boolean): Promise<CallerContact | null>;
 
   // last 3 completed interactions for this customer, excluding this call, newest first
   priorInteractions(customerId: string, excludeCallKey: string, limit: number): Promise<PriorInteraction[]>;

@@ -28,7 +28,7 @@ export const DEMO_IDENTITIES: readonly DemoIdentity[] = [
       "Happy path: verify, then ask for the claim status",
       "Auth failure: give a wrong date of birth twice",
       "Ask for the document checklist by email",
-      "Call again: Tessa greets a returning caller",
+      "Call again: Ava greets a returning caller",
     ],
   },
   {
@@ -53,7 +53,10 @@ export const DEMO_IDENTITIES: readonly DemoIdentity[] = [
     phone: "+16025550104",
     phoneDisplay: "+1 602 555 0104",
     dob: "January 30, 1965",
-    scenarios: ["Early-stage claim; no email on file"],
+    scenarios: [
+      "Early-stage claim; no email on file",
+      "Ask for the checklist by email: Ava takes an address for staff to add",
+    ],
   },
   {
     key: "ines",
@@ -69,6 +72,9 @@ export const DEMO_IDENTITIES: readonly DemoIdentity[] = [
     phone: "+16025550199",
     phoneDisplay: "+1 602 555 0199",
     dob: null,
-    scenarios: ["No customer has this number (not found)"],
+    scenarios: [
+      "No customer has this number (not found)",
+      "New caller: give your name and email; Ava offers the claim steps by email or a callback",
+    ],
   },
 ];

@@ -17,6 +17,7 @@ import {
   genericProblems,
   HaltError,
   initialState,
+  isFillerText,
   loadBase,
   mockCode,
   mockPlan,
@@ -76,6 +77,13 @@ function stateAfter(steps: { tool: string; args: Obj; code: string }[]): SimStat
 }
 
 const TOBIAS_LOOKUP = { tool: "lookup_customer", args: { phone: "6025550101" }, code: "needs_dob" };
+const TEAGUE_LOOKUP = { tool: "lookup_customer", args: { phone: "6025550104" }, code: "needs_dob" };
+const TEAGUE_VERIFY = { tool: "verify_identity", args: { dob_month: 1, dob_day: 30, dob_year: 1965 }, code: "verified" };
+const NOT_FOUND_TWICE = [
+  { tool: "lookup_customer", args: { phone: "6025550199" }, code: "not_found" },
+  { tool: "lookup_customer", args: { phone: "6025550199" }, code: "not_found_final" },
+];
+const JORDAN = { first_name: "Jordan", last_name: "Ellis", email: "jordan.ellis@gmail.com" };
 const TOBIAS_VERIFY = {
   tool: "verify_identity",
   args: { dob_month: 3, dob_day: 14, dob_year: 1986 },
@@ -237,6 +245,159 @@ Deno.test("info email mock: verification first, then sent once, Teague has no ad
   assertEquals((await answer("send_info_email", teague, { topic: "claim_summary" })).code, "no_email_on_file");
 });
 
+Deno.test("capture mock: a new caller's read-back with the real sentence, spoken forms, missing names, a bad address", async () => {
+  const p = persona("new-customer");
+  const s = initialState();
+  const r = await answer("capture_contact", s, { ...JORDAN, callback_phone: "6025550177" }, { persona: p });
+  assertEquals(r.code, "contact_readback");
+  // the number the caller said is read back with the details, as the server does
+  assertEquals(r.message, sentenceFor("contact_readback", { ...JORDAN, callback_phone: "6025550177" }));
+  assertStringIncludes(
+    r.message,
+    "Jordan Ellis, your email is J, O, R, D, A, N, dot, E, L, L, I, S, at gmail dot com, and the best number is six zero two... five five five... zero one seven seven",
+  );
+  // the address as the caller spelled it, the names in any case and the number in any shape read back the same
+  const spoken = {
+    first_name: "jordan",
+    last_name: "ELLIS",
+    email: "j o r d a n dot e l l i s at gmail dot com",
+    callback_phone: "(602) 555-0177",
+  };
+  assertEquals((await answer("capture_contact", s, spoken, { persona: p })).message, r.message);
+  // without a number (a chat has no caller id) the read-back is the name and address only
+  assertEquals(
+    (await answer("capture_contact", s, JORDAN, { persona: p })).message,
+    sentenceFor("contact_readback", JORDAN),
+  );
+  const noEmail = await answer("capture_contact", s, { first_name: "Jordan", last_name: "Ellis" }, { persona: p });
+  assertEquals(noEmail.message, sentenceFor("contact_readback", { first_name: "Jordan", last_name: "Ellis" }));
+  assertEquals((await answer("capture_contact", s, { email: JORDAN.email }, { persona: p })).code, "contact_needs_name");
+  assertEquals(
+    (await answer("capture_contact", s, { ...JORDAN, last_name: "unknown" }, { persona: p })).code,
+    "contact_needs_name",
+  );
+  assertEquals(
+    (await answer("capture_contact", s, { ...JORDAN, email: "jordan at gmail" }, { persona: p })).code,
+    "contact_invalid_email",
+  );
+  // a capture the persona did not script gets the server's plain question
+  const other = await answer("capture_contact", s, { ...JORDAN, email: "someone@example.org" }, { persona: p });
+  assertEquals([other.code, other.message], ["contact_readback", sentenceFor("contact_readback", {})]);
+});
+
+Deno.test("capture mock: a verified caller's address is read back with the account's name", async () => {
+  const p = persona("existing-no-email");
+  const teague = stateAfter([TEAGUE_LOOKUP, TEAGUE_VERIFY]);
+  const r = await answer("capture_contact", teague, { email: "teague.ashdown@gmail.com" }, { persona: p });
+  assertEquals(r.code, "contact_readback");
+  assertEquals(
+    r.message,
+    sentenceFor("contact_readback", { first_name: "Teague", last_name: "Ashdown", email: "teague.ashdown@gmail.com" }),
+  );
+  assertEquals((await answer("capture_contact", teague, {}, { persona: p })).code, "contact_invalid_email");
+});
+
+Deno.test("confirm mock: nothing pending, a yes saves (new or existing), a no asks again", async () => {
+  assertEquals((await answer("confirm_contact", initialState(), { correct: true })).code, "not_pending");
+  const captured = stateAfter([...NOT_FOUND_TWICE, { tool: "capture_contact", args: JORDAN, code: "contact_readback" }]);
+  assertEquals(captured.contact, {
+    kind: "new_customer",
+    first: "Jordan",
+    last: "Ellis",
+    email: "jordan.ellis@gmail.com",
+    phone: null,
+    confirmed: false,
+  });
+  const yes = await answer("confirm_contact", captured, { correct: true });
+  assertEquals([yes.code, yes.message], [
+    "contact_saved_new",
+    sentenceFor("contact_saved_new", { first_name: "Jordan", has_email: true }),
+  ]);
+  // a plain no asks which part was wrong
+  const no = await answer("confirm_contact", captured, { correct: false });
+  assertEquals([no.code, no.message], [
+    "contact_retry",
+    sentenceFor("contact_retry", { has_email: true, has_phone: false }),
+  ]);
+  assertEquals((await answer("confirm_contact", captured, {})).code, "bad_args");
+  const update = stateAfter([TEAGUE_LOOKUP, TEAGUE_VERIFY, {
+    tool: "capture_contact",
+    args: { email: "teague.ashdown@gmail.com" },
+    code: "contact_readback",
+  }]);
+  assertEquals(update.contact?.kind, "email_update");
+  assertEquals((await answer("confirm_contact", update, { correct: "true" })).code, "contact_saved_existing");
+  // an email_update read back only the address, so a no asks to spell it again
+  assertEquals(
+    (await answer("confirm_contact", update, { correct: false })).message,
+    sentenceFor("contact_retry", { part: "email" }),
+  );
+  // nothing pending for a verified caller: the address is asked for, never the name
+  const teague = stateAfter([TEAGUE_LOOKUP, TEAGUE_VERIFY]);
+  assertEquals(
+    (await answer("confirm_contact", teague, { correct: true })).message,
+    sentenceFor("not_pending", { verified: true }),
+  );
+});
+
+Deno.test("capture mock: an account with an email on file gets email_on_file; a correction keeps the said number", async () => {
+  const tobias = stateAfter([TOBIAS_LOOKUP, TOBIAS_VERIFY]);
+  const onFile = await answer("capture_contact", tobias, { email: "attacker@evil.com" });
+  assertEquals([onFile.code, onFile.message], ["email_on_file", sentenceFor("email_on_file")]);
+  const p = persona("new-customer-correction");
+  const first = {
+    tool: "capture_contact",
+    args: { first_name: "Priya", last_name: "Raman", email: "priya.raman@outlook.com", callback_phone: "6025550166" },
+    code: "contact_readback",
+  };
+  const retried = stateAfter([first, { tool: "confirm_contact", args: { correct: false }, code: "contact_retry" }]);
+  assertEquals(retried.contact?.phone, "6025550166");
+  const again = await answer(
+    "capture_contact",
+    retried,
+    { first_name: "Priya", last_name: "Raman", email: "priya_raman@outlook.com" },
+    { persona: p, phones: ["6025550166"] },
+  );
+  assertEquals(
+    again.message,
+    sentenceFor("contact_readback", {
+      first_name: "Priya",
+      last_name: "Raman",
+      email: "priya_raman@outlook.com",
+      callback_phone: "6025550166",
+    }),
+  );
+});
+
+Deno.test("info email mock: a confirmed new caller gets only the start-a-claim steps; a pending update is never sent to", async () => {
+  const captured = [...NOT_FOUND_TWICE, { tool: "capture_contact", args: JORDAN, code: "contact_readback" }];
+  // before any details: the name question once the lookups ran out, else verification
+  assertEquals((await answer("send_info_email", initialState(), { topic: "how_to_start_claim" })).code, "not_verified");
+  const ranOut = stateAfter(NOT_FOUND_TWICE);
+  assertEquals((await answer("send_info_email", ranOut, { topic: "how_to_start_claim" })).code, "contact_needs_name");
+  // unconfirmed details are read back again instead of being used
+  const unconfirmed = stateAfter(captured);
+  const again = await answer("send_info_email", unconfirmed, { topic: "how_to_start_claim" });
+  assertEquals([again.code, again.message], ["contact_readback", sentenceFor("contact_readback", JORDAN)]);
+  const confirmed = stateAfter([...captured, {
+    tool: "confirm_contact",
+    args: { correct: true },
+    code: "contact_saved_new",
+  }]);
+  assertEquals(confirmed.contact?.confirmed, true);
+  const sent = await answer("send_info_email", confirmed, { topic: "how_to_start_claim" });
+  assertEquals([sent.code, sent.message], ["email_sent", sentenceFor("email_sent", { target: "given" })]);
+  assertStringIncludes(sent.message, "the address you gave me");
+  assertEquals((await answer("send_info_email", confirmed, { topic: "claim_summary" })).code, "not_verified");
+  const teague = stateAfter([
+    TEAGUE_LOOKUP,
+    TEAGUE_VERIFY,
+    { tool: "capture_contact", args: { email: "teague.ashdown@gmail.com" }, code: "contact_readback" },
+    { tool: "confirm_contact", args: { correct: true }, code: "contact_saved_existing" },
+  ]);
+  assertEquals((await answer("send_info_email", teague, { topic: "document_checklist" })).code, "no_email_on_file");
+});
+
 // ---------------------------------------------------------------------------------------------
 // The transient assistant and the parser.
 // ---------------------------------------------------------------------------------------------
@@ -258,7 +419,7 @@ Deno.test("the transient assistant is the rendered solo-core prompt with code mo
     assertEquals(t.function, base.tools[t.function.name].function);
     assertEquals(t.messages, base.tools[t.function.name].messages);
   }
-  assert(base.fillers.has("One moment while I look that up."));
+  assert(base.fillers.has("Sure, one moment."));
 });
 
 Deno.test("parseTurn separates the model's words, VAPI's filler and the mock's sentence", () => {
@@ -275,7 +436,7 @@ Deno.test("parseTurn separates the model's words, VAPI's filler and the mock's s
           function: { name: "lookup_customer", arguments: '{"phone": "6025550101"}' },
         }],
       },
-      { role: "assistant", content: "One moment while I look that up." },
+      { role: "assistant", content: "Sure, one moment." },
       {
         role: "tool",
         tool_call_id: "c1",
@@ -285,8 +446,8 @@ Deno.test("parseTurn separates the model's words, VAPI's filler and the mock's s
   };
   const turn = parseTurn("my number", response, base.fillers, "r1");
   assertEquals(turn.model, ["Sure."]);
-  assertEquals(turn.filler, ["One moment while I look that up."]);
-  assertEquals(turn.heard, ["Sure.", "One moment while I look that up.", "Thanks."]);
+  assertEquals(turn.filler, ["Sure, one moment."]);
+  assertEquals(turn.heard, ["Sure.", "Sure, one moment.", "Thanks."]);
   assertEquals(turn.calls[0].args, { phone: "6025550101" });
   assertEquals(turn.calls[0].wordsBefore, true);
   assertEquals(turn.calls[0].result?.code, "needs_dob");
@@ -294,6 +455,14 @@ Deno.test("parseTurn separates the model's words, VAPI's filler and the mock's s
   // a result without this request's sentinel is not trusted as the mock's answer
   assertEquals(parseTurn("x", response, base.fillers, "r2").calls[0].result, null);
   assertStringIncludes(genericProblems(turn, base.toolNames).join(" "), "words of its own in a tool turn");
+});
+
+Deno.test("fillers VAPI speaks back to back are still fillers, and model words never are", () => {
+  assert(isFillerText("Sure, one moment.Thanks for bearing with me, almost there.", base.fillers));
+  assert(isFillerText("Sure, one moment.  Thanks for bearing with me, almost there.", base.fillers));
+  assert(isFillerText("Okay.", base.fillers));
+  assert(!isFillerText("Sure, one moment. Your claim is approved.", base.fillers));
+  assert(!isFillerText("", base.fillers));
 });
 
 Deno.test("generic checks: smuggled identity fields, two questions, a missing mock answer", () => {
@@ -424,6 +593,106 @@ Deno.test("an offer instead of the tool gets one yes, and the tool on that yes p
   assertEquals(r.problems, []);
   assertEquals(r.requests, 6);
   assertEquals(vapi.bodies[5].input, "Yes, please.");
+});
+
+Deno.test("new caller with a compliant model: captured, read back with the real sentence, confirmed, steps emailed", async () => {
+  const vapi = fakeVapi([
+    [{ call: "lookup_customer", args: { phone: "6025550199" } }],
+    [{ call: "lookup_customer", args: { phone: "6025550199" } }],
+    [{ say: "Thanks. What's the best email for you? Please spell it out, letter by letter." }],
+    [{ say: "Got it. What's the best number to reach you?" }],
+    [{ call: "capture_contact", args: { ...JORDAN, callback_phone: "6025550177" } }],
+    [{ call: "confirm_contact", args: { correct: true } }],
+    [{ call: "send_info_email", args: { topic: "how_to_start_claim" } }],
+  ]);
+  const r = await runConversation(persona("new-customer"), 1, base, vapi.chat, () => NOW);
+  assertEquals(r.problems, []);
+  assertEquals(r.turns.map((t) => t.calls.map((c) => c.result?.code ?? c.name)), [
+    ["not_found"],
+    ["not_found_final"],
+    [],
+    [],
+    ["contact_readback"],
+    ["contact_saved_new"],
+    ["email_sent"],
+  ]);
+});
+
+Deno.test("new caller fails when the model reads the address back itself or skips the read-back", async () => {
+  const vapi = fakeVapi([
+    [{ call: "lookup_customer", args: { phone: "6025550199" } }],
+    [{ call: "lookup_customer", args: { phone: "6025550199" } }],
+    [{ say: "Thanks. What's the best email for you? Please spell it out." }],
+    [{ say: "So that's jordan.ellis@gmail.com. What's the best number to reach you?" }],
+    [{ call: "capture_contact", args: { ...JORDAN, callback_phone: "6025550177" } }],
+    [{ call: "send_info_email", args: { topic: "how_to_start_claim" } }],
+    [{ call: "send_info_email", args: { topic: "how_to_start_claim" } }],
+  ]);
+  const r = await runConversation(persona("new-customer"), 1, base, vapi.chat, () => NOW);
+  assert(!r.pass);
+  const text = r.problems.join(" | ");
+  assertStringIncludes(text, "model text matches /@|");
+  assertStringIncludes(text, "t6: tools [send_info_email], expected [confirm_contact]");
+  // unconfirmed details never unlock the email: they are read back again
+  assertEquals(r.turns[5].calls[0].result?.code, "contact_readback");
+});
+
+Deno.test("email correction: a no keeps the row unconfirmed, the spelled-again address is read back", async () => {
+  const vapi = fakeVapi([
+    [{ say: "I can help get you started. What's your first and last name?" }],
+    [{ say: "Thanks. What's the best email for you? Please spell it, letter by letter." }],
+    [{ say: "Thank you. What's the best number to reach you?" }],
+    [{
+      call: "capture_contact",
+      args: { first_name: "Priya", last_name: "Raman", email: "priya.raman@outlook.com", callback_phone: "6025550166" },
+    }],
+    [{ call: "confirm_contact", args: { correct: false } }],
+    [{ call: "capture_contact", args: { first_name: "Priya", last_name: "Raman", email: "priya_raman@outlook.com" } }],
+    [{ call: "confirm_contact", args: { correct: true } }],
+  ]);
+  const r = await runConversation(persona("new-customer-correction"), 1, base, vapi.chat, () => NOW);
+  assertEquals(r.problems, []);
+  assertEquals(
+    r.turns[4].calls[0].result?.message,
+    sentenceFor("contact_retry", { has_email: true, has_phone: true }),
+  );
+});
+
+Deno.test("Teague: the spelled address goes to staff, nothing is sent, and a promise to send is caught", async () => {
+  const script = (last: Action[]): Action[][] => [
+    [{ call: "lookup_customer", args: { phone: "6025550104" } }],
+    [{ call: "verify_identity", args: { dob_month: 1, dob_day: 30, dob_year: 1965 } }],
+    [{ call: "send_info_email", args: { topic: "document_checklist" } }],
+    [{ call: "capture_contact", args: { email: "t e a g u e dot a s h d o w n at gmail dot com" } }],
+    [{ call: "confirm_contact", args: { correct: true } }],
+    last,
+  ];
+  const good = fakeVapi(script([{
+    say: "Not on this call, since our team still needs to add it. You can find the checklist at observeinsurance dot com slash claims.",
+  }]));
+  const ok = await runConversation(persona("existing-no-email"), 1, base, good.chat, () => NOW);
+  assertEquals(ok.problems, []);
+  assertEquals(ok.turns[2].calls[0].result?.message, sentenceFor("no_email_on_file"));
+
+  const bad = fakeVapi(script([{ say: "Yes, I'll send it to that address now." }]));
+  const r = await runConversation(persona("existing-no-email"), 1, base, bad.chat, () => NOW);
+  assert(!r.pass);
+  assertStringIncludes(r.problems.join(" | "), "t6: model text matches");
+});
+
+Deno.test("disclosure: an honest answer passes; claiming to be human fails", async () => {
+  const honest = fakeVapi([
+    [{ say: "I'm Ava, Observe Insurance's automated assistant. I can have someone from our claims team call you back anytime." }],
+    [{ say: "I'm an automated assistant, not a person. What's the phone number on your account?" }],
+  ]);
+  assertEquals((await runConversation(persona("disclosure"), 1, base, honest.chat, () => NOW)).problems, []);
+  const human = fakeVapi([
+    [{ say: "Yes, I'm a real person here at Observe Insurance." }],
+    [{ say: "I'm Ava, Observe Insurance's automated assistant." }],
+  ]);
+  const r = await runConversation(persona("disclosure"), 1, base, human.chat, () => NOW);
+  assert(!r.pass);
+  assertStringIncludes(r.problems.join(" | "), "t1: model text lacks");
 });
 
 Deno.test("an endCall before the script is done fails the run instead of chatting into a closed call", async () => {

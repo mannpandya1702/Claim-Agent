@@ -21,7 +21,7 @@ export function CheatSheet({ phoneNumber, className }: CheatSheetProps) {
           Demo identities
         </CardTitle>
         <CardDescription>
-          A web call has no caller ID, so say the phone number when Tessa asks, then the date of birth. All records are fictional.
+          A web call has no caller ID, so say the phone number when Ava asks, then the date of birth. All records are fictional.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -80,7 +80,7 @@ function BackupPhone({ phoneNumber }: { phoneNumber: string }) {
       <Phone className="size-4 shrink-0 text-ink-3" aria-hidden="true" />
       <div className="min-w-0 flex-1">
         <h3 id="backup-phone-title" className="text-xs font-medium text-ink-2">
-          Backup: call Tessa by phone
+          Backup: call Ava by phone
         </h3>
         <a
           href={`tel:${phoneNumber}`}

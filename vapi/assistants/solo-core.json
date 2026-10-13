@@ -9,6 +9,7 @@
     "claims",
     "branches",
     "branches-identity",
+    "contact",
     "faq",
     "knowledge-core",
     "errors",
@@ -16,6 +17,11 @@
     "style"
   ],
   "representative": "representative-web",
+  "slots": {
+    "EMAIL": "email-capture",
+    "CALLBACK": "callback-web",
+    "DISCLOSURE": "disclosure-web"
+  },
   "tools": [
     "lookup_customer",
     "verify_identity",
@@ -23,6 +29,8 @@
     "escalate",
     "report_emergency",
     "send_info_email",
+    "capture_contact",
+    "confirm_contact",
     "endCall"
   ],
   "assistant": { "name": "Observe Claims Core" }

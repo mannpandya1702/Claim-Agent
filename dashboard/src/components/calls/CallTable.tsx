@@ -18,6 +18,7 @@ import {
 } from "@/lib/format";
 import type { CallListRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { CallerTypeBadge } from "./CallerTypeBadge";
 import { useMediaQuery, useNow } from "./hooks";
 
 interface CallTableProps {
@@ -51,8 +52,9 @@ export function elapsedSeconds(row: Pick<CallListRow, "started_at" | "created_at
 
 /**
  * The calls list. In-progress rows (ended_at is null, never the generated status column) show a
- * pulsing dot and a running clock. Phones arrive already masked from search_calls; only the
- * detail page reads them whole.
+ * pulsing dot and a running clock. Phones and emails arrive already masked from search_calls;
+ * only the detail page reads them whole. The caller type is decided at hangup, so a live row
+ * shows a dash, and a list from before 0006_contacts.sql (no caller_type at all) shows nothing.
  */
 export function CallTable({ rows, loading = false, fetching = false, now: fixedNow, className }: CallTableProps) {
   const compact = useMediaQuery("(max-width: 767px)");
@@ -70,6 +72,7 @@ export function CallTable({ rows, loading = false, fetching = false, now: fixedN
           <TableRow className="hover:bg-transparent">
             <TableHead scope="col" className="pl-4 sm:pl-5">Started</TableHead>
             <TableHead scope="col">Caller</TableHead>
+            <TableHead scope="col">Type</TableHead>
             <TableHead scope="col">Channel</TableHead>
             <TableHead scope="col">Outcome</TableHead>
             <TableHead scope="col">Sentiment</TableHead>
@@ -118,6 +121,10 @@ function CallRow({ row, now }: { row: CallListRow; now: Date }) {
           {callerLabel(row.caller_name)}
         </Link>
         {row.caller_phone_masked && <span className="block truncate text-xs tabular text-ink-3">{row.caller_phone_masked}</span>}
+        {row.caller_email_masked && <span className="block truncate font-mono text-xs text-ink-3">{row.caller_email_masked}</span>}
+      </TableCell>
+      <TableCell className="whitespace-nowrap">
+        <CallerTypeCell row={row} live={live} />
       </TableCell>
       <TableCell className="whitespace-nowrap">
         <ChannelLabel channel={row.channel} />
@@ -153,6 +160,7 @@ function SkeletonRow() {
     <TableRow className="hover:bg-transparent">
       <TableCell className="pl-4 sm:pl-5"><Skeleton className="h-4 w-24" /></TableCell>
       <TableCell><Skeleton className="h-4 w-32" /><Skeleton className="mt-1.5 h-3 w-20" /></TableCell>
+      <TableCell><Skeleton className="h-5 w-16" /></TableCell>
       <TableCell><Skeleton className="h-4 w-14" /></TableCell>
       <TableCell><Skeleton className="h-5 w-20" /></TableCell>
       <TableCell><Skeleton className="h-5 w-16" /></TableCell>
@@ -176,6 +184,18 @@ export function ChannelLabel({ channel, className }: { channel: string | null | 
       {channelLabel(channel)}
     </span>
   );
+}
+
+function CallerTypeCell({ row, live }: { row: CallListRow; live: boolean }) {
+  if (row.caller_type === undefined) return <span className="sr-only">Not recorded</span>;
+  if (live) {
+    return (
+      <span className="text-ink-3" title="Decided when the call ends">
+        {DASH}
+      </span>
+    );
+  }
+  return <CallerTypeBadge type={row.caller_type} />;
 }
 
 function FlagList({ flags }: { flags: string[] | null | undefined }) {
@@ -257,8 +277,9 @@ function CallList({ rows, loading, fetching, now, className }: Required<Omit<Cal
               </span>
             </div>
             {row.summary && !live && <p className="mt-1.5 line-clamp-2 text-xs text-ink-2">{row.summary}</p>}
-            {(row.flags.length > 0 || row.escalated || row.emergency || row.emailed || (!live && row.sentiment)) && (
+            {(row.flags.length > 0 || row.escalated || row.emergency || row.emailed || (!live && (row.sentiment || row.caller_type))) && (
               <div className="relative z-10 mt-2 flex w-fit flex-wrap items-center gap-1.5">
+                {!live && row.caller_type && <CallerTypeBadge type={row.caller_type} />}
                 {!live && row.sentiment && <SentimentBadge sentiment={row.sentiment} />}
                 <FlagList flags={row.flags} />
                 <AlertIcons escalated={row.escalated} emergency={row.emergency} emailed={row.emailed} />

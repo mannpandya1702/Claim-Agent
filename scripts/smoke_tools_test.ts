@@ -41,8 +41,12 @@ function fakeDb(store: FakeStore): SmokeDb {
     interaction: (k) => Promise.resolve(t.call_interactions.find((r) => r.vapi_call_id === k) ?? null),
     transcriptLines: (k) =>
       Promise.resolve(t.transcript_lines.filter((r) => r.call_key === k).sort((a, b) => a.ts_ms - b.ts_ms)),
+    contact: (k) => Promise.resolve(t.caller_contacts.find((r) => r.call_key === k) ?? null),
+    emails: (k) => Promise.resolve(t.emails.filter((r) => r.call_key === k)),
   };
 }
+
+const OWNER = "owner@example.com";
 
 Deno.test("every smoke case passes against the in-process webhook", async () => {
   const { store, background, inProcess } = harness();
@@ -53,6 +57,7 @@ Deno.test("every smoke case passes against the in-process webhook", async () => 
     db: fakeDb(store),
     now: () => NOW,
     rowWaitMs: 0,
+    ownerEmail: OWNER,
   });
   await Promise.allSettled(background);
   const failures = results.filter((r) => !r.pass).map((r) => `${r.name}: ${r.problems.join(" | ")}`);
@@ -84,6 +89,7 @@ Deno.test("every call key a smoke run writes starts with the cleanup prefix", as
     db: fakeDb(store),
     now: () => NOW,
     rowWaitMs: 0,
+    ownerEmail: OWNER,
   });
   await Promise.allSettled(background);
   const keys = [
@@ -93,12 +99,39 @@ Deno.test("every call key a smoke run writes starts with the cleanup prefix", as
     ...store.tables.emails.map((r) => r.call_key),
     ...store.tables.transcript_lines.map((r) => r.call_key),
     ...store.tables.call_interactions.map((r) => r.vapi_call_id),
+    ...store.tables.caller_contacts.map((r) => r.call_key),
   ];
   assert(keys.length > 0);
   for (const k of keys) assert(k.startsWith(SMOKE_PREFIX), k);
-  // no email row and no delivered alert: a smoke run never pages anyone
-  assertEquals(store.tables.emails.length, 0);
+  // no delivered alert: a smoke run never pages anyone, and its one email is the new caller's
+  // steps to start a claim, to the OWNER_EMAIL address
+  assertEquals(store.tables.emails.map((e) => [e.kind, e.to_masked]), [[
+    "how_to_start_claim",
+    "o***@example.com",
+  ]]);
   assert(store.tables.escalations.every((e) => e.alert_status === "skipped"));
+});
+
+Deno.test("without OWNER_EMAIL the new-caller email case checks the gates and sends nothing", async () => {
+  const { store, background, inProcess } = harness();
+  const results = await runSmoke({
+    target: { url: URL_BASE, secret: SECRET, fetch: inProcess },
+    orgId: ORG,
+    runId: "20261012150005",
+    db: fakeDb(store),
+    now: () => NOW,
+    rowWaitMs: 0,
+  }, ["new-caller-contact", "new-caller-email", "email-update"]);
+  await Promise.allSettled(background);
+  assertEquals(results.filter((r) => !r.pass).map((r) => r.problems), []);
+  assertEquals(store.tables.emails.length, 0);
+  assertEquals(
+    store.tables.caller_contacts.map((c) => [c.kind, c.confirmed]).sort(),
+    [
+      ["email_update", true],
+      ["new_customer", true],
+    ],
+  );
 });
 
 Deno.test("a wrong expectation is reported as a failure, not thrown", async () => {
@@ -128,11 +161,12 @@ Deno.test("cleanup SQL covers every call table and only the smoke prefix", () =>
       "transcript_lines",
       "call_interactions",
       "webhook_captures",
+      "caller_contacts",
     ]
   ) {
     assertStringIncludes(sql, `delete from ${table} where`);
   }
-  assertEquals(sql.match(/like 'smoke-%'/g)?.length, 7);
+  assertEquals(sql.match(/like 'smoke-%'/g)?.length, 8);
   assert(!/delete from \w+ returning/.test(sql), "an unfiltered delete");
   assertThrows(() => cleanupSql("%"));
   assertThrows(() => cleanupSql("smoke"));

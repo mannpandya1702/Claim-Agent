@@ -359,5 +359,219 @@
       "expected": null,
       "note": "exchange starts with 1: not dialable in NANP"
     }
+  ],
+  "emails": [
+    {
+      "input": "john.smith42@gmail.com",
+      "expected": "john.smith42@gmail.com",
+      "note": "plain"
+    },
+    {
+      "input": "John.Smith42@Gmail.COM",
+      "expected": "john.smith42@gmail.com",
+      "note": "lower-cased"
+    },
+    {
+      "input": "j o h n dot s m i t h at gmail dot com",
+      "expected": "john.smith@gmail.com",
+      "note": "spelled with spoken at and dot"
+    },
+    {
+      "input": "j, o, h, n, dot, s, m, i, t, h, at, gmail, dot, com",
+      "expected": "john.smith@gmail.com",
+      "note": "spelled with commas"
+    },
+    {
+      "input": "mary underscore jones dash 7 at yahoo dot com",
+      "expected": "mary_jones-7@yahoo.com",
+      "note": "underscore and dash words"
+    },
+    {
+      "input": "pat plus claims at outlook dot com",
+      "expected": "pat+claims@outlook.com",
+      "note": "plus word"
+    },
+    {
+      "input": "name at the rate gmail dot com",
+      "expected": "name@gmail.com",
+      "note": "at the rate"
+    },
+    {
+      "input": "jane.doe@example.co.uk.",
+      "expected": "jane.doe@example.co.uk",
+      "note": "closing full stop dropped"
+    },
+    {
+      "input": "<jane@example.com>",
+      "expected": "jane@example.com",
+      "note": "brackets dropped"
+    },
+    {
+      "input": "mailto:jane@example.com",
+      "expected": "jane@example.com",
+      "note": "mailto dropped"
+    },
+    {
+      "input": "  jane @ example . com  ",
+      "expected": "jane@example.com",
+      "note": "spaces dropped"
+    },
+    {
+      "input": "pat at work at gmail dot com",
+      "expected": null,
+      "note": "two at signs"
+    },
+    {
+      "input": "jane..doe@example.com",
+      "expected": null,
+      "note": "doubled dot"
+    },
+    {
+      "input": ".jane@example.com",
+      "expected": null,
+      "note": "leading dot"
+    },
+    {
+      "input": "jane.@example.com",
+      "expected": null,
+      "note": "dot before the at"
+    },
+    {
+      "input": "jane@example",
+      "expected": null,
+      "note": "no dot in the domain"
+    },
+    {
+      "input": "jane@-example.com",
+      "expected": null,
+      "note": "label starts with a dash"
+    },
+    {
+      "input": "jane@example.c0m",
+      "expected": null,
+      "note": "digit in the top-level domain"
+    },
+    {
+      "input": "jane@example.c",
+      "expected": null,
+      "note": "one-letter top-level domain"
+    },
+    {
+      "input": "jane doe",
+      "expected": null,
+      "note": "no at sign"
+    },
+    {
+      "input": "jane%doe@example.com",
+      "expected": null,
+      "note": "percent in the local part"
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.com",
+      "expected": null,
+      "note": "longer than 100 characters"
+    },
+    {
+      "input": "",
+      "expected": null,
+      "note": "empty"
+    },
+    {
+      "input": 42,
+      "expected": null,
+      "note": "not a string"
+    }
+  ],
+  "names": [
+    {
+      "input": "Jane",
+      "expected": "Jane",
+      "note": "plain"
+    },
+    {
+      "input": "  jane  ",
+      "expected": "Jane",
+      "note": "trimmed, all lower title-cased"
+    },
+    {
+      "input": "O'BRIEN",
+      "expected": "O'Brien",
+      "note": "all upper title-cased, apostrophe kept"
+    },
+    {
+      "input": "mary - jane",
+      "expected": "Mary-Jane",
+      "note": "hyphen spacing collapsed"
+    },
+    {
+      "input": "O\u2019Neil",
+      "expected": "O'Neil",
+      "note": "typographic apostrophe folded"
+    },
+    {
+      "input": "St. John",
+      "expected": "St John",
+      "note": "full stop dropped"
+    },
+    {
+      "input": "McDonald",
+      "expected": "McDonald",
+      "note": "mixed case kept"
+    },
+    {
+      "input": "van der Berg",
+      "expected": "van der Berg",
+      "note": "mixed case kept with spaces"
+    },
+    {
+      "input": "Jos\u00e9",
+      "expected": "Jos\u00e9",
+      "note": "accent kept in storage"
+    },
+    {
+      "input": "unknown",
+      "expected": null,
+      "note": "placeholder"
+    },
+    {
+      "input": "First Name",
+      "expected": null,
+      "note": "form label"
+    },
+    {
+      "input": "N/A",
+      "expected": null,
+      "note": "slash is not a name character"
+    },
+    {
+      "input": "Smith-",
+      "expected": null,
+      "note": "trailing hyphen"
+    },
+    {
+      "input": "R2D2",
+      "expected": null,
+      "note": "digits"
+    },
+    {
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": null,
+      "note": "longer than 40 characters"
+    },
+    {
+      "input": "",
+      "expected": null,
+      "note": "empty"
+    },
+    {
+      "input": "\u674e",
+      "expected": null,
+      "note": "not speakable after folding"
+    },
+    {
+      "input": null,
+      "expected": null,
+      "note": "not a string"
+    }
   ]
 }

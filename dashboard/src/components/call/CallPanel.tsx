@@ -68,7 +68,7 @@ export function CallPanel(props: CallPanelProps) {
             Web call
           </h2>
           <p className="text-xs text-ink-2">
-            Tessa · <span className="font-medium text-ink-1">{info.label}</span>
+            Ava · <span className="font-medium text-ink-1">{info.label}</span>
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -168,7 +168,7 @@ function StartHint({
   micPermission: MicPermission;
 }) {
   if (preparing) return <>Allow the microphone if the browser asks.</>;
-  if (status === "starting") return <>Connecting to Tessa. You can end it at any time.</>;
+  if (status === "starting") return <>Connecting to Ava. You can end it at any time.</>;
   if (busy) return <>Closing this tab also ends the call.</>;
   if (!canStart) return <>Starting is off until this build is configured.</>;
   if (micPermission === "granted") return <>Microphone allowed. Use headphones to avoid echo.</>;
@@ -181,8 +181,8 @@ function StartHint({
 }
 
 function emptyText(status: CallStatus, preparing: boolean): string {
-  if (preparing || status === "starting") return "Connecting to Tessa…";
-  if (status === "active") return "Connected. Tessa speaks first.";
+  if (preparing || status === "starting") return "Connecting to Ava…";
+  if (status === "active") return "Connected. Ava speaks first.";
   if (status === "error") return "The call did not connect, so there is nothing to show.";
   if (status === "ended" || status === "ending") return "No words were exchanged on this call.";
   return "Start the call and the conversation appears here as you talk.";

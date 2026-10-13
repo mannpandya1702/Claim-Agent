@@ -115,7 +115,7 @@ function Line({ role, text, stamp, partial = false }: LineProps) {
       aria-hidden={partial || undefined}
     >
       <p className={cn("flex items-baseline gap-2 px-1 text-xs", agent ? "flex-row" : "flex-row-reverse")}>
-        <span className="font-medium text-ink-2">{agent ? "Tessa" : "You"}</span>
+        <span className="font-medium text-ink-2">{agent ? "Ava" : "You"}</span>
         {stamp ? <time className="tabular text-ink-3">{stamp}</time> : <span className="text-ink-3">speaking</span>}
       </p>
       <p

@@ -55,10 +55,26 @@
     { "note": "numeric date this year", "input": "updated 10/08/2026", "output": "updated 10/08/2026" },
     { "note": "month and year only", "input": "born in March 1986", "output": "born in March 1986" },
     { "note": "time and short date", "input": "at 10:30 on 10/08", "output": "at 10:30 on 10/08" },
-    { "note": "already redacted", "input": "[phone ending 0101] and [date of birth]", "output": "[phone ending 0101] and [date of birth]" }
+    { "note": "already redacted", "input": "[phone ending 0101] and [date of birth]", "output": "[phone ending 0101] and [date of birth]" },
+    { "note": "capture_contact read-back of a spelled address", "input": "Thanks, Jane. Let me read that back. Jane Doe, and your email is j, a, n, e, dot, d, o, e, four, two, at gmail dot com. Did I get that right?", "output": "Thanks, Jane. Let me read that back. Jane Doe, and your email is [email]. Did I get that right?" },
+    { "note": "read-back with a spelled domain and top-level domain", "input": "your email is a, b, underscore, c, at e, x, a, m, p, l, e dot c, o. Did I get that right?", "output": "your email is [email]. Did I get that right?" },
+    { "note": "read-back at a provider said as two words", "input": "and your email is m, a, x, at i cloud dot com.", "output": "and your email is [email]." },
+    { "note": "address said aloud at a known provider", "input": "Sure, it's jane.doe at gmail dot com thanks", "output": "Sure, it's [email] thanks" },
+    { "note": "address spelled letter by letter at a known provider", "input": "j a n e at outlook dot com", "output": "[email]" },
+    { "note": "read-back of a one-letter local part", "input": "your email is a, at gmail dot com. Did I get that right?", "output": "your email is [email]. Did I get that right?" },
+    { "note": "read-back with capital letters and the callback number", "input": "Thanks, Jane. Let me read that back. Jane Doe, your email is J, A, N, E, dot, D, O, E, at gmail dot com, and the best number is six zero two... five five five... zero one seven seven. Did I get that right?", "output": "Thanks, Jane. Let me read that back. Jane Doe, your email is [email], and the best number is [phone ending 0177]. Did I get that right?" },
+    { "note": "spoken address with a dot in the local part", "input": "it's jane dot doe at gmail dot com", "output": "it's [email]" },
+    { "note": "spoken address with an underscore, volunteered", "input": "my email is jane underscore doe at hotmail dot com", "output": "my email is [email]" },
+    { "note": "spoken address at any domain", "input": "it's jsmith at acmecorp dot com", "output": "it's [email]" },
+    { "note": "spoken local part, written domain", "input": "jane at yahoo.com", "output": "[email]" },
+    { "note": "spelled letters with a spoken separator", "input": "p r i y a dot r a m a n at outlook dot com", "output": "[email]" },
+    { "note": "our published claims address is not caller PII", "input": "You can upload them at observeinsurance dot com slash claims, or email them to claims docs at observeinsurance dot com.", "output": "You can upload them at observeinsurance dot com slash claims, or email them to claims docs at observeinsurance dot com." },
+    { "note": "our published site after a comma is not caller PII", "input": "Sure, at observeinsurance dot com slash claims.", "output": "Sure, at observeinsurance dot com slash claims." },
+    { "note": "a time after at is not an address", "input": "I'll be at home by 5.30 tonight.", "output": "I'll be at home by 5.30 tonight." },
+    { "note": "a plain at and dot sentence is not an address", "input": "I was at the office, dot com or not.", "output": "I was at the office, dot com or not." }
   ],
   "asks_for_sensitive": [
-    { "text": "Thanks for calling Observe Insurance claims support. This is Tessa, a virtual assistant, and this call may be recorded. To get started, what's the phone number on your account?", "expected": true },
+    { "text": "Hi, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. What's the phone number on your account?", "expected": true },
     { "text": "Thanks. For security, what's the date of birth on the account?", "expected": true },
     { "text": "I need the full ten-digit number on the account. Could you say it again?", "expected": true },
     { "text": "I'm sorry, that doesn't match what we have on file. Could you give me your date of birth one more time?", "expected": true },
@@ -72,6 +88,17 @@
     { "text": "Our team has been told. Are you safe right now?", "expected": false },
     { "text": "Your auto claim ending in one one five was approved. Do you have any questions about that claim?", "expected": false },
     { "text": "I've recorded your request. Is there anything else I can help you with?", "expected": false },
-    { "text": "", "expected": false }
+    { "text": "", "expected": false },
+    { "text": "What's the best email address for you? Please spell it out, letter by letter.", "expected": true },
+    { "text": "Hmm, I didn't quite catch a full email address. Could you spell it for me, letter by letter?", "expected": true },
+    { "text": "Sorry about that. Could you spell your email for me one more time, slowly?", "expected": true },
+    { "text": "Thanks, Jane. Let me read that back. Jane Doe, and your email is j, a, n, e, at gmail dot com. Did I get that right?", "expected": true },
+    { "text": "Thanks, Jane. I've passed that email to our team to add to your account. Is there anything else I can help with?", "expected": false },
+    { "text": "What email should I use?", "expected": true },
+    { "text": "Could I get your email?", "expected": true },
+    { "text": "And your email, please?", "expected": true },
+    { "text": "Is the number you're calling from the best one to reach you?", "expected": true },
+    { "text": "Would you like me to email the documents to the address on your account?", "expected": false },
+    { "text": "Would you like that sent to the email on your account?", "expected": false }
   ]
 }

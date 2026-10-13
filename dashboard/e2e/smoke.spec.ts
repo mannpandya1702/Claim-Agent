@@ -104,7 +104,7 @@ for (const scheme of ["light", "dark"] as const) {
       const problems = watchPage(page);
       await page.goto("#/call");
 
-      await expect(page.getByRole("heading", { level: 1, name: "Talk to Tessa" })).toBeVisible();
+      await expect(page.getByRole("heading", { level: 1, name: "Talk to Ava" })).toBeVisible();
       const panel = page.locator("[role='region'][aria-labelledby='call-panel-title']");
       await expect(panel).toBeVisible();
       await expect(page.getByRole("radio")).toHaveCount(3);

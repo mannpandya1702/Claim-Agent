@@ -7,7 +7,7 @@ import { AuthTestProvider, type AuthStatus } from "@/lib/auth";
 import { ROUTER_FUTURE } from "@/lib/router";
 import { FullPageLoading, GateLayout } from "@/components/layout/RequireStaff";
 import { getCallState, resetCall, stop } from "@/lib/vapi";
-import TalkToTessa from "./TalkToTessa";
+import TalkToAva from "./TalkToAva";
 
 /*
  * The page against the real call store with a fake SDK. The build here has the web and core
@@ -84,7 +84,7 @@ function renderPage(path = "/call", status: AuthStatus = "signed-out") {
               path="/call"
               element={
                 <>
-                  <TalkToTessa />
+                  <TalkToAva />
                   <LocationProbe />
                 </>
               }
@@ -118,7 +118,7 @@ afterEach(async () => {
   Reflect.deleteProperty(navigator, "mediaDevices");
 });
 
-describe("Talk to Tessa", () => {
+describe("Talk to Ava", () => {
   it("renders the mode switch with the web assistant selected by default", () => {
     renderPage();
     const group = screen.getByRole("group", { name: /assistant/i });
@@ -196,7 +196,7 @@ describe("Talk to Tessa", () => {
     act(() => {
       inst.emit("call-start");
       inst.emit("speech-start");
-      inst.emit("message", { type: "transcript", role: "assistant", transcriptType: "final", transcript: "Hi, this is Tessa." });
+      inst.emit("message", { type: "transcript", role: "assistant", transcriptType: "final", transcript: "Hi, this is Ava." });
       inst.emit("message", { type: "transcript", role: "user", transcriptType: "partial", transcript: "my phone is" });
     });
 
@@ -204,7 +204,7 @@ describe("Talk to Tessa", () => {
     expect(within(panel).getByText("Call status:", { exact: false }).parentElement).toHaveTextContent("Live");
     expect(within(panel).getByRole("radio", { name: /web assistant/i })).toBeDisabled();
     const log = within(panel).getByRole("log", { name: "Your call transcript" });
-    expect(within(log).getByText("Hi, this is Tessa.")).toBeInTheDocument();
+    expect(within(log).getByText("Hi, this is Ava.")).toBeInTheDocument();
     expect(within(log).getByText("my phone is")).toBeInTheDocument();
     const speakers = within(panel).getByRole("group", { name: "Who is speaking" });
     expect(speakers.querySelectorAll('[data-speaking="true"]')).toHaveLength(2);

@@ -15,16 +15,20 @@ import {
   ACCOUNT_TOOLS,
   ASSISTANT_KEYS,
   type AssistantKey,
+  CONTACT_ASSISTANTS,
+  CONTACT_TOOLS,
   deepMerge,
   FAQ_HEADING,
   fill,
   FLOOR_TOOLS,
   HEADER_LINE,
+  KB_CANNOT_DO_HEADING,
   KB_CORE_HEADING,
   KB_FIRST_LINE,
   loadFaq,
   OFFLINE_CONFIG,
   paths,
+  PERSONA_NAME,
   PHONE_ASSISTANTS,
   promptPath,
   renderAll,
@@ -39,6 +43,52 @@ import { extraKeys, invariantProblems, leafDiff, type LiveView, patchBody } from
 const FINAL_TRANSCRIPT = 'transcript[transcriptType="final"]';
 const REP_PHONE = "+16025550188";
 const ENDCALL_GOODBYE = "Thanks for calling Observe Insurance. Take care.";
+const FIRST_MESSAGE =
+  "Hi, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. What's the phone number on your account?";
+// The ElevenLabs voice every assistant speaks with (field names per the VAPI ElevenLabsVoice schema).
+const VOICE = {
+  provider: "11labs",
+  voiceId: "bP6y87KyX5lwNEi7xOkX",
+  model: "eleven_turbo_v2_5",
+  speed: 0.88,
+  stability: 0.7,
+  style: 0.3,
+  similarityBoost: 0.75,
+  useSpeakerBoost: true,
+  optimizeStreamingLatency: 3,
+};
+// What the platform says while a tool runs: request-start and the delayed line. Every tool sets its
+// own request-start: without one VAPI picks a default filler ("Hold on a sec", "Just a sec").
+const DELAYED = "Thanks for bearing with me, almost there.";
+const FILLERS: Record<string, { start: string; delayed: string }> = {
+  lookup_customer: { start: "Sure, one moment.", delayed: DELAYED },
+  verify_identity: { start: "Okay, let me check that.", delayed: DELAYED },
+  get_claim_status: { start: "Alright, let me pull up your claims.", delayed: DELAYED },
+  escalate: { start: "Of course. Let me get that to our team.", delayed: DELAYED },
+  // Outcome-neutral: most results are not a send (no address on file, not verified, already sent).
+  send_info_email: { start: "Sure, let me check on that.", delayed: DELAYED },
+  // The read-back opens with "Thanks, <name>", so the filler does not thank them too.
+  capture_contact: { start: "Okay, one second.", delayed: DELAYED },
+  // Without a request-start VAPI speaks a default filler of its own ("Hold on a sec"), and the
+  // result opens with "Perfect", "Thanks" or "Sorry", so the filler is a neutral acknowledgement.
+  confirm_contact: { start: "Okay.", delayed: DELAYED },
+  // An emergency keeps a steady line rather than a cheerful one.
+  report_emergency: {
+    start:
+      "If anyone is hurt or in immediate danger, please hang up and call 911 right now. If you are thinking about harming yourself, call or text 988.",
+    delayed: "I'm still here with you.",
+  },
+};
+// Never in a prompt, the knowledge base or anything spoken (whole words, any case).
+const BANNED_WORDS = ["gotcha", "honey", "love", "sweetie", "dear"];
+const RETIRED_PHRASES = ["Tessa", "virtual assistant"];
+// The honest answer's second sentence promises only what the assistant can do: a live transfer on the
+// phone assistant, a callback everywhere else (web calls cannot be transferred).
+const DISCLOSURE_PHONE = "I'm Ava, Observe Insurance's automated assistant. I can connect you with a person anytime.";
+const DISCLOSURE_WEB =
+  "I'm Ava, Observe Insurance's automated assistant. I can have someone from our claims team call you back anytime.";
+const CALLING_FROM_QUESTION = "Is the number you're calling from the best one to reach you?";
+const BEST_NUMBER_QUESTION = "What's the best number to reach you?";
 
 const ALL_TOOLS = [
   ...SERVER_TOOLS,
@@ -189,6 +239,8 @@ Deno.test("everything spoken is printable ASCII and passes the sentence guard", 
       assert(typeof s.text === "string" && s.text.trim(), `${label} ${s.where}: empty`);
       assertMatch(s.text, /^[\x20-\x7e]+$/, `${label} ${s.where}: not printable ASCII`);
       assert(!s.text.includes("{{"), `${label} ${s.where}: template text`);
+      // TTS reads a double hyphen literally; pauses come from commas and full stops.
+      assert(!s.text.includes("--"), `${label} ${s.where}: "--" in a spoken string`);
       assertSpeakable(s.text);
     }
   }
@@ -201,7 +253,8 @@ Deno.test("the knowledge-base file is plain ASCII reference text with no claim-s
   assert(kb.startsWith(KB_FIRST_LINE + "\n"));
   kb.split("\n").forEach((l, i) => assertMatch(l, /^[\x20-\x7e]*$/, `kb line ${i + 1}`));
   assert(!/claim ending in|was approved|payment of|under review|was denied|was received on/i.test(kb));
-  for (const heading of [KB_CORE_HEADING, "LONG TAIL", "WHAT TESSA CANNOT DO"]) assert(kb.includes(`\n${heading}\n`));
+  for (const heading of [KB_CORE_HEADING, "LONG TAIL", KB_CANNOT_DO_HEADING]) assert(kb.includes(`\n${heading}\n`));
+  assertEquals(KB_CANNOT_DO_HEADING, `WHAT ${PERSONA_NAME.toUpperCase()} CANNOT DO`);
   assert(kb.length > 3000 && kb.length < 12000, `kb is ${kb.length} bytes`);
 });
 
@@ -213,7 +266,7 @@ Deno.test("the FAQ FACTS block in every prompt equals the knowledge-base core", 
   }
 });
 
-Deno.test("greetings: graded assistants greet and ask for the phone number; Knowledge arrives silently", () => {
+Deno.test("greetings: graded assistants greet as Ava and ask for the phone number; Knowledge arrives silently", () => {
   for (const key of ASSISTANT_KEYS) {
     const p = withRep.assistants[key].payload;
     if (key === "knowledge") {
@@ -221,8 +274,67 @@ Deno.test("greetings: graded assistants greet and ask for the phone number; Know
       assertEquals(p.firstMessageMode, "assistant-speaks-first-with-model-generated-message");
     } else {
       assertEquals(p.firstMessageMode, "assistant-speaks-first");
-      assertMatch(p.firstMessage, /Tessa, a virtual assistant.*may be recorded.*phone number on your account\?$/);
+      assertEquals(p.firstMessage, FIRST_MESSAGE, key);
     }
+  }
+  assert(FIRST_MESSAGE.includes(`This is ${PERSONA_NAME},`) && FIRST_MESSAGE.includes("may be recorded"));
+});
+
+// ---------------------------------------------------------------------------------------------
+// Persona: voice, words, disclosure
+// ---------------------------------------------------------------------------------------------
+Deno.test("every assistant speaks with the same ElevenLabs voice", () => {
+  for (const [label, r] of BOTH) {
+    for (const key of ASSISTANT_KEYS) assertEquals(r.assistants[key].payload.voice, VOICE, `${label} ${key}`);
+  }
+});
+
+Deno.test("no prompt, knowledge-base line, tool description or spoken string carries a retired name or a banned word", () => {
+  const texts: Spoken[] = [];
+  for (const [label, r] of BOTH) {
+    for (const key of ASSISTANT_KEYS) texts.push({ where: `${label} ${key} prompt`, text: r.assistants[key].prompt });
+    texts.push({ where: `${label} kb`, text: r.kb });
+    for (const [name, t] of Object.entries(r.tools)) {
+      texts.push({ where: `${label} ${name} description`, text: JSON.stringify(t.function ?? {}) });
+    }
+    texts.push(...spokenStrings(r).map((s) => ({ where: `${label} ${s.where}`, text: s.text })));
+  }
+  assert(texts.length > 40, "collector found too few texts");
+  for (const { where, text } of texts) {
+    for (const phrase of RETIRED_PHRASES) {
+      assert(!text.toLowerCase().includes(phrase.toLowerCase()), `${where}: says "${phrase}"`);
+    }
+    for (const word of BANNED_WORDS) assert(!new RegExp(`\\b${word}\\b`, "i").test(text), `${where}: says "${word}"`);
+  }
+});
+
+Deno.test("every prompt names Ava and carries the honest disclosure rule; none claims to be human", () => {
+  for (const key of ASSISTANT_KEYS) {
+    const prompt = Deno.readTextFileSync(promptPath(key));
+    assertMatch(prompt, new RegExp(`^You are ${PERSONA_NAME}, and you answer the claims line for Observe Insurance`, "m"));
+    const phone = PHONE_ASSISTANTS.includes(key);
+    assert(prompt.includes(phone ? DISCLOSURE_PHONE : DISCLOSURE_WEB), `${key}: disclosure answer missing`);
+    if (!phone) assert(!/connect you with a person/.test(prompt), `${key}: a web prompt promises a live connection`);
+    assertMatch(prompt, /asks whether they're talking to a real person, a recording or an AI, answer honestly/);
+    assertMatch(prompt, /never claim or suggest that you are a human/);
+    assertMatch(prompt, /Never describe yourself as an AI, a bot or a computer unprompted/);
+    assert(!/\bYou are an AI\b/.test(prompt), `${key}: the persona is not introduced as an AI`);
+  }
+});
+
+Deno.test("conversation style rules are in every prompt", () => {
+  for (const key of ASSISTANT_KEYS) {
+    const prompt = Deno.readTextFileSync(promptPath(key));
+    assertMatch(prompt, /^1\. One question at a time\./m, key);
+    assertMatch(prompt, /never more than 60 words/, key);
+    assertMatch(prompt, /narrow it first with one short question/, key);
+    assertMatch(prompt, /"Right, you mentioned that\."/, key);
+    assertMatch(prompt, /If they pause partway, stay quiet/, key);
+    assertMatch(prompt, /Say 0 as "zero", never "oh"\./, key);
+    assertMatch(prompt, /Speak with contractions/, key);
+    // Six varied follow-ups to pick from after a general answer.
+    const followUps = prompt.match(/^14\. .*$/m)?.[0].match(/"[^"]+\?"/g) ?? [];
+    assertEquals(new Set(followUps).size, 6, `${key}: follow-up questions`);
   }
 });
 
@@ -335,7 +447,7 @@ Deno.test("assistant names are unique, short enough for VAPI and match the hando
 // ---------------------------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------------------------
-Deno.test("function tools: the server tools, flat non-strict schemas, Bearer server, three messages", () => {
+Deno.test("function tools: the server tools, flat non-strict schemas, Bearer server, fillers and an offer on failure", () => {
   const fns = Object.entries(withRep.tools).filter(([, t]) => t.type === "function");
   assertEquals(fns.map(([n]) => n).sort(), [...SERVER_TOOLS].sort());
   for (const [name, t] of fns) {
@@ -354,11 +466,15 @@ Deno.test("function tools: the server tools, flat non-strict schemas, Bearer ser
       timeoutSeconds: 10,
     });
     const byType = (type: string) => t.messages.filter((m: any) => m.type === type);
-    assertEquals(byType("request-start").length, 1, name);
+    const filler = FILLERS[name];
+    assert(filler, `${name}: no filler expectation`);
+    assertEquals(byType("request-start").map((m: any) => m.content), [filler.start], name);
     assertEquals(byType("request-start")[0].blocking, name === "report_emergency", `${name} blocking`);
     assertEquals(byType("request-response-delayed").map((m: any) => m.timingMilliseconds), [3000], name);
+    assertEquals(byType("request-response-delayed")[0].content, filler.delayed, name);
     assertEquals(byType("request-failed").length, 1, name);
     assert(byType("request-failed")[0].content.endsWith("?"), `${name}: request-failed must end in an offer`);
+    assertEquals(t.messages.length, 3, `${name}: unexpected message types`);
   }
   const props = (n: string) =>
     Object.fromEntries(
@@ -370,6 +486,16 @@ Deno.test("function tools: the server tools, flat non-strict schemas, Bearer ser
   assertEquals(props("escalate"), { reason: "string", details: "string", callback_phone: "string" });
   assertEquals(props("report_emergency"), { note: "string" });
   assertEquals(props("send_info_email"), { topic: "string" });
+  assertEquals(props("capture_contact"), {
+    first_name: "string",
+    last_name: "string",
+    email: "string",
+    callback_phone: "string",
+  });
+  assertEquals(props("confirm_contact"), { correct: "boolean" });
+  // A verified caller's name comes from the account, so the names are not required of the model.
+  assertEquals(withRep.tools.capture_contact.function.parameters.required, undefined);
+  assertEquals(withRep.tools.confirm_contact.function.parameters.required, ["correct"]);
   const start = withRep.tools.report_emergency.messages[0].content;
   assert(start.includes("911") && start.includes("988"));
 });
@@ -421,11 +547,114 @@ Deno.test("squad: Concierge first, members share the floor tools, Knowledge has 
   assert(toolsOf(withRep, "knowledge").includes("handoff_to_concierge"));
 });
 
+Deno.test("contact capture: the graded assistants carry both tools and the flow; Knowledge hands such callers back", () => {
+  for (const t of CONTACT_TOOLS) {
+    assert(!(FLOOR_TOOLS as readonly string[]).includes(t), `${t} must not be a squad floor tool`);
+  }
+  for (const key of ASSISTANT_KEYS) {
+    const tools = toolsOf(withRep, key);
+    const prompt = withRep.assistants[key].prompt;
+    if (CONTACT_ASSISTANTS.includes(key)) {
+      for (const t of CONTACT_TOOLS) assert(tools.includes(t), `${key} lacks ${t}`);
+      for (const heading of ["NEW CALLERS", "ADDING AN EMAIL", "EMAIL ADDRESSES"]) {
+        assert(prompt.split("\n").includes(heading), `${key}: section ${heading} missing`);
+      }
+      assertMatch(prompt, /"What's the best email address for you\? Please spell it out, letter by letter\."/);
+      assertMatch(prompt, /never sooner, call capture_contact/);
+      assertMatch(prompt, /call confirm_contact with no words at all/);
+      assertMatch(prompt, /A yes means correct set to true, and a no means correct set to false/);
+      assertMatch(prompt, /Only send_info_email's sentence can tell you that a verified caller has no email address/);
+      assertMatch(prompt, /call send_info_email with topic how_to_start_claim/);
+      assertMatch(prompt, /never call send_info_email for it/);
+      assertMatch(prompt, /Take an email address only for those two reasons/);
+      assertMatch(prompt, /leave first_name and last_name out: their name comes from the account/);
+    } else {
+      for (const t of CONTACT_TOOLS) assert(!tools.includes(t), `${key} carries ${t}`);
+      assert(!prompt.includes("NEW CALLERS"), `${key}: the capture flow belongs to the graded assistants`);
+      assertMatch(prompt, /would like help getting started with a new claim, call handoff_to_concierge/);
+      assertMatch(prompt, /Never ask for, spell or read out an email address/);
+    }
+  }
+});
+
+Deno.test("contact branching: a would-be new caller is asked about a policy first, and not found is not always new", () => {
+  for (const key of CONTACT_ASSISTANTS) {
+    const prompt = withRep.assistants[key].prompt;
+    assertMatch(prompt, /before giving a number, they say they want to start or file a new claim/, key);
+    assertMatch(prompt, /"Do you already have a policy with us\?"/, key);
+    assertMatch(prompt, /If the caller says they already have a policy or a claim with us, they're not new/, key);
+    assertMatch(prompt, /If they say which part is wrong without the fix/, key);
+    assertMatch(prompt, /asks what you got wrong/, key);
+  }
+  // Knowledge cannot take an address, so a caller who wants to spell one goes back to Concierge
+  assertMatch(withRep.assistants.knowledge.prompt, /wants to spell an email address to add to their account/);
+});
+
+Deno.test("the callback question fits the channel: only the phone-only assistant asks about the calling number", () => {
+  for (const key of CONTACT_ASSISTANTS) {
+    const prompt = withRep.assistants[key].prompt;
+    if (PHONE_ASSISTANTS.includes(key)) {
+      assert(prompt.includes(CALLING_FROM_QUESTION), key);
+      assert(!prompt.includes(BEST_NUMBER_QUESTION), key);
+    } else {
+      // Web assistants (and the web assistant answering the phone line) cannot know about a caller id,
+      // so "the number I'm calling from" gets a request for the digits instead of an empty argument.
+      assert(prompt.includes(BEST_NUMBER_QUESTION), key);
+      assert(!prompt.includes(CALLING_FROM_QUESTION), key);
+      assertMatch(prompt, /number they're calling from, ask them to say the digits/, key);
+      assert(!/If they say to use the number they're calling from, leave callback_phone out/.test(prompt), key);
+    }
+  }
+});
+
+Deno.test("endpointing waits longer after every sentence that asks for a number, a date, a name or a spelling", async () => {
+  const { sentenceFor } = await import("../supabase/functions/vapi-webhook/speak.ts");
+  const rules: { re: RegExp; timeoutSeconds: number }[] = withRep.assistants["solo-core"].payload.startSpeakingPlan
+    .customEndpointingRules.map((r: any) => ({
+      re: new RegExp(r.regex, r.regexOptions?.some((o: any) => o.type === "ignore-case" && o.enabled) ? "i" : ""),
+      timeoutSeconds: r.timeoutSeconds,
+    }));
+  const asks: [string, string][] = [
+    ["firstMessage", FIRST_MESSAGE],
+    ["needs_dob", sentenceFor("needs_dob")],
+    ["rep_queued_no_number", sentenceFor("rep_queued_no_number")],
+    ["not_found_final", sentenceFor("not_found_final")],
+    ["no_email_on_file", sentenceFor("no_email_on_file")],
+    ["contact_invalid_email", sentenceFor("contact_invalid_email")],
+    ["contact_needs_name", sentenceFor("contact_needs_name")],
+    ["not_pending", sentenceFor("not_pending")],
+    ["contact_retry", sentenceFor("contact_retry")],
+    ["contact_retry (with number)", sentenceFor("contact_retry", { has_email: true, has_phone: true })],
+    ["contact_retry (no email)", sentenceFor("contact_retry", { has_email: false })],
+    ["contact_retry (email update)", sentenceFor("contact_retry", { part: "email" })],
+    ["contact_needs_phone", sentenceFor("contact_needs_phone")],
+    ["not_pending (verified)", sentenceFor("not_pending", { verified: true })],
+    // the read-back: a yes or no, or a correction spelled or said in digits
+    ["contact_readback", sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe", email: "jane@gmail.com" })],
+    ["contact_readback (name only)", sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe" })],
+    // the prompt's own callback questions, often answered with digits
+    ["calling-from question", CALLING_FROM_QUESTION],
+    ["best-number question", BEST_NUMBER_QUESTION],
+  ];
+  for (const [where, text] of asks) {
+    const rule = rules.find((r) => r.re.test(text));
+    assert(rule, `${where}: no endpointing rule waits after "${text}"`);
+    assert(rule.timeoutSeconds >= 2, where);
+  }
+  // A spelled email has the longest pauses between parts.
+  for (const [where, text] of asks.filter(([, t]) => /\bspell\b/i.test(t))) {
+    assert(rules.find((r) => r.re.test(text))!.timeoutSeconds >= 3, `${where}: spelling needs the longer wait`);
+  }
+  // A plain answer turn does not wait.
+  assert(!rules.some((r) => r.re.test(sentenceFor("email_sent"))));
+});
+
 Deno.test("variants differ only where intended", () => {
   const t = (k: AssistantKey) => toolsOf(withRep, k);
-  assertEquals(t("solo-web"), [...t("solo-core").slice(0, 6), "faq_search", "endCall"]);
-  assertEquals(t("solo-phone"), [...t("solo-core").slice(0, 6), "transferCall", "endCall"]);
-  assertEquals(t("concierge"), [...t("solo-core").slice(0, 6), "handoff_to_knowledge", "endCall"]);
+  assertEquals(t("solo-core").slice(-3), [...CONTACT_TOOLS, "endCall"]);
+  assertEquals(t("solo-web"), [...t("solo-core").slice(0, 8), "faq_search", "endCall"]);
+  assertEquals(t("solo-phone"), [...t("solo-core").slice(0, 8), "transferCall", "endCall"]);
+  assertEquals(t("concierge"), [...t("solo-core").slice(0, 8), "handoff_to_knowledge", "endCall"]);
   assert(!t("solo-core").includes("faq_search"));
   const strip = (k: AssistantKey) => {
     const { name: _n, model, metadata: _m, ...rest } = withRep.assistants[k].payload;

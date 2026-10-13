@@ -45,6 +45,18 @@ const SCENARIOS: Record<string, string[]> = {
     "Yes, I'm outside now, I'm safe.",
     "No, that's all. Goodbye.",
   ],
+  // Not found twice, then Ava takes a new caller's details: a spoken name, a spelled email (ASR of
+  // letters, endpointing while spelling), the read-back, the confirmation and the emailed steps.
+  "new-customer": [
+    "Hi, I'd like to start a claim. My number is six zero two, five five five, zero one nine nine.",
+    "Yes, that's right.",
+    "It's John Smith.",
+    "j o h n dot s m i t h at gmail dot com",
+    "You can reach me at six zero two, five five five, zero one seven seven.",
+    "Yes, that's right.",
+    "Please email me the steps.",
+    "No, that's all. Thank you, goodbye.",
+  ],
 };
 
 const SAMPLE_RATE = 16000;

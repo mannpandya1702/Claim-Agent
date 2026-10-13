@@ -8,7 +8,7 @@
     {
       "type": "assistant",
       "assistantName": "Concierge",
-      "description": "The caller is back to their own account or claim.",
+      "description": "The caller is back to their own account or claim, or has no account and wants help starting a new claim.",
       "contextEngineeringPlan": {
         "type": "all"
       },

@@ -1,5 +1,5 @@
 {
-  "comment": "First squad member. Owns every graded tool, so the graded flows never depend on a handoff; general long-tail questions go to Knowledge.",
+  "comment": "First squad member. Owns every graded tool and the name and email capture, so the graded flows and new callers never depend on a handoff; general long-tail questions go to Knowledge.",
   "sections": [
     "header",
     "role",
@@ -9,6 +9,7 @@
     "claims",
     "branches",
     "branches-identity",
+    "contact",
     "faq",
     "knowledge-handoff",
     "errors",
@@ -16,6 +17,11 @@
     "style"
   ],
   "representative": "representative-web",
+  "slots": {
+    "EMAIL": "email-capture",
+    "CALLBACK": "callback-web",
+    "DISCLOSURE": "disclosure-web"
+  },
   "tools": [
     "lookup_customer",
     "verify_identity",
@@ -23,6 +29,8 @@
     "escalate",
     "report_emergency",
     "send_info_email",
+    "capture_contact",
+    "confirm_contact",
     "handoff_to_knowledge",
     "endCall"
   ],
