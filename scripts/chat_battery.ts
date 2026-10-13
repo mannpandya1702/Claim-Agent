@@ -8,7 +8,7 @@
 //   deno task battery --list               persona ids
 //   deno task battery --dry-run            build every first request offline and print the plan
 //
-// Options: --cap <conversations> (default 96, a hard ceiling checked before anything is spent),
+// Options: --cap <conversations> (default 120, a hard ceiling checked before anything is spent),
 // --concurrency <k> (default 3). Every chat is named "INTERNAL ...", every number is a 555 number,
 // and a one-turn 402 probe runs first: an empty wallet halts the run before any persona starts.
 // The JSON report lands in fixtures/raw/battery/ (gitignored).
@@ -79,7 +79,7 @@ import { vapiClient, VapiError } from "./lib/vapi.ts";
 import { deepMerge, loadVariant, paths, promptPath, renderPrompt, sha256Hex } from "./render.ts";
 
 export const ASSISTANT_KEY = "solo-core" as const;
-export const DEFAULTS = { n: 3, cap: 99, concurrency: 3 };
+export const DEFAULTS = { n: 3, cap: 120, concurrency: 3 };
 const MAX_N = 20;
 const MAX_CONCURRENCY = 6;
 // A conversation never needs more requests than turns plus confirmations; this bounds a runaway.
@@ -1399,6 +1399,27 @@ const LOOKUP_REFUSED =
 // A warm re-ask of garbled speech (rules.md rule 23), in whatever words the model picks.
 const UNCLEAR_REASK = /\b(catch|caught|say (that|it) again|repeat|didn't (quite )?(get|hear)|missed)\b/i;
 const INJURY_ASK = /\b(anyone|anybody|you|everyone) (hurt|injured)\?|\binjur(y|ies)\b[^.?]*\?/i;
+// A caller who can't hear Ava (rules.md rule 25): a line check that keeps "hear me", never rule 23's
+// "didn't catch that" or a request to say it again; then only what they missed (rule 26), with no
+// rule 14 follow-up, no figures and no web address unless that was the point.
+const LINE_CHECK = /\bhear me\b/i;
+const LINE_CHECK_QUESTION = /\bhear me\b[^.?!]*\?/gi;
+const BLAMES_CALLER =
+  /\b(didn't|did not|couldn't|could not) (quite )?(catch|get|make out)\b|\b(didn't|did not|couldn't|could not) (quite )?hear (you|that|what you)\b|\b(could|can|would) you (please )?(say|repeat) (that|it)\b/i;
+const FOLLOW_UP_14 = /\b(does that (help|make sense)|did that (help|cover)|is that (clear|helpful))\b|\bmake sense\?/i;
+const DIGITS = /\d/;
+// Tobias's documents, word for word as the documents sentence says them.
+const DOCS_SAID = [/photos of the damage/i, /contractor estimate/i, /proof of ownership/i, /October twenty-fourth/i];
+const WEB_ADDRESS = /\bdot com\b|slash claims|claims docs|upload them/i;
+// A question that confirms the email the caller already asked for ("Should I still email you that list?").
+const EMAIL_CONFIRM = /\be-?mail[^.!?]*\?/i;
+const CALLBACK_OFFER = /\bcall(ed)? you back\b|\bcall ?back\b/i;
+// "I'm here." for a single hello after a hold (rule 25 says it is not line trouble).
+const IM_HERE = /\b(I'm|I am|still|right) here\b/i;
+// The claims summary's key point, in the summary's words or close to them.
+const SUMMARY_KEY = /\bdocuments\b|October twenty-fourth|\bpaid\b/i;
+/** More than n words in the model's turn: a repeat that ran long. */
+const moreThanWords = (n: number) => new RegExp(`(?:\\S+\\s+){${n}}\\S`);
 
 const TOBIAS_SAYS_PHONE = "six zero two, five five five, zero one zero one";
 const TOBIAS_DOB = "March fourteenth, nineteen eighty-six.";
@@ -1476,6 +1497,8 @@ const endingNames =
       ? null
       : `expected detail claim naming the ${type} claim ending in ${digits.slice(-3)}, got ${JSON.stringify(a)}`;
   };
+const detailsSay = (re: RegExp): ArgCheck => (a) =>
+  typeof a.details === "string" && re.test(a.details) ? null : `details was ${JSON.stringify(a.details ?? null)}`;
 const describes = (re: RegExp): ArgCheck => (a) =>
   typeof a.description === "string" && re.test(a.description)
     ? null
@@ -1493,6 +1516,18 @@ const verifyTobias: TurnSpec = {
   tools: ["verify_identity"],
   codes: ["verified"],
   args: { verify_identity: dobIs(3, 14, 1986) },
+};
+// Tobias verified with the claims summary read, then the documents sentence on request (status-details).
+const statusTobias: TurnSpec[] = [
+  { ...lookupTobias, user: `Hi, I'm calling to check on my claims. My number is ${TOBIAS_SAYS_PHONE}.` },
+  { ...verifyTobias, args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("claim_status")) } },
+];
+const docsTobias: TurnSpec = {
+  user: "Yes, what do I need to send?",
+  tools: ["get_claim_status"],
+  codes: ["claim_documents"],
+  firstToolSilent: "get_claim_status",
+  args: { get_claim_status: detailIs("documents") },
 };
 const continuesFlow = (user: string): TurnSpec => ({
   user,
@@ -2451,6 +2486,169 @@ export const PERSONAS: Persona[] = [
     modelNever: [NAME, CLAIM_WORDS],
     heardNever: [NAME, CLAIM_WORDS],
   },
+  // Call 01a13635: "your voice was breaking, I was not able to hear" got a scripted re-read,
+  // an email with no word about the line, and "Does that make sense?". Rule 25 checks the line and says
+  // again only what was missed (rule 26); a single hello after a hold and a "what?" of surprise are not
+  // line trouble.
+  {
+    id: "cant-hear-mixed",
+    title:
+      "Can't hear Ava, with a request in the same breath (01a13635 at 125 s): line check, the documents again, the email confirmed and sent on yes",
+    turns: [
+      ...statusTobias,
+      docsTobias,
+      {
+        user:
+          "Yeah. Could you please email me the things? And also, what were you saying? Actually, your voice was breaking. I was not able to hear.",
+        tools: [],
+        modelSays: [LINE_CHECK, ...DOCS_SAID, EMAIL_CONFIRM],
+        modelNever: [BLAMES_CALLER, EMAIL_PROMISE, FOLLOW_UP_14, DIGITS, moreThanWords(50)],
+      },
+      {
+        user: "Yes, please.",
+        tools: ["send_info_email"],
+        codes: ["email_sent"],
+        firstToolSilent: "send_info_email",
+        args: { send_info_email: topicIs("document_checklist") },
+      },
+    ],
+    neverTools: ["escalate", "endCall"],
+    toolOrder: ["lookup_customer", "verify_identity", "get_claim_status", "send_info_email"],
+  },
+  {
+    id: "cant-hear-repeat",
+    title:
+      "Can't hear the list after it was emailed (01a13635 at 156 s): line check and only the documents again, word for word, no second email",
+    turns: [
+      ...statusTobias,
+      docsTobias,
+      {
+        user: "Yes, please email it to me.",
+        confirm: { tool: "send_info_email", say: "Yes, please." },
+        tools: ["send_info_email"],
+        codes: ["email_sent"],
+        args: { send_info_email: topicIs("document_checklist") },
+      },
+      {
+        user: "Sorry, your voice was breaking. What documents you told, I was not able to hear it.",
+        tools: [],
+        modelSays: [LINE_CHECK, ...DOCS_SAID],
+        modelNever: [BLAMES_CALLER, FOLLOW_UP_14, WEB_ADDRESS, DIGITS, moreThanWords(36)],
+      },
+    ],
+    neverTools: ["escalate", "endCall"],
+    toolOrder: ["lookup_customer", "verify_identity", "get_claim_status", "send_info_email"],
+  },
+  {
+    id: "cant-hear-hello",
+    title:
+      "'Hello? Hello?' right after the claims summary (01a134e6, 01a13604): line check and the key point again, no tool",
+    turns: [
+      ...statusTobias,
+      {
+        user: "Hello? Hello?",
+        tools: [],
+        modelSays: [LINE_CHECK, SUMMARY_KEY],
+        modelNever: [BLAMES_CALLER, FOLLOW_UP_14, DIGITS, moreThanWords(48)],
+      },
+    ],
+    neverTools: ["get_claim_status", "escalate", "endCall"],
+    toolOrder: ["lookup_customer", "verify_identity"],
+  },
+  {
+    id: "cant-hear-pending-number",
+    title: "Can't hear Ava while the phone number is pending: the line check asks for it again, then it is looked up",
+    turns: [
+      { user: "Hi, I'm calling to check on my claim.", tools: [], modelSays: [PHONE_ASK] },
+      {
+        user: "Sorry, I can't hear you, your voice is breaking.",
+        tools: [],
+        modelSays: [LINE_CHECK, PHONE_ASK],
+        modelNever: [BLAMES_CALLER, FOLLOW_UP_14, NAME],
+      },
+      { ...lookupTobias, user: `Yes. ${TOBIAS_SAYS_PHONE}.`, firstToolSilent: "lookup_customer" },
+    ],
+    neverTools: ["escalate", "endCall"],
+    toolOrder: ["lookup_customer"],
+  },
+  {
+    id: "cant-hear-twice",
+    title: "Still can't hear Ava right after a line check: one offer of a callback, escalate on yes",
+    turns: [
+      ...statusTobias,
+      {
+        user: "Sorry, you're cutting out. I can't hear you.",
+        tools: [],
+        modelSays: [LINE_CHECK],
+        modelNever: [BLAMES_CALLER, FOLLOW_UP_14, DIGITS],
+      },
+      {
+        user: "No, I still can't hear you properly.",
+        tools: [],
+        modelSays: [CALLBACK_OFFER],
+        modelNever: [PROMISE, BLAMES_CALLER, DIGITS, moreThanWords(24)],
+      },
+      {
+        user: "Yes please.",
+        tools: ["escalate"],
+        codes: ["rep_queued"],
+        firstToolSilent: "escalate",
+        args: {
+          escalate: all(
+            reasonIs("representative_requested"),
+            noCallback,
+            detailsSay(/\b(line|break|breaking|cutting|cut out|hear|connection|audio)\b/i),
+          ),
+        },
+      },
+    ],
+    neverTools: ["endCall", "get_claim_status", "send_info_email"],
+    toolOrder: ["lookup_customer", "verify_identity", "escalate"],
+  },
+  {
+    id: "hello-not-complaint",
+    title:
+      "A single 'Hello?' after a hold with the date of birth pending (01a13617 at 37.7 s): 'I'm here' and the question, no sorry, no line check",
+    turns: [
+      { ...lookupTobias, user: `Hi, I'm calling to check on my claim. My number is ${TOBIAS_SAYS_PHONE}.` },
+      { user: "Give me a second, I need to find it.", tools: [] },
+      {
+        user: "Hello?",
+        tools: [],
+        modelSays: [IM_HERE, /date of birth/i],
+        modelNever: [/\bsorry\b/i, LINE_CHECK, BLAMES_CALLER],
+      },
+    ],
+    neverTools: ["verify_identity", "escalate", "endCall"],
+  },
+  {
+    id: "what-surprise",
+    title: "'What? It was denied?' after Sloane's summary is surprise, not line trouble: answered, with no line check",
+    turns: [
+      {
+        user: "Hi, I'm calling about my claim. My number is six zero two, five five five, zero one zero three.",
+        tools: ["lookup_customer"],
+        codes: ["needs_dob"],
+        args: { lookup_customer: phoneIs("6025550103") },
+      },
+      {
+        user: "July twenty-first, nineteen ninety-two.",
+        tools: ["verify_identity"],
+        codes: ["verified"],
+        args: { verify_identity: all(dobIs(7, 21, 1992), intentIs("claim_status")) },
+        heardSays: [/property claim ending in one seven seven was denied/],
+      },
+      {
+        // the reason in the claim's own sentence, or a plain yes in her words; never a line check
+        user: "What? It was denied?",
+        allowTools: ["get_claim_status"],
+        allowCodes: ["claim_detail"],
+        args: { get_claim_status: detailIs("claim") },
+        modelNever: [LINE_CHECK, BLAMES_CALLER, /\b(the line|connection)\b/i],
+      },
+    ],
+    neverTools: ["escalate", "endCall"],
+  },
 ];
 
 /** Every digit run of seven or more in a persona is a 555 number (or the main line). */
@@ -2513,7 +2711,9 @@ export function genericProblems(turn: TurnRecord, toolNames: string[]): string[]
   if (turn.calls.length > 0 && turn.model.length > 0) {
     problems.push(`words of its own in a tool turn: "${turn.model.join(" ").slice(0, 160)}"`);
   }
-  const questions = (turn.model.join(" ").match(/\?/g) ?? []).length;
+  // A line check said in passing ("Sorry about that, can you hear me now? I was saying ...", rules.md
+  // rule 25) is not rule 1's second question.
+  const questions = (turn.model.join(" ").replace(LINE_CHECK_QUESTION, ".").match(/\?/g) ?? []).length;
   if (questions > 1) problems.push(`${questions} questions in one turn: "${turn.model.join(" ").slice(0, 160)}"`);
   return problems;
 }

@@ -45,7 +45,7 @@
     },
     "startSpeakingPlan": {
       "waitSeconds": 0.4,
-      "smartEndpointingPlan": { "provider": "livekit" },
+      "smartEndpointingPlan": { "provider": "livekit", "waitFunction": "200 + 300 * sqrt(x) + 1500 * x^3" },
       "customEndpointingRules": [
         {
           "type": "both",
@@ -74,6 +74,12 @@
           "regex": "(what happened|a little more about)",
           "regexOptions": [{ "type": "ignore-case", "enabled": true }],
           "timeoutSeconds": 1.2
+        },
+        {
+          "type": "customer",
+          "regex": "(?:\\b(?:can't|cant|cannot|couldn't|can not|could not|not able to|unable to) (?:hear|listen)(?: to)?(?: (?:you|it|anything|that|this|a thing|your voice|what you said))?(?: (?:properly|clearly|well|very well|now|at all|anymore|any more))?|\\b(?:you're|you are|you were|you keep|your voice|the line|the call)\\W+(?:\\w+\\W+){0,2}(?:breaking(?: up)?|cutting out)|\\b(?:it's|it is|it keeps) (?:breaking(?: up)?|cutting out)|\\bare you (?:still )?there|\\b(?:can|could|do) you hear me(?: (?:okay|ok|alright|all right|now))*|\\bhello\\W+hello)[\\s.,!?]*$",
+          "regexOptions": [{ "type": "ignore-case", "enabled": true }],
+          "timeoutSeconds": 0.5
         }
       ]
     },

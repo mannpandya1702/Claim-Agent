@@ -506,6 +506,73 @@ Deno.test("masking: a re-ask right after a DOB question still withholds the repe
   );
 });
 
+// rules.md rule 25: a caller who can't hear Ava gets a line check, and the question that was waiting is
+// asked again; "Can you hear me?" from the caller gets "Yes, I can hear you." Either way the answer that
+// follows is still the sensitive one, so the masking carries on.
+Deno.test("masking: a line check right after a DOB question still withholds the answer", () => {
+  const check = "Sorry about that, can you hear me now? I was saying, what's the date of birth on the account?";
+  const message = fixture("full");
+  message.artifact.messages = [
+    { role: "bot", message: DOB_QUESTION, secondsFromStart: 1 },
+    { role: "user", message: "Sorry, I can't hear you, your voice is breaking.", secondsFromStart: 4 },
+    { role: "bot", message: check, secondsFromStart: 6 },
+    { role: "user", message: "Yes. March fourteenth, nineteen eighty-six.", secondsFromStart: 8 },
+    { role: "bot", message: "Thanks, Tobias. You're all verified.", secondsFromStart: 10 },
+    { role: "user", message: "Great, thanks.", secondsFromStart: 12 },
+  ];
+  message.artifact.transcript = [
+    `AI: ${DOB_QUESTION}`,
+    "User: Sorry, I can't hear you, your voice is breaking.",
+    `AI: ${check}`,
+    "User: Yes. March fourteenth, nineteen eighty-six.",
+    "AI: Thanks, Tobias. You're all verified.",
+    "User: Great, thanks.",
+  ].join("\n");
+  const row = buildInteractionRow(message, facts());
+  assertEquals(textsOf(row.messages, "user"), [MASKED_ANSWER, MASKED_ANSWER, "Great, thanks."]);
+  assertFalse(String(row.transcript).includes("eighty-six"));
+  assertFalse(JSON.stringify(row.messages).includes("eighty-six"));
+});
+
+Deno.test("masking: the caller asks whether Ava can hear them; her yes keeps the DOB answer withheld", () => {
+  const yes = "Yes, I can hear you.";
+  const lines = [
+    `AI: ${DOB_QUESTION}`,
+    "User: Can you hear me?",
+    `AI: ${yes}`,
+    "User: Yes. March fourteenth, nineteen eighty-six.",
+    "AI: Thanks, Tobias. You're all verified.",
+    "User: Great, thanks.",
+  ];
+  assertEquals(
+    maskTranscript(lines.join("\n")),
+    [
+      `AI: ${DOB_QUESTION}`,
+      `User: ${MASKED_ANSWER}`,
+      `AI: ${yes}`,
+      `User: ${MASKED_ANSWER}`,
+      "AI: Thanks, Tobias. You're all verified.",
+      "User: Great, thanks.",
+    ].join("\n"),
+  );
+  const message = fixture("full");
+  message.artifact.messages = [
+    { role: "bot", message: DOB_QUESTION, secondsFromStart: 1 },
+    { role: "user", message: "Can you hear me?", secondsFromStart: 4 },
+    { role: "bot", message: yes, secondsFromStart: 6 },
+    { role: "user", message: "Yes. March fourteenth, nineteen eighty-six.", secondsFromStart: 8 },
+  ];
+  message.artifact.transcript = lines.slice(0, 4).join("\n");
+  const row = buildInteractionRow(message, facts());
+  assertEquals(textsOf(row.messages, "user"), [MASKED_ANSWER, MASKED_ANSWER]);
+  assertFalse(JSON.stringify(row.messages).includes("eighty-six"));
+  // a line check with no sensitive question before it masks nothing
+  assertEquals(
+    maskTranscript("AI: What happened?\nUser: Hello? Hello?\nAI: Sorry about that, can you hear me now?\nUser: Yes."),
+    "AI: What happened?\nUser: Hello? Hello?\nAI: Sorry about that, can you hear me now?\nUser: Yes.",
+  );
+});
+
 Deno.test("masking: a phone number taken in pieces after a re-ask is withheld piece by piece", () => {
   const pieces = "Let's take the phone number three digits at a time.";
   assertEquals(

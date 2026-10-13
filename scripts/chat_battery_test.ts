@@ -1186,6 +1186,11 @@ Deno.test("generic checks: smuggled identity fields, two questions, a missing mo
   assertStringIncludes(problems, "got no answer from its mock");
   const chatty: TurnRecord = { ...turn, calls: [], model: ["What's your number? And your birthday?"] };
   assertStringIncludes(genericProblems(chatty, base.toolNames).join(" "), "2 questions in one turn");
+  // a line check said in passing is not a second question (rules.md rules 1 and 25); two others still are
+  const check = "Sorry about that, can you hear me now? I was saying, what's the phone number on your account?";
+  assertEquals(genericProblems({ ...turn, calls: [], model: [check] }, base.toolNames), []);
+  const checkAndTwo: TurnRecord = { ...turn, calls: [], model: [`${check} And your birthday?`] };
+  assertStringIncludes(genericProblems(checkAndTwo, base.toolNames).join(" "), "2 questions in one turn");
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -1500,6 +1505,149 @@ Deno.test("vapiChat retries 429 and 5xx, never passes its request ceiling, and h
   await assertRejects(() => vapiChat(badKey as any, { requests: 0, max: 5 }, 0)({}), HaltError, "VAPI_PRIVATE_KEY");
   const badBody = { post: () => Promise.reject(new VapiError(400, "bad", "POST /chat")) };
   await assertRejects(() => vapiChat(badBody as any, { requests: 0, max: 5 }, 0)({}), VapiError);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Line trouble (rules.md rules 25 and 26; call 01a13635).
+// ---------------------------------------------------------------------------------------------
+const STATUS_TOBIAS: Action[][] = [
+  [{ call: "lookup_customer", args: { phone: "6025550101" } }],
+  [{ call: "verify_identity", args: TOBIAS_STATUS_VERIFY }],
+];
+const DOCUMENTS: Action[] = [{ call: "get_claim_status", args: { detail: "documents" } }];
+const EMAIL_LIST: Action[] = [{ call: "send_info_email", args: { topic: "document_checklist" } }];
+const LINE_CHECK = "Sorry about that, can you hear me now?";
+const DOCUMENTS_AGAIN =
+  "I was saying, for your home claim we need photos of the damage, a contractor estimate, and proof of ownership for the damaged items, by October twenty-fourth.";
+const LINE_TROUBLE: [string, Action[][]][] = [
+  ["cant-hear-mixed", [
+    ...STATUS_TOBIAS,
+    DOCUMENTS,
+    [{ say: `${LINE_CHECK} ${DOCUMENTS_AGAIN} Should I still email you that list?` }],
+    EMAIL_LIST,
+  ]],
+  ["cant-hear-repeat", [...STATUS_TOBIAS, DOCUMENTS, EMAIL_LIST, [{ say: `${LINE_CHECK} ${DOCUMENTS_AGAIN}` }]]],
+  ["cant-hear-repeat", [
+    ...STATUS_TOBIAS,
+    DOCUMENTS,
+    EMAIL_LIST,
+    [{
+      say:
+        "You did, sorry about that. Can you hear me now? You need photos of the damage, a contractor estimate, and proof of ownership for the damaged items, by October twenty-fourth.",
+    }],
+  ]],
+  ["cant-hear-hello", [
+    ...STATUS_TOBIAS,
+    [{
+      say:
+        `${LINE_CHECK} I was saying your home claim needs documents from you by October twenty-fourth, and your auto claim was paid. Would you like me to go over what's needed, or email you the list?`,
+    }],
+  ]],
+  ["cant-hear-pending-number", [
+    [{ say: "I can look into that. What's the phone number on your account?" }],
+    [{ say: `${LINE_CHECK} I was saying, what's the phone number on your account?` }],
+    [{ call: "lookup_customer", args: { phone: "6025550101" } }],
+  ]],
+  ["cant-hear-twice", [
+    ...STATUS_TOBIAS,
+    [{ say: `${LINE_CHECK} I was saying your home claim needs documents by October twenty-fourth.` }],
+    [{ say: "The line's still breaking up. Would you like the claims team to call you back?" }],
+    [{ call: "escalate", args: { reason: "representative_requested", details: "The line kept breaking up." } }],
+  ]],
+  ["hello-not-complaint", [
+    [{ call: "lookup_customer", args: { phone: "6025550101" } }],
+    [{ say: "Sure, take your time." }],
+    [{ say: "I'm here. What's the date of birth on the account?" }],
+  ]],
+  ["what-surprise", [
+    [{ call: "lookup_customer", args: { phone: "6025550103" } }],
+    [{ call: "verify_identity", args: { dob_month: 7, dob_day: 21, dob_year: 1992, intent: "claim_status" } }],
+    [{ call: "get_claim_status", args: { detail: "claim", claim_ending: "177" } }],
+  ]],
+  ["what-surprise", [
+    [{ call: "lookup_customer", args: { phone: "6025550103" } }],
+    [{ call: "verify_identity", args: { dob_month: 7, dob_day: 21, dob_year: 1992, intent: "claim_status" } }],
+    [{ say: "Yes, I'm sorry, it was. Would you like to hear the reason and how to appeal?" }],
+  ]],
+];
+
+Deno.test("line trouble: a line check and only what was missed pass every persona", async () => {
+  for (const [id, script] of LINE_TROUBLE) {
+    const r = await runConversation(persona(id), 1, base, fakeVapi(script).chat, () => NOW);
+    assertEquals(r.problems, [], id);
+  }
+});
+
+Deno.test("line trouble: what Ava did on 01a13635, and rule 23's line, fail", async () => {
+  const problems = async (id: string, script: Action[][]) =>
+    (await runConversation(persona(id), 1, base, fakeVapi(script).chat, () => NOW)).problems.join(" | ");
+  // 125 s: the email sent at once, with no word about the line and nothing said again
+  let text = await problems("cant-hear-mixed", [...STATUS_TOBIAS, DOCUMENTS, EMAIL_LIST, EMAIL_LIST]);
+  assertStringIncludes(text, "t4: tools [send_info_email], expected []");
+  assertStringIncludes(text, "t4: model text lacks /\\bhear me\\b/i");
+  // a promise of the email before the tool, and no question to confirm it
+  text = await problems("cant-hear-mixed", [
+    ...STATUS_TOBIAS,
+    DOCUMENTS,
+    [{ say: `${LINE_CHECK} ${DOCUMENTS_AGAIN} I've emailed you that list too.` }],
+    EMAIL_LIST,
+  ]);
+  assertStringIncludes(text, "t4: model text lacks /\\be-?mail[^.!?]*\\?/i");
+  assertStringIncludes(text, "t4: model text matches /\\b(I've|I have");
+  // 161 s: the whole sentence again, with the web address, the figures and rule 14's follow-up
+  const reread =
+    "For your home claim ending in 198, we need photos of the damage, a contractor estimate, and proof of ownership for the damaged items, by October twenty-fourth. You can upload them at observeinsurance dot com slash claims. Does that make sense?";
+  text = await problems("cant-hear-repeat", [...STATUS_TOBIAS, DOCUMENTS, EMAIL_LIST, [{ say: reread }]]);
+  for (
+    const want of [
+      "lacks /\\bhear me",
+      "does that (help|make sense)",
+      "slash claims",
+      "matches /\\d/",
+      "(?:\\S+\\s+){36}",
+    ]
+  ) {
+    assertStringIncludes(text, want);
+  }
+  // a second email to say it again
+  text = await problems("cant-hear-repeat", [...STATUS_TOBIAS, DOCUMENTS, EMAIL_LIST, EMAIL_LIST]);
+  assertStringIncludes(text, "t5: tools [send_info_email], expected []");
+  assertStringIncludes(text, "tool order");
+  // rule 23's line for a caller who can't hear Ava
+  text = await problems("cant-hear-hello", [...STATUS_TOBIAS, [{
+    say: "Sorry, I didn't catch that. Could you say it again?",
+  }]]);
+  assertStringIncludes(text, "t3: model text lacks /\\bhear me\\b/i");
+  assertStringIncludes(text, "t3: model text matches /\\b(didn't|did not");
+  // the pending question dropped from the line check
+  text = await problems("cant-hear-pending-number", [
+    [{ say: "I can look into that. What's the phone number on your account?" }],
+    [{ say: LINE_CHECK }],
+    [{ call: "lookup_customer", args: { phone: "6025550101" } }],
+  ]);
+  assertStringIncludes(text, "t2: model text lacks /phone number");
+  // a second complaint gets the claims again instead of the callback offer
+  text = await problems("cant-hear-twice", [
+    ...STATUS_TOBIAS,
+    [{ say: LINE_CHECK }],
+    [{ say: `${LINE_CHECK} I was saying your home claim needs documents by October twenty-fourth.` }],
+    [{ call: "escalate", args: { reason: "representative_requested", details: "The line kept breaking up." } }],
+  ]);
+  assertStringIncludes(text, "t4: model text lacks /\\bcall(ed)? you back");
+  // a single hello after a hold is not line trouble, and neither is a "what?" of surprise
+  text = await problems("hello-not-complaint", [
+    [{ call: "lookup_customer", args: { phone: "6025550101" } }],
+    [{ say: "Sure, take your time." }],
+    [{ say: `${LINE_CHECK} What's the date of birth on the account?` }],
+  ]);
+  assertStringIncludes(text, "t3: model text lacks /\\b(I'm|I am|still|right) here\\b/i");
+  assertStringIncludes(text, "t3: model text matches /\\bsorry\\b/i");
+  text = await problems("what-surprise", [
+    [{ call: "lookup_customer", args: { phone: "6025550103" } }],
+    [{ call: "verify_identity", args: { dob_month: 7, dob_day: 21, dob_year: 1992, intent: "claim_status" } }],
+    [{ say: `${LINE_CHECK} I was saying your property claim ending in one seven seven was denied.` }],
+  ]);
+  assertStringIncludes(text, "t3: model text matches /\\bhear me\\b/i");
 });
 
 // ---------------------------------------------------------------------------------------------

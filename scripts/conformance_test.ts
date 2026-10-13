@@ -499,6 +499,107 @@ Deno.test("garbled speech is re-asked, never escalated; an interruption is answe
   }
 });
 
+// Call 01a13635: the caller said "your voice was breaking, I was not able to hear" three
+// times. Ava re-listed the services with "Does that help?", sent an email without a word about the line,
+// and re-read the documents with "Does that make sense?"; the caller hung up. A caller who can't hear
+// her gets a short line check and only the part they missed ("hey, can you hear me now? I was saying
+// ..."), with every fact from the tool's result and no second tool call.
+Deno.test("a caller who can't hear Ava: a line check, then only what they missed", () => {
+  for (const key of ASSISTANT_KEYS) {
+    const prompt = Deno.readTextFileSync(promptPath(key));
+    const r25 = prompt.match(/^25\. CAN'T HEAR YOU: .*$/m)?.[0];
+    assert(r25, `${key}: rule 25 missing`);
+    // the triggers: an explicit complaint about the line, or hellos while or right after she speaks
+    for (
+      const cue of [
+        '"I can\'t hear you"',
+        '"I\'m not able to hear"',
+        '"I am not able to listen"',
+        '"you\'re breaking up"',
+        '"your voice was breaking"',
+        '"you\'re cutting out"',
+        '"you went quiet"',
+        '"the line is bad"',
+        '"you sound choppy"',
+        '"you sound robotic"',
+        '"hello? hello?"',
+        '"are you there?"',
+      ]
+    ) assert(r25.includes(cue), `${key}: rule 25 lacks ${cue}`);
+    const pins: RegExp[] = [
+      /while or right after you speak \(two hellos in a row, or one that cuts into you mid-sentence\)/,
+      // not rule 23's line, and no blame
+      /the line is the problem, not what they said: never say you didn't catch them, and never say whose end the trouble is on\./,
+      // one turn of her own words: the check, the missed part, the waiting question with its key words
+      /Answer in one turn of your own words, with no tool call: a short sorry and a line check in a few words that keep the words "hear me", such as "[^"]+"; then, if they missed something you said, "I was saying" and only the part they missed, as rule 26 says;/,
+      /end with that question, keeping its key words, such as "phone number", "date of birth" or "spell"\./,
+      /With nothing to repeat, the line check alone\. Said in passing like this, the line check isn't a second question under rule 1\./,
+      // a request in the same breath is confirmed in a few words and done on a yes, never claimed early
+      /end by asking in a few words whether to still do it, such as "Should I still email you that list\?", and call its tool on a yes: never make them ask a third time, and never say it's done before the tool's sentence says so\./,
+      // a tool's sentence not read yet is read in full
+      /If they said hello before you'd read a tool's sentence, say "I'm here\." and read that sentence in full, as rule 2 says\./,
+      /Say sorry only once per complaint; if they say they already told you, own it/,
+      // still can't hear: one callback offer, on their very next turn only
+      /If on their very next turn they still can't hear you, offer once to have the claims team call them back, such as "The line's still breaking up\. Would you like the claims team to call you back\?", and on a yes call escalate with reason representative_requested and details saying the line kept breaking up\./,
+      /keep each turn to a few words, such as "I'm still here\.", and never end the call for them\./,
+      /A later complaint, after they could hear you again, starts fresh with a new check and repeat\./,
+      /When they ask whether you can hear them and you can, say so in a few words, such as "Yes, I can hear you\.", and carry on\./,
+      // what is not about the line
+      /a single "hello\?" after a pause, a hold or a quiet line, which gets "I'm here\." and the question you were waiting on, with no sorry;/,
+      /a "what\?" of surprise or confusion about what you said, such as "What\? It was denied\?", which is a question to answer;/,
+      /garbled or partial speech, which is rule 23; and "are you a robot\?", which is rule 22\./,
+      /A request for a person still gets rule 8 at once, and rule 9 still comes first\.$/,
+    ];
+    for (const re of pins) assertMatch(r25, re, key);
+    // the sample line check keeps "hear me" and stays short
+    const sample = r25.match(/keep the words "hear me", such as "([^"]+)"/)?.[1] ?? "";
+    assertMatch(sample, /\bhear me\b/, key);
+    assert(sample.split(/\s+/).length <= 10, `${key}: the sample line check is ${sample.split(/\s+/).length} words`);
+    // the line check said in passing is not rule 1's second question
+    assertMatch(
+      prompt,
+      /^1\. .*Never put two questions in one turn; a line check said in passing, as rule 25 says, doesn't count\./m,
+      key,
+    );
+
+    const r26 = prompt.match(/^26\. SAYING IT AGAIN: .*$/m)?.[0];
+    assert(r26, `${key}: rule 26 missing`);
+    for (
+      const re of [
+        /or missed it because of the line \(rule 25\), say again only the part they missed, shorter and plainer, then stop\./,
+        /every fact in it, such as a name, a claim's ending, a date, an amount, a document or the next step, is copied word for word from the tool's result/,
+        /never changed and never added to, and the whole repeat is about 20 words at most\./,
+        /Say a web or email address again only if it was the point of what they missed\./,
+        /A question you were waiting on keeps its key words, such as "phone number", "date of birth" or "spell"\./,
+        /Never call a tool again just to repeat what it said: no second email, lookup, verification or callback\./,
+        /Never close a repeat with a rule 14 follow-up, such as "Does that make sense\?" or "Does that help\?"\./,
+      ]
+    ) assertMatch(r26, re, key);
+
+    // the rules that would otherwise say the opposite point to rules 25 and 26
+    const crossRefs: RegExp[] = [
+      /^2\. .*Never add to a tool's sentence, repeat it \(except as rule 26 says\), or change a fact/m,
+      /^2\. .*never start the sentence over unless they ask, and then follow rule 26\./m,
+      /^23\. .*When it's the caller who can't hear you, follow rule 25 instead\.$/m,
+      /^24\. .*If they cut in to say they can't hear you, follow rule 25\.$/m,
+      /^If you did not catch what the caller said, never guess: follow rule 23\.\nIf the caller can't hear you, follow rule 25\.$/m,
+    ];
+    for (const re of crossRefs) assertMatch(prompt, re, key);
+    // every rule these name is in the prompt they are rendered into
+    for (const n of new Set([...`${r25} ${r26}`.matchAll(/\brules? (\d+)/g)].map((m) => m[1]))) {
+      assertMatch(prompt, new RegExp(`^${n}\\. `, "m"), `${key}: rule ${n} is named but missing`);
+    }
+    if (key === "knowledge") continue;
+    // claims are never said from memory, except a rule 26 repeat, word for word from that result
+    assertMatch(
+      prompt,
+      /not even a date, an amount or a document you heard before: call get_claim_status again\. The one exception is saying again what the caller missed, word for word from that result, as rule 26 says\. Every other one of these turns is a tool turn, with no words of your own\./,
+      key,
+    );
+    assert(!prompt.includes("Every one of these turns is a tool turn"), `${key}: the old no-exception sentence`);
+  }
+});
+
 // ---------------------------------------------------------------------------------------------
 // Assistant config
 // ---------------------------------------------------------------------------------------------
@@ -748,6 +849,11 @@ Deno.test("the platform's own lines sound warm, and the safety lines keep every 
   // a re-ask in the model's own words still keeps the transcript masking a sensitive question started
   const { REASK_RE } = await import("../supabase/functions/vapi-webhook/redact.ts");
   assertMatch("Sorry, could you repeat that?", REASK_RE);
+  // and so does a line check when the caller can't hear Ava (rules.md rule 25)
+  assertMatch("Sorry about that, can you hear me now?", REASK_RE);
+  assertMatch("Yes, I can hear you.", REASK_RE);
+  assertMatch("I'm still here.", REASK_RE);
+  assertMatch("I'm here. What's the date of birth on the account?", REASK_RE);
   // a tool's transport-failure line is the server's own sentence for the same outcome, word for word
   const failed = (name: string) => withRep.tools[name].messages.find((m: any) => m.type === "request-failed").content;
   assertEquals(failed("lookup_customer"), sentenceFor("system_error"));
@@ -1053,14 +1159,31 @@ function endpointingWait(assistant: string, customer: string): number | null {
   return RULES.find((r) => r.matches(assistant, customer))?.timeoutSeconds ?? null;
 }
 
-Deno.test("endpointing: a short base wait, smart endpointing, then four ordered rules that only wait when needed", () => {
+// LiveKit's wait in ms as a function of x, the probability that the caller is still speaking (VAPI's
+// openapi; on test calls x = 1 - EOU): 200 ms when they're surely done, 2 s at most when the
+// sentence sounds unfinished. VAPI's own live curve waited about 0.38 s at best and 2.86 s at worst
+// (01a13635 waited 2.875 s on "...I was not able to hear").
+const WAIT_FUNCTION = "200 + 300 * sqrt(x) + 1500 * x^3";
+
+/** The waitFunction as a JavaScript function (mathjs sqrt and ^ map to Math.sqrt and **). */
+function waitMs(fn: string): (x: number) => number {
+  assertMatch(fn, /^[\d\s+*.()x^sqrt]+$/, `waitFunction holds only numbers, x, sqrt and arithmetic: ${fn}`);
+  return new Function("x", `return ${fn.replace(/sqrt/g, "Math.sqrt").replace(/\^/g, "**")};`) as (x: number) => number;
+}
+
+Deno.test("endpointing: a short base wait, smart endpointing, then five ordered rules that only wait when needed", () => {
   for (const key of ASSISTANT_KEYS) {
     const plan = withRep.assistants[key].payload.startSpeakingPlan;
     assertEquals(plan.waitSeconds, 0.4, key);
-    assertEquals(plan.smartEndpointingPlan, { provider: "livekit" }, key);
+    assertEquals(plan.smartEndpointingPlan, { provider: "livekit", waitFunction: WAIT_FUNCTION }, key);
+    const wait = waitMs(plan.smartEndpointingPlan.waitFunction);
+    assertEquals(Math.round(wait(0)), 200, key);
+    assertEquals(Math.round(wait(1)), 2000, key);
+    assert(wait(0.5) < 700, `${key}: a half-sure turn waits ${wait(0.5)} ms`);
+    for (let x = 0.05; x <= 1; x += 0.05) assert(wait(x) > wait(x - 0.05), `${key}: the wait rises with x`);
     assertEquals(
       plan.customEndpointingRules.map((r: any) => [r.type, r.timeoutSeconds]),
-      [["both", 2.5], ["both", 1.6], ["both", 1.6], ["assistant", 1.2]],
+      [["both", 2.5], ["both", 1.6], ["both", 1.6], ["assistant", 1.2], ["customer", 0.5]],
       key,
     );
     for (const r of plan.customEndpointingRules) {
@@ -1077,6 +1200,14 @@ const READ_BACK_NUMBER = sentenceFor("not_found", { digits: "6025550199" });
 const DOB_ASK = sentenceFor("needs_dob");
 const ANYTHING_ELSE = sentenceFor("email_sent");
 const SPELL_ASK = "What's the best email address for you? Please spell it out, letter by letter.";
+// The caller's two complaints on 01a13635, as Deepgram wrote them, and rule 25's line checks: alone, and
+// asking again for the date of birth or the phone number the caller had not given yet.
+const HEARING_COMPLAINT_136 = "Actually, your voice was breaking. I was not able to hear";
+const HEARING_COMPLAINT_160 =
+  "But I told you, your voice was breaking. What things you told, I was not able to hear it.";
+const LINE_CHECK = "Sorry about that, can you hear me now?";
+const LINE_CHECK_DOB = `${LINE_CHECK} I was saying, what's the date of birth on the account?`;
+const LINE_CHECK_PHONE = `${LINE_CHECK} I was saying, what's the phone number on your account?`;
 const ENDPOINTING_CASES: [string, string, string, number | null][] = [
   // a number in progress waits; ten digits are a whole number, so smart endpointing answers fast
   ["phone, first groups", PHONE_ASK, "6 0 2 5 5 5", 1.6],
@@ -1133,6 +1264,39 @@ const ENDPOINTING_CASES: [string, string, string, number | null][] = [
   ["what to change", sentenceFor("claim_retry"), "The date", null],
   ["what day", sentenceFor("claim_bad_date"), "Last Tuesday", null],
   ["when", "When did it happen?", "Yesterday afternoon", null],
+  // a caller who can't hear Ava (01a13635: 2.875 s and 1.43 s of silence after the two complaints) gets
+  // a short wait, and only while the transcript so far ends in the complaint
+  ["can't hear, trailing off (01a13635 at 136 s)", ANYTHING_ELSE, HEARING_COMPLAINT_136, 0.5],
+  ["can't hear, told again (01a13635 at 160 s)", ANYTHING_ELSE, HEARING_COMPLAINT_160, 0.5],
+  ["hello, hello", ANYTHING_ELSE, "Hello? Hello?", 0.5],
+  ["can you hear me", ANYTHING_ELSE, "Can you hear me now?", 0.5],
+  ["can you hear me, okay", ANYTHING_ELSE, "Can you hear me okay?", 0.5],
+  ["breaking up", ANYTHING_ELSE, "Sorry, you're breaking up.", 0.5],
+  ["it's breaking", ANYTHING_ELSE, "Sorry, it's breaking.", 0.5],
+  ["cutting out", ANYTHING_ELSE, "Your voice keeps cutting out", 0.5],
+  ["are you there", ANYTHING_ELSE, "Hello? Are you there?", 0.5],
+  ["can't hear, still", LINE_CHECK, "No, I still can't hear you properly.", 0.5],
+  ["can't hear, then a request", ANYTHING_ELSE, "I can't hear you, could you email me the list", null],
+  ["one hello", ANYTHING_ELSE, "Hello?", null],
+  ["hello, bare", ANYTHING_ELSE, "hello", null],
+  ["a greeting that goes on", ANYTHING_ELSE, "Hello, I want to check my claim", null],
+  ["what, surprised", ANYTHING_ELSE, "What?", null],
+  ["what, it was denied", ANYTHING_ELSE, "What? It was denied?", null],
+  ["listen, alone", ANYTHING_ELSE, "Listen,", null],
+  ["listen, bare", ANYTHING_ELSE, "listen", null],
+  ["a pipe that keeps breaking", ANYTHING_ELSE, "the pipe under my sink keeps breaking", null],
+  ["a windshield breaking up", ANYTHING_ELSE, "My windshield is breaking up", null],
+  ["wanting to hear", ANYTHING_ELSE, "I want to hear about my claim", null],
+  ["liking to hear", ANYTHING_ELSE, "I'd like to hear that.", null],
+  ["hearing them back", LINE_CHECK, "Yes, I can hear you now.", null],
+  // the waits a pending answer needs still come first, and a line check that asks the question again
+  // keeps them
+  ["spelling still wins", SPELL_ASK, "Sorry, I can't hear you", 2.5],
+  ["a number in progress still wins", PHONE_ASK, "6 0 2 hello? hello?", 1.6],
+  ["line check, DOB in progress", LINE_CHECK_DOB, "Yes. March 14", 1.6],
+  ["line check, DOB in full", LINE_CHECK_DOB, "Yes. March 14 1986", null],
+  ["line check, number in progress", LINE_CHECK_PHONE, "Yes, 6 0 2", 1.6],
+  ["line check, number in full", LINE_CHECK_PHONE, "Yes, 6 0 2 5 5 5 0 1 0 1", null],
 ];
 
 Deno.test("endpointing: realistic transcripts get the wait each rule is for, first match wins", () => {
