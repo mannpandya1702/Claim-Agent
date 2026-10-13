@@ -69,6 +69,17 @@ const SCENARIOS: Record<string, string[]> = {
     "Yes, that's correct.",
     "No, that's all. Thank you, goodbye.",
   ],
+  // A correction on the read-back: the no goes to confirm_claim(false), the fix to a second
+  // start_claim with every detail, and only the corrected read-back's yes files the claim.
+  "fnol-correction": [
+    "Hi, I need to file a claim. My number is six zero two, five five five, zero one zero one.",
+    "March fourteenth, nineteen eighty six.",
+    "A pipe burst under my kitchen sink on Sunday and flooded the floor.",
+    "No, that's not right.",
+    "It happened on Friday, not Sunday.",
+    "Yes, that's right.",
+    "No, that's all. Thank you, goodbye.",
+  ],
   // Voice FNOL for a new caller: not found twice, details captured and confirmed, then the loss taken
   // down for a specialist (a lead intake: no claim number) with a confirmation to the confirmed email.
   "fnol-new-caller": [
