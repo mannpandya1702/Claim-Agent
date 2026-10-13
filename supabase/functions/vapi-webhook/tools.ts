@@ -110,7 +110,7 @@ interface ToolSpec {
   name: ServerTool;
   run(args: Args, ctx: Run): Promise<ToolResult>;
   // The answer when the tool throws or overruns its budget.
-  fallback(): ToolResult;
+  fallback(ctx: Run): ToolResult;
   // Uncounted tools claim their toolCallId in the attempts ledger first; a second delivery of
   // the same id is answered here from the stored code, without repeating any side effect.
   replay?(code: Code, args: Args, ctx: Run): Promise<ToolResult>;
@@ -123,11 +123,15 @@ interface ToolSpec {
 // ---------------------------------------------------------------------------------------------
 // Small helpers.
 // ---------------------------------------------------------------------------------------------
-function answer(code: Code, data?: Record<string, unknown>): ToolResult {
-  return data ? { code, sentence: sentenceFor(code, data), data } : { code, sentence: sentenceFor(code) };
+/** The tool result for a code, worded for this call: the call key picks the phrasing of the sentences
+ *  that have several (speak.ts variantIndex), so a retry or replay of the call hears the same words. */
+function answer(ctx: Pick<ToolCtx, "callKey">, code: Code, data?: Record<string, unknown>): ToolResult {
+  return data
+    ? { code, sentence: sentenceFor(code, data, ctx.callKey), data }
+    : { code, sentence: sentenceFor(code, undefined, ctx.callKey) };
 }
 
-const systemError = () => answer("system_error");
+const systemError = (ctx: Pick<ToolCtx, "callKey">) => answer(ctx, "system_error");
 
 function asCode(value: string): Code {
   return (CODES as readonly string[]).includes(value) ? value as Code : "system_error";
@@ -264,7 +268,9 @@ async function lookupCustomer(args: Args, ctx: Run): Promise<ToolResult> {
     callerNumber: ctx.callerNumber,
   });
   if (!LOOKUP_CODES.has(code)) throw new Error("lookup_customer_attempt returned an unexpected code");
-  return code === "not_found" && phoneE164 ? answer(code, { digits: nationalDigits(phoneE164) }) : answer(code);
+  return code === "not_found" && phoneE164
+    ? answer(ctx, code, { digits: nationalDigits(phoneE164) })
+    : answer(ctx, code);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -336,7 +342,7 @@ async function chainedStatus(
     // The summary follows the opening in the same turn, so it gets the words the opening leaves.
     const status = claims.length === 0
       ? sentenceFor("no_claims")
-      : claimsSentence(claims, todayInNewYork(ctx.deps.now()), MAX_TURN_WORDS - spokenWords(opening));
+      : claimsSentence(claims, todayInNewYork(ctx.deps.now()), MAX_TURN_WORDS - spokenWords(opening), ctx.callKey);
     const sentence = verifiedStatusSentence(opening, status);
     if (!isSpeakable(sentence) || sentence.length > MAX_SPOKEN_CHARS) throw new Error("chained status not speakable");
     record(claims.length === 0 ? "no_claims" : "ok");
@@ -361,7 +367,7 @@ async function verifyIdentity(args: Args, ctx: Run): Promise<ToolResult> {
     toolCallId: ctx.toolCallId,
   });
   if (!VERIFY_CODES.has(result.code)) throw new Error("verify_dob_attempt returned an unexpected code");
-  if (result.code !== "verified") return answer(result.code);
+  if (result.code !== "verified") return answer(ctx, result.code);
 
   const firstName = typeof result.firstName === "string" ? result.firstName.trim() : "";
   const enabled = env.PRIOR_CONTACTS_ENABLED === "true";
@@ -375,8 +381,8 @@ async function verifyIdentity(args: Args, ctx: Run): Promise<ToolResult> {
       [],
     )
     : [];
-  let sentence = verifiedSentence(firstName, rows, enabled, now);
-  if (!isSpeakable(sentence)) sentence = sentenceFor("verified", { first_name: firstName });
+  let sentence = verifiedSentence(firstName, rows, enabled, now, ctx.callKey);
+  if (!isSpeakable(sentence)) sentence = sentenceFor("verified", { first_name: firstName }, ctx.callKey);
   const data: Record<string, unknown> = firstName ? { first_name: firstName } : {};
   const verified = (text: string): ToolResult =>
     Object.keys(data).length > 0 ? { code: "verified", sentence: text, data } : { code: "verified", sentence: text };
@@ -388,7 +394,7 @@ async function verifyIdentity(args: Args, ctx: Run): Promise<ToolResult> {
     return verified(verifiedFileClaimSentence(sentence, resume));
   }
   if (intent === "claim_status" && customerId) {
-    const chained = await chainedStatus(ctx, customerId, statusOpening(firstName, rows, enabled));
+    const chained = await chainedStatus(ctx, customerId, statusOpening(firstName, rows, enabled, ctx.callKey));
     if (chained) {
       data.status_read = true;
       data.claims = claimsData(chained.claims);
@@ -540,11 +546,11 @@ function statusDetailOf(v: unknown, key: string): ClaimStatusDetail {
 async function getClaimStatus(args: Args, ctx: Run): Promise<ToolResult> {
   const { store } = ctx.deps;
   const session = await store.getSession(ctx.callKey);
-  if (session?.level !== "verified") return answer("not_verified", { level: session?.level ?? "none" });
+  if (session?.level !== "verified") return answer(ctx, "not_verified", { level: session?.level ?? "none" });
   // The customer comes from the session only; claim_ending only picks among that customer's claims.
   if (!session.verified_customer_id) throw new Error("verified session without a verified customer");
   const claims = await store.getClaims(session.verified_customer_id);
-  if (claims.length === 0) return answer("no_claims");
+  if (claims.length === 0) return answer(ctx, "no_claims");
   const today = todayInNewYork(ctx.deps.now());
   const key = claimEndingKey(args.claim_ending);
   const read = (code: Code, sentence: string, which: Claim[]): ToolResult => ({
@@ -555,7 +561,7 @@ async function getClaimStatus(args: Args, ctx: Run): Promise<ToolResult> {
   switch (statusDetailOf(args.detail, key)) {
     case "documents": {
       const awaiting = claims.filter((c) => c.status === "awaiting_documents");
-      if (awaiting.length === 0) return answer("no_documents_needed");
+      if (awaiting.length === 0) return answer(ctx, "no_documents_needed");
       // A claim the caller named narrows the list only when it is one of those awaiting documents.
       const named = claimsNamed(awaiting, key);
       const which = named.length === 1 ? named : awaiting;
@@ -567,10 +573,10 @@ async function getClaimStatus(args: Args, ctx: Run): Promise<ToolResult> {
       // a type it is not): its details say its type and ending, so a wrong guess is plain to hear.
       const one = named.length === 1 ? named[0] : claims.length === 1 ? claims[0] : null;
       if (one) return read("claim_detail", claimDetailSentence(one, today), [one]);
-      return answer("claim_not_identified", { claims: claimChoicesData(claimsToOffer(claims, named, today)) });
+      return answer(ctx, "claim_not_identified", { claims: claimChoicesData(claimsToOffer(claims, named, today)) });
     }
     default:
-      return read("ok", claimsSentence(claims, today), claims);
+      return read("ok", claimsSentence(claims, today, MAX_TURN_WORDS, ctx.callKey), claims);
   }
 }
 
@@ -697,10 +703,10 @@ function queuedData(source: CallbackSource | null, phone: string): Record<string
   }
 }
 
-function queued(callback: Callback): ToolResult {
+function queued(ctx: Run, callback: Callback): ToolResult {
   return callback.phone
-    ? answer("rep_queued", queuedData(callback.source, callback.phone))
-    : answer("rep_queued_no_number");
+    ? answer(ctx, "rep_queued", queuedData(callback.source, callback.phone))
+    : answer(ctx, "rep_queued_no_number");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -755,17 +761,17 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
     });
   } catch (e) {
     logError(ctx, "upsertEscalation", e);
-    return answer("rep_unavailable");
+    return answer(ctx, "rep_unavailable");
   }
 
   if (!row.inserted) {
     // A repeat never alerts again; the dashboard row now carries the new number.
     if (given && given !== existing?.callback_phone) {
-      return answer("callback_updated", { digits: nationalDigits(given) });
+      return answer(ctx, "callback_updated", { digits: nationalDigits(given) });
     }
     // A chat answered its first request as if the team had been told, so its repeat says the same.
     const told = row.alertStatus === "sent" || (ctx.isChat && row.alertStatus === "skipped");
-    return answer(told ? "rep_already_queued" : "rep_recorded");
+    return answer(ctx, told ? "rep_already_queued" : "rep_recorded");
   }
 
   // This call created the row, so the rest of the request can go on it without overwriting anything.
@@ -792,7 +798,7 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
 
   if (ctx.isChat) {
     writeBack(ctx, "setEscalationDelivery", () => store.setEscalationDelivery(row.id, "skipped", null));
-    return queued(callback);
+    return queued(ctx, callback);
   }
   const alert: EscalationAlert = { kind: "representative", reason, callKey, channel: ctx.channel, verified };
   const delivery = await notifyTeam(ctx, alert, "callback_request", () =>
@@ -812,16 +818,16 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
     () => store.setEscalationDelivery(row.id, delivery.notified ? "sent" : "failed", delivery.error),
   );
   // "Sent" and a timeframe are promised only when a channel confirmed delivery.
-  return delivery.notified ? queued(callback) : answer("rep_recorded");
+  return delivery.notified ? queued(ctx, callback) : answer(ctx, "rep_recorded");
 }
 
 async function replayEscalate(code: Code, args: Args, ctx: Run): Promise<ToolResult> {
-  if (code !== "rep_queued" && code !== "callback_updated") return answer(code);
+  if (code !== "rep_queued" && code !== "callback_updated") return answer(ctx, code);
   // A retry carries the first delivery's arguments, so a number the caller gave is rebuilt from
   // them. The row is not: a later request may have changed its number since.
   const given = usableCallbackNumber(args.callback_phone, ownNumbers(ctx.deps.env));
-  if (code === "callback_updated") return answer(code, given ? { digits: nationalDigits(given) } : undefined);
-  if (given) return answer(code, queuedData("argument", given));
+  if (code === "callback_updated") return answer(ctx, code, given ? { digits: nationalDigits(given) } : undefined);
+  if (given) return answer(ctx, code, queuedData("argument", given));
   // Without an argument the first answer named the fallback this delivery wrote when it created the
   // row. Only a number given later can have replaced it, and then that target is no longer known,
   // so the sentence names none rather than a different one. Reading the row is not a side effect.
@@ -834,15 +840,15 @@ async function replayEscalate(code: Code, args: Args, ctx: Run): Promise<ToolRes
   const row = rows.find((r) => r.kind === "representative");
   const source = row?.callback_source ?? null;
   if (row?.callback_phone && (source === "account" || source === "caller_id")) {
-    return answer(code, queuedData(source, row.callback_phone));
+    return answer(ctx, code, queuedData(source, row.callback_phone));
   }
-  return answer(code);
+  return answer(ctx, code);
 }
 
 // ---------------------------------------------------------------------------------------------
 // report_emergency {note?}
 // ---------------------------------------------------------------------------------------------
-const emergencyNotLogged = () => answer("emergency_logged", { db_failed: true });
+const emergencyNotLogged = (ctx: Pick<ToolCtx, "callKey">) => answer(ctx, "emergency_logged", { db_failed: true });
 
 async function reportEmergency(args: Args, ctx: Run): Promise<ToolResult> {
   const { store, env } = ctx.deps;
@@ -880,7 +886,7 @@ async function reportEmergency(args: Args, ctx: Run): Promise<ToolResult> {
         await withinBudget(sendTelegramAlert(ctx, alert), budget, (): Delivery => ({ ok: false, error: "timeout" }));
       }
     }
-    return emergencyNotLogged();
+    return emergencyNotLogged(ctx);
   }
 
   if (row.inserted) {
@@ -909,7 +915,7 @@ async function reportEmergency(args: Args, ctx: Run): Promise<ToolResult> {
       );
     }
   }
-  return answer("emergency_logged");
+  return answer(ctx, "emergency_logged");
 }
 
 async function replayEmergency(_code: Code, _args: Args, ctx: Run): Promise<ToolResult> {
@@ -920,7 +926,7 @@ async function replayEmergency(_code: Code, _args: Args, ctx: Run): Promise<Tool
     () => ctx.deps.store.listEscalations(ctx.callKey),
     null,
   );
-  return rows?.some((r) => r.kind === "emergency") ? answer("emergency_logged") : emergencyNotLogged();
+  return rows?.some((r) => r.kind === "emergency") ? answer(ctx, "emergency_logged") : emergencyNotLogged(ctx);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -957,7 +963,7 @@ async function sendTopicEmail(
   const claim = await ctx.deps.store.claimEmail(ctx.callKey, topic, maskEmail(to));
   if (!claim.claimed) {
     // At most one send per topic per call: a failed one is not retried on this call either.
-    return answer(claim.status === "failed" ? "email_failed" : "email_already_sent");
+    return answer(ctx, claim.status === "failed" ? "email_failed" : "email_already_sent");
   }
   const sent = await sendClaimed(
     ctx,
@@ -965,7 +971,7 @@ async function sendTopicEmail(
     { to, subject: rendered.subject, html: rendered.html },
     ctx.deadline - ANSWER_MARGIN_MS,
   );
-  return sent.ok ? answer("email_sent", sentData) : answer("email_failed");
+  return sent.ok ? answer(ctx, "email_sent", sentData) : answer(ctx, "email_failed");
 }
 
 /** An unverified caller gets one thing by email: the generic steps to start a claim, sent to the
@@ -975,18 +981,18 @@ async function sendTopicEmail(
 async function unverifiedInfoEmail(topic: InfoEmailTopic, session: Session | null, ctx: Run): Promise<ToolResult> {
   const { store } = ctx.deps;
   const level: Level = session?.level ?? "none";
-  if (topic !== "how_to_start_claim") return answer("not_verified", { level });
+  if (topic !== "how_to_start_claim") return answer(ctx, "not_verified", { level });
   const contact = await store.getContact(ctx.callKey);
   if (contact?.kind !== "new_customer") {
     // After the lookups ran out, the way forward is the new-caller details, not another number.
     if (level === "none") {
       const attempts = await readOr<AttemptRow[]>(ctx, "listAttempts", () => store.listAttempts(ctx.callKey), []);
-      if (attempts.some((a) => a.kind === "lookup_miss")) return answer("contact_needs_name");
+      if (attempts.some((a) => a.kind === "lookup_miss")) return answer(ctx, "contact_needs_name");
     }
-    return answer("not_verified", { level });
+    return answer(ctx, "not_verified", { level });
   }
-  if (!contact.confirmed) return readback(contact);
-  if (!contact.email) return answer("contact_invalid_email");
+  if (!contact.confirmed) return readback(ctx, contact);
+  if (!contact.email) return answer(ctx, "contact_invalid_email");
   // Rendered before the claim, so a template fault cannot strand a 'sending' row.
   const rendered = howToStartEmail({ customer: { first_name: contact.first_name }, newCustomer: true });
   return await sendTopicEmail(ctx, topic, contact.email, rendered, { target: "given" });
@@ -1001,7 +1007,7 @@ async function sendInfoEmail(args: Args, ctx: Run): Promise<ToolResult> {
   const to = typeof customer.email === "string" ? customer.email.trim() : "";
   // Only the address on file: one spelled on this call is a pending update for staff, never a
   // recipient (anyone who verified could otherwise send the account's details anywhere).
-  if (!to) return answer("no_email_on_file");
+  if (!to) return answer(ctx, "no_email_on_file");
   const claims = topic === "how_to_start_claim" ? [] : await store.getClaims(customer.id);
   // Rendered before the claim, so a template fault cannot strand a 'sending' row that would make
   // every later request on this call say "already sent".
@@ -1012,12 +1018,14 @@ async function replayInfoEmail(code: Code, _args: Args, ctx: Run): Promise<ToolR
   const { store } = ctx.deps;
   if (code === "contact_readback") {
     const contact = await readOr<CallerContact | null>(ctx, "getContact", () => store.getContact(ctx.callKey), null);
-    return contact ? readback(contact) : answer(code);
+    return contact ? readback(ctx, contact) : answer(ctx, code);
   }
-  if (code !== "not_verified" && code !== "email_sent") return answer(code);
+  if (code !== "not_verified" && code !== "email_sent") return answer(ctx, code);
   const session = await readOr<Session | null>(ctx, "getSession", () => store.getSession(ctx.callKey), null);
-  if (code === "email_sent") return session?.level === "verified" ? answer(code) : answer(code, { target: "given" });
-  return answer(code, { level: session?.level ?? "none" });
+  if (code === "email_sent") {
+    return session?.level === "verified" ? answer(ctx, code) : answer(ctx, code, { target: "given" });
+  }
+  return answer(ctx, code, { level: session?.level ?? "none" });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1037,6 +1045,7 @@ interface ContactInput {
 /** The read-back of what is stored: names, the address letter by letter, and a callback number the
  *  caller said (one taken from caller id was never said, so there is nothing to mishear). */
 function readback(
+  ctx: Pick<ToolCtx, "callKey">,
   c: Pick<CallerContact, "first_name" | "last_name" | "email" | "callback_phone" | "callback_source">,
 ): ToolResult {
   const data: Record<string, unknown> = { first_name: c.first_name, last_name: c.last_name };
@@ -1045,7 +1054,7 @@ function readback(
   // The address and number are in the sentence, spelled; the result's data carries only the first name.
   return {
     code: "contact_readback",
-    sentence: sentenceFor("contact_readback", data),
+    sentence: sentenceFor("contact_readback", data, ctx.callKey),
     data: { first_name: c.first_name },
   };
 }
@@ -1145,22 +1154,22 @@ async function needsCallbackNumber(input: ContactInput, ctx: Run): Promise<boole
 
 async function captureContact(args: Args, ctx: Run): Promise<ToolResult> {
   const prepared = await contactInput(args, ctx);
-  if (!prepared.ok) return answer(prepared.code);
-  if (await needsCallbackNumber(prepared.input, ctx)) return answer("contact_needs_phone");
-  return readback(await ctx.deps.store.upsertContact(prepared.input));
+  if (!prepared.ok) return answer(ctx, prepared.code);
+  if (await needsCallbackNumber(prepared.input, ctx)) return answer(ctx, "contact_needs_phone");
+  return readback(ctx, await ctx.deps.store.upsertContact(prepared.input));
 }
 
 async function replayCapture(code: Code, args: Args, ctx: Run): Promise<ToolResult> {
-  if (code !== "contact_readback") return answer(code);
+  if (code !== "contact_readback") return answer(ctx, code);
   // confirm_contact confirms whatever row is stored, so the read-back is of that row: a later capture
   // may have replaced what this delivery's arguments said. Reading is not a side effect.
   const row = await capturedContact(ctx);
-  if (row) return readback(row);
+  if (row) return readback(ctx, row);
   // No row (or a failed read): the same read-back rebuilt from this delivery's arguments, no write.
   const prepared = await contactInput(args, ctx);
-  if (!prepared.ok) return answer(prepared.code);
+  if (!prepared.ok) return answer(ctx, prepared.code);
   const p = prepared.input;
-  return readback({
+  return readback(ctx, {
     first_name: p.firstName,
     last_name: p.lastName,
     email: p.email,
@@ -1183,22 +1192,22 @@ function correctOf(v: unknown): boolean | null {
  *  which part was wrong among those read back (an email_update read back only the address). A new
  *  caller's yes offers to take the loss down now; when a start_claim already asked for these details
  *  (resume), it asks whether to take that claim down. */
-function confirmedAnswer(row: CallerContact, correct: boolean, resume: boolean): ToolResult {
+function confirmedAnswer(ctx: Run, row: CallerContact, correct: boolean, resume: boolean): ToolResult {
   if (!correct) {
     return row.kind === "email_update"
-      ? answer("contact_retry", { part: "email" })
-      : answer("contact_retry", { has_email: row.email !== null, has_phone: row.callback_source === "argument" });
+      ? answer(ctx, "contact_retry", { part: "email" })
+      : answer(ctx, "contact_retry", { has_email: row.email !== null, has_phone: row.callback_source === "argument" });
   }
-  if (row.kind === "email_update") return answer("contact_saved_existing", { first_name: row.first_name });
+  if (row.kind === "email_update") return answer(ctx, "contact_saved_existing", { first_name: row.first_name });
   const data: Record<string, unknown> = { first_name: row.first_name };
   if (!row.email) data.has_email = false;
   if (resume) data.resume_claim = true;
-  return answer("contact_saved_new", data);
+  return answer(ctx, "contact_saved_new", data);
 }
 
 async function contactAnswer(row: CallerContact, correct: boolean, ctx: Run): Promise<ToolResult> {
   const resume = correct && row.kind === "new_customer" && await claimWaiting(ctx, CONTACT_RESUME_CODES);
-  return confirmedAnswer(row, correct, resume);
+  return confirmedAnswer(ctx, row, correct, resume);
 }
 
 /** Nothing to confirm: a verified caller is asked for the address again (their name is the
@@ -1207,8 +1216,8 @@ async function notPending(ctx: Run): Promise<ToolResult> {
   const session = await readOr<Session | null>(ctx, "getSession", () => ctx.deps.store.getSession(ctx.callKey), null);
   // The flag only picks the wording; the result keeps not_pending's usual shape.
   return session?.level === "verified"
-    ? { code: "not_pending", sentence: sentenceFor("not_pending", { verified: true }) }
-    : answer("not_pending");
+    ? { code: "not_pending", sentence: sentenceFor("not_pending", { verified: true }, ctx.callKey) }
+    : answer(ctx, "not_pending");
 }
 
 async function confirmContact(args: Args, ctx: Run): Promise<ToolResult> {
@@ -1221,13 +1230,13 @@ async function confirmContact(args: Args, ctx: Run): Promise<ToolResult> {
 async function replayConfirm(code: Code, _args: Args, ctx: Run): Promise<ToolResult> {
   if (code === "not_pending") return await notPending(ctx);
   if (code !== "contact_retry" && code !== "contact_saved_new" && code !== "contact_saved_existing") {
-    return answer(code);
+    return answer(ctx, code);
   }
   // Reading the row is not a side effect; the first delivery already wrote what it answered.
   const row = await readOr<CallerContact | null>(ctx, "getContact", () => ctx.deps.store.getContact(ctx.callKey), null);
-  if (!row) return answer(code);
+  if (!row) return answer(ctx, code);
   const replayed = await contactAnswer(row, code !== "contact_retry", ctx);
-  return replayed.code === code ? replayed : answer(code);
+  return replayed.code === code ? replayed : answer(ctx, code);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1284,7 +1293,7 @@ function claimLast3Of(row: Pick<ClaimIntake, "claim_number"> | null): string | n
 }
 
 /** The read-back of the stored intake: what confirm_claim will file. */
-function intakeReadback(row: ClaimIntake, now: Date): ToolResult {
+function intakeReadback(ctx: Run, row: ClaimIntake, now: Date): ToolResult {
   const spoken: Record<string, unknown> = {
     claim_type: row.claim_type,
     loss_date: row.loss_date,
@@ -1293,14 +1302,14 @@ function intakeReadback(row: ClaimIntake, now: Date): ToolResult {
   if (row.summary !== fallbackSummary(row.claim_type)) spoken.summary = row.summary;
   return {
     code: "claim_readback",
-    sentence: sentenceFor("claim_readback", spoken),
+    sentence: sentenceFor("claim_readback", spoken, ctx.callKey),
     data: { claim_type: row.claim_type, loss_date: row.loss_date },
   };
 }
 
-function alreadyFiled(row: ClaimIntake): ToolResult {
+function alreadyFiled(ctx: Run, row: ClaimIntake): ToolResult {
   const last3 = claimLast3Of(row);
-  return last3 ? answer("claim_already_filed", { claim_last3: last3 }) : answer("claim_already_filed");
+  return last3 ? answer(ctx, "claim_already_filed", { claim_last3: last3 }) : answer(ctx, "claim_already_filed");
 }
 
 /** Who may report a loss on this call, from server state only: a locked caller cannot; a caller whose
@@ -1332,15 +1341,15 @@ async function claimGate(ctx: Run): Promise<ClaimGate> {
 async function badDate(ctx: Run): Promise<ToolResult> {
   const attempts = await readOr<AttemptRow[]>(ctx, "listAttempts", () => ctx.deps.store.listAttempts(ctx.callKey), []);
   const before = attempts.some((a) => a.tool_name === "start_claim" && a.code === "claim_bad_date");
-  return answer(before ? "claim_date_help" : "claim_bad_date");
+  return answer(ctx, before ? "claim_date_help" : "claim_bad_date");
 }
 
 async function startClaim(args: Args, ctx: Run): Promise<ToolResult> {
   const { store, env } = ctx.deps;
   const gate = await claimGate(ctx);
-  if (!gate.ok) return answer(gate.code);
+  if (!gate.ok) return answer(ctx, gate.code);
   const existing = await store.getClaimIntake(ctx.callKey);
-  if (existing?.confirmed) return alreadyFiled(existing);
+  if (existing?.confirmed) return alreadyFiled(ctx, existing);
   // A new caller's intake promises a call from a specialist, so it needs a number to call (a capture
   // with the number they say then needs its own read-back, which confirms it).
   const own = ownNumbers(env);
@@ -1348,16 +1357,16 @@ async function startClaim(args: Args, ctx: Run): Promise<ToolResult> {
     gate.kind === "lead_intake" && !usableCallbackNumber(gate.contact?.callback_phone, own) &&
     !usableCallbackNumber(ctx.callerNumber, own)
   ) {
-    return answer("claim_needs_phone");
+    return answer(ctx, "claim_needs_phone");
   }
 
   const claimType = claimTypeOf(args.claim_type);
-  if (!claimType) return answer("bad_args");
+  if (!claimType) return answer(ctx, "bad_args");
   const description = cleanDescription(args.description);
-  if (!description) return answer("claim_needs_description");
+  if (!description) return answer(ctx, "claim_needs_description");
   // The caller's words for the date, read by the server; the model does no date arithmetic.
   const loss = parseLossDate(args.loss_date, ctx.deps.now());
-  if ("error" in loss) return loss.error === "too_old" ? answer("claim_too_old") : await badDate(ctx);
+  if ("error" in loss) return loss.error === "too_old" ? answer(ctx, "claim_too_old") : await badDate(ctx);
 
   const row = await store.upsertClaimIntake({
     callKey: ctx.callKey,
@@ -1369,11 +1378,11 @@ async function startClaim(args: Args, ctx: Run): Promise<ToolResult> {
     customerId: gate.customerId,
   });
   // Filed in the meantime (a parallel confirm): the filed claim stands and is never rewritten.
-  return row.confirmed ? alreadyFiled(row) : intakeReadback(row, ctx.deps.now());
+  return row.confirmed ? alreadyFiled(ctx, row) : intakeReadback(ctx, row, ctx.deps.now());
 }
 
 async function replayStart(code: Code, _args: Args, ctx: Run): Promise<ToolResult> {
-  if (code !== "claim_readback" && code !== "claim_already_filed") return answer(code);
+  if (code !== "claim_readback" && code !== "claim_already_filed") return answer(ctx, code);
   // confirm_claim files whatever intake is stored, so the read-back is of that row: a later
   // start_claim may have replaced what this delivery's arguments said. Reading is not a side effect.
   const row = await readOr<ClaimIntake | null>(
@@ -1382,8 +1391,8 @@ async function replayStart(code: Code, _args: Args, ctx: Run): Promise<ToolResul
     () => ctx.deps.store.getClaimIntake(ctx.callKey),
     null,
   );
-  if (!row) return answer(code);
-  return code === "claim_already_filed" ? alreadyFiled(row) : intakeReadback(row, ctx.deps.now());
+  if (!row) return answer(ctx, code);
+  return code === "claim_already_filed" ? alreadyFiled(ctx, row) : intakeReadback(ctx, row, ctx.deps.now());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1468,8 +1477,8 @@ async function announceFiled(row: ClaimIntake, ctx: Run): Promise<ToolResult> {
       })),
   ]);
   if (team && !team.notified) safeLog(ctx, { event: "claim_intake_alert_failed", error: team.error });
-  if (lead) return answer("claim_intake_saved", { first_name: firstName, emailed });
-  return answer("claim_filed", last3 ? { claim_last3: last3, emailed } : { emailed });
+  if (lead) return answer(ctx, "claim_intake_saved", { first_name: firstName, emailed });
+  return answer(ctx, "claim_filed", last3 ? { claim_last3: last3, emailed } : { emailed });
 }
 
 async function confirmClaim(args: Args, ctx: Run): Promise<ToolResult> {
@@ -1477,15 +1486,15 @@ async function confirmClaim(args: Args, ctx: Run): Promise<ToolResult> {
   if (correctOf(args.correct) !== true) {
     // A "no" leaves the intake unconfirmed for the corrected start_claim; a filed one stays filed.
     const row = await store.rejectClaimIntake(ctx.callKey);
-    if (!row) return answer("claim_not_pending");
-    return row.confirmed ? alreadyFiled(row) : answer("claim_retry");
+    if (!row) return answer(ctx, "claim_not_pending");
+    return row.confirmed ? alreadyFiled(ctx, row) : answer(ctx, "claim_retry");
   }
   const before = await store.getClaimIntake(ctx.callKey);
-  if (!before) return answer("claim_not_pending");
+  if (!before) return answer(ctx, "claim_not_pending");
   // Filed by an earlier confirm: nothing is filed, sent or paged again.
-  if (before.confirmed) return alreadyFiled(before);
+  if (before.confirmed) return alreadyFiled(ctx, before);
   const filed = await store.fileClaimIntake(ctx.callKey);
-  if (!filed) return answer("claim_not_pending");
+  if (!filed) return answer(ctx, "claim_not_pending");
   if (!filed.intake.confirmed) throw new Error("file_claim_intake returned an unfiled intake");
   // Filed by a parallel delivery while this one waited on the row lock (a redelivery of the same
   // confirm): that delivery sends and pages, so this one only answers, as a replay would.
@@ -1511,21 +1520,23 @@ async function filedAnswer(
   const emailed = emails.some((e) => e.kind === "claim_received" && e.status === "sent");
   if (code === "claim_intake_saved") {
     const firstName = contact?.kind === "new_customer" && contact.confirmed ? contact.first_name : "";
-    return answer(code, { first_name: firstName, emailed });
+    return answer(ctx, code, { first_name: firstName, emailed });
   }
   const last3 = claimLast3Of(row);
-  return answer(code, last3 ? { claim_last3: last3, emailed } : { emailed });
+  return answer(ctx, code, last3 ? { claim_last3: last3, emailed } : { emailed });
 }
 
 async function replayConfirmClaim(code: Code, _args: Args, ctx: Run): Promise<ToolResult> {
-  if (code !== "claim_filed" && code !== "claim_intake_saved" && code !== "claim_already_filed") return answer(code);
+  if (code !== "claim_filed" && code !== "claim_intake_saved" && code !== "claim_already_filed") {
+    return answer(ctx, code);
+  }
   const row = await readOr<ClaimIntake | null>(
     ctx,
     "getClaimIntake",
     () => ctx.deps.store.getClaimIntake(ctx.callKey),
     null,
   );
-  if (code === "claim_already_filed") return row ? alreadyFiled(row) : answer(code);
+  if (code === "claim_already_filed") return row ? alreadyFiled(ctx, row) : answer(ctx, code);
   return await filedAnswer(code, row, ctx);
 }
 
@@ -1550,7 +1561,12 @@ const TOOLS: ReadonlyMap<string, ToolSpec> = new Map<string, ToolSpec>([
     "escalate",
     // The trouble sentence offers the very callback that just failed, so escalate's own failure
     // answer is the main-line apology instead.
-    { name: "escalate", run: escalate, fallback: () => answer("rep_unavailable"), replay: replayEscalate },
+    {
+      name: "escalate",
+      run: escalate,
+      fallback: (ctx) => answer(ctx, "rep_unavailable"),
+      replay: replayEscalate,
+    },
   ],
   [
     "report_emergency",
@@ -1609,7 +1625,7 @@ async function guarded(ctx: Run, spec: ToolSpec, body: () => Promise<ToolResult>
     return await body();
   } catch (e) {
     logError(ctx, "run", e);
-    return spec.fallback();
+    return spec.fallback(ctx);
   }
 }
 
@@ -1669,7 +1685,7 @@ export async function runToolWithin(
       } catch {
         // logging never changes the answer
       }
-      return answer("unknown_tool");
+      return answer(ctx, "unknown_tool");
     }
     const run: Run = { ...ctx, toolCallId: String(call.id), tool: spec.name, deadline: Date.now() + budgetMs };
     const request = parseToolRequest(spec.name, call.args);
@@ -1681,22 +1697,22 @@ export async function runToolWithin(
       args = {};
     } else {
       safeLog(run, { event: "tool_bad_args", reason: request.reason });
-      return answer("bad_args");
+      return answer(ctx, "bad_args");
     }
     if (spec.valid && !spec.valid(args)) {
       safeLog(run, { event: "tool_bad_args", reason: "invalid_value" });
-      return answer("bad_args");
+      return answer(ctx, "bad_args");
     }
     const { claimed, result } = execute(spec, args, run);
     const answered = await withinBudget(result, budgetMs, () => {
       safeLog(run, { event: "tool_timeout", budget_ms: budgetMs });
-      return spec.fallback();
+      return spec.fallback(run);
     });
     // Counted tools record their code inside their SQL function.
     if (spec.replay) recordCode(run, claimed, answered.code);
     return answered;
   } catch {
-    return systemError();
+    return systemError(ctx);
   }
 }
 

@@ -30,6 +30,7 @@ import {
   sentenceFor,
   spokenWords,
   verifiedFileClaimSentence,
+  verifiedThanks,
 } from "../supabase/functions/vapi-webhook/speak.ts";
 import type { Claim } from "../supabase/functions/vapi-webhook/types.ts";
 import {
@@ -79,7 +80,8 @@ const FIRST_MESSAGE =
 const NEW_CALLER = { first_name: "smoke", last_name: "tester" };
 // Spelled the way a caller says it, so the server's spoken-form reading is exercised end to end.
 const SPOKEN_EMAIL = "s m o k e dot t e s t at example dot com";
-const VERIFIED_PREFIX = "Thanks, Tobias. You're all verified.";
+// Tobias's verified opening, in the phrasing his call key picks (speak.ts variantIndex).
+const verifiedPrefix = (callKey: string) => verifiedThanks("Tobias", callKey);
 // A loss as a caller reports it; loss_date is replaced per step.
 const BUMPER = {
   claim_type: "auto",
@@ -183,7 +185,7 @@ interface ToolStep {
   args?: Record<string, unknown> | string;
   id?: string; // reuse a toolCallId to exercise the replay guard
   code: Code;
-  sentence?: Expect; // default: the exact sentenceFor(code)
+  sentence?: Expect; // default: the exact sentenceFor(code) for the call's key
   // A second answer that also passes (an honest failure of a third party the case cannot control).
   alternative?: { code: Code; sentence: Expect };
   check?: (reply: ToolReply) => string | null;
@@ -255,7 +257,10 @@ class CaseCtx {
     } catch (e) {
       this.fail(`${label}: sentence not speakable (${(e as Error).message})`);
     }
-    const problem = sentenceProblem(sentence, alternative?.sentence ?? step.sentence ?? sentenceFor(step.code));
+    const problem = sentenceProblem(
+      sentence,
+      alternative?.sentence ?? step.sentence ?? sentenceFor(step.code, undefined, ref.callKey),
+    );
     if (problem) this.fail(`${label}: ${problem}`);
     // results[].message is present unless NATIVE_TOOL_MESSAGES=false; when present it must be the
     // same sentence, or VAPI would speak one thing and the model's history would hold another.
@@ -299,15 +304,19 @@ function tobiasClaim(number: string): Claim {
   return claim;
 }
 
-/** The claims summary Tobias hears today, alone or after verify_identity's chained opening. */
-function tobiasSummary(c: CaseCtx, opening = ""): string {
+/** The claims summary Tobias hears today on this call, alone or after verify_identity's chained opening. */
+function tobiasSummary(c: CaseCtx, callKey: string, opening = ""): string {
   const today = newYorkToday(c.cfg.now?.() ?? new Date());
-  const status = claimsSentence(tobiasClaims(), today, MAX_TURN_WORDS - spokenWords(opening));
+  const status = claimsSentence(tobiasClaims(), today, MAX_TURN_WORDS - spokenWords(opening), callKey);
   return opening ? `${opening} ${status}` : status;
 }
 
-/** The read-back start_claim gives for these arguments today. */
-function claimReadback(c: CaseCtx, args: { claim_type: string; loss_date: string; summary: string }): string {
+/** The read-back start_claim gives for these arguments today, on this call. */
+function claimReadback(
+  c: CaseCtx,
+  callKey: string,
+  args: { claim_type: string; loss_date: string; summary: string },
+): string {
   const now = c.cfg.now?.() ?? new Date();
   const read = parseLossDate(args.loss_date, now);
   if (!("date" in read)) throw new Error(`smoke loss_date ${args.loss_date} is not a date the server reads`);
@@ -316,7 +325,7 @@ function claimReadback(c: CaseCtx, args: { claim_type: string; loss_date: string
     loss_date: read.date,
     summary: args.summary,
     today: newYorkToday(now),
-  });
+  }, callKey);
 }
 
 interface SmokeCase {
@@ -326,8 +335,8 @@ interface SmokeCase {
 
 function inlineReport(ref: EnvelopeRef, now: Date) {
   const at = (s: number) => new Date(now.getTime() - 90_000 + s * 1000).toISOString();
-  const needsDob = sentenceFor("needs_dob");
-  const verified = sentenceFor("verified", { first_name: "Tobias" });
+  const needsDob = sentenceFor("needs_dob", undefined, ref.callKey);
+  const verified = sentenceFor("verified", { first_name: "Tobias" }, ref.callKey);
   const lines: [string, string][] = [
     ["AI", FIRST_MESSAGE],
     ["User", "It's six zero two, five five five, zero one zero one."],
@@ -453,7 +462,7 @@ export function smokeCases(): SmokeCase[] {
           args: TOBIAS.dob,
           code: "verified",
           // with PRIOR_CONTACTS_ENABLED the welcome-back clause may follow
-          sentence: (s) => s.startsWith(VERIFIED_PREFIX) ? null : `sentence was "${s}"`,
+          sentence: (s) => s.startsWith(verifiedPrefix(ref.callKey)) ? null : `sentence was "${s}"`,
         });
         const claimsId = `${ref.callKey}-claims`;
         const first = await c.tool(ref, {
@@ -461,7 +470,7 @@ export function smokeCases(): SmokeCase[] {
           id: claimsId,
           code: "ok",
           // the short summary, within one turn: the documents and how to send them wait for a detail
-          sentence: tobiasSummary(c),
+          sentence: tobiasSummary(c, ref.callKey),
           check: (r) => {
             const claims = r.data?.claims;
             if (!Array.isArray(claims) || claims.length !== 2) return "data.claims should list both claims";
@@ -517,7 +526,7 @@ export function smokeCases(): SmokeCase[] {
           name: "lookup_customer",
           args: { phone: UNKNOWN_PHONE },
           code: "not_found",
-          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }),
+          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }, ref.callKey),
         });
         // The caller confirmed the number: the same number again is final, and stays final. (A
         // different number is still looked up: lookup-third-number.)
@@ -535,13 +544,13 @@ export function smokeCases(): SmokeCase[] {
           name: "lookup_customer",
           args: { phone: UNKNOWN_PHONE },
           code: "not_found",
-          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }),
+          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }, ref.callKey),
         });
         await c.tool(ref, {
           name: "lookup_customer",
           args: { phone: OTHER_UNKNOWN_PHONES[0] },
           code: "not_found",
-          sentence: sentenceFor("not_found", { digits: OTHER_UNKNOWN_PHONES[0] }),
+          sentence: sentenceFor("not_found", { digits: OTHER_UNKNOWN_PHONES[0] }, ref.callKey),
         });
         await c.tool(ref, { name: "lookup_customer", args: { phone: TOBIAS.phone }, code: "needs_dob" });
         // Three different misses end the lookups for the call, even for a seeded number.
@@ -551,7 +560,7 @@ export function smokeCases(): SmokeCase[] {
             name: "lookup_customer",
             args: { phone },
             code: "not_found",
-            sentence: sentenceFor("not_found", { digits: phone }),
+            sentence: sentenceFor("not_found", { digits: phone }, capped.callKey),
           });
         }
         await c.tool(capped, {
@@ -648,7 +657,7 @@ export function smokeCases(): SmokeCase[] {
           name: "escalate",
           args: { reason: "representative_requested", callback_phone: CALLBACK_PHONE },
           code: "callback_updated",
-          sentence: sentenceFor("callback_updated", { digits: CALLBACK_PHONE }),
+          sentence: sentenceFor("callback_updated", { digits: CALLBACK_PHONE }, ref.callKey),
         });
         const db = c.cfg.db;
         if (db) {
@@ -681,7 +690,7 @@ export function smokeCases(): SmokeCase[] {
           name: "lookup_customer",
           args: { phone: UNKNOWN_PHONE },
           code: "not_found",
-          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }),
+          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }, ref.callKey),
         });
         await c.tool(ref, {
           name: "lookup_customer",
@@ -707,7 +716,7 @@ export function smokeCases(): SmokeCase[] {
           first_name: "Smoke",
           last_name: "Tester",
           email: "smoke.test@example.com",
-        });
+        }, ref.callKey);
         await c.tool(ref, {
           name: "capture_contact",
           args: {
@@ -738,7 +747,7 @@ export function smokeCases(): SmokeCase[] {
           sentence: readback,
         });
         const confirmId = `${ref.callKey}-confirm`;
-        const saved = sentenceFor("contact_saved_new", { first_name: "Smoke" });
+        const saved = sentenceFor("contact_saved_new", { first_name: "Smoke" }, ref.callKey);
         await c.tool(ref, {
           name: "confirm_contact",
           id: confirmId,
@@ -790,7 +799,7 @@ export function smokeCases(): SmokeCase[] {
           name: "lookup_customer",
           args: { phone: UNKNOWN_PHONE },
           code: "not_found",
-          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }),
+          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }, ref.callKey),
         });
         await c.tool(ref, {
           name: "lookup_customer",
@@ -812,16 +821,16 @@ export function smokeCases(): SmokeCase[] {
             first_name: "Smoke",
             last_name: "Tester",
             email: owner,
-          }),
+          }, ref.callKey),
         });
         await c.tool(ref, {
           name: "confirm_contact",
           args: { correct: true },
           code: "contact_saved_new",
-          sentence: sentenceFor("contact_saved_new", { first_name: "Smoke" }),
+          sentence: sentenceFor("contact_saved_new", { first_name: "Smoke" }, ref.callKey),
         });
-        const sent = sentenceFor("email_sent", { target: "given" });
-        const failed = sentenceFor("email_failed");
+        const sent = sentenceFor("email_sent", { target: "given" }, ref.callKey);
+        const failed = sentenceFor("email_failed", undefined, ref.callKey);
         const reply = await c.tool(ref, {
           name: "send_info_email",
           args: { topic: "how_to_start_claim" },
@@ -856,7 +865,7 @@ export function smokeCases(): SmokeCase[] {
           name: "verify_identity",
           args: TEAGUE.dob,
           code: "verified",
-          sentence: (s) => s.startsWith("Thanks, Teague. You're all verified.") ? null : `sentence was "${s}"`,
+          sentence: (s) => s.startsWith(verifiedThanks("Teague", ref.callKey)) ? null : `sentence was "${s}"`,
         });
         await c.tool(ref, {
           name: "send_info_email",
@@ -875,7 +884,7 @@ export function smokeCases(): SmokeCase[] {
             first_name: "Teague",
             last_name: "Ashdown",
             email: "smoke.test@example.com",
-          }),
+          }, ref.callKey),
         });
         await c.tool(ref, {
           name: "confirm_contact",
@@ -883,7 +892,7 @@ export function smokeCases(): SmokeCase[] {
           code: "contact_saved_existing",
           sentence: sentenceFor("contact_saved_existing", {
             first_name: "Teague",
-          }),
+          }, ref.callKey),
         });
         await c.tool(ref, {
           name: "send_info_email",
@@ -926,7 +935,10 @@ export function smokeCases(): SmokeCase[] {
           code: "verified",
           // with PRIOR_CONTACTS_ENABLED the opening adds "Welcome back."; either way, one turn
           sentence: (s) =>
-            [tobiasSummary(c, VERIFIED_PREFIX), tobiasSummary(c, `${VERIFIED_PREFIX} Welcome back.`)].includes(s) &&
+            [
+                tobiasSummary(c, ref.callKey, verifiedPrefix(ref.callKey)),
+                tobiasSummary(c, ref.callKey, `${verifiedPrefix(ref.callKey)} Welcome back.`),
+              ].includes(s) &&
               spokenWords(s) <= MAX_TURN_WORDS
               ? null
               : `sentence was "${s}"`,
@@ -972,7 +984,7 @@ export function smokeCases(): SmokeCase[] {
           name: "verify_identity",
           args: TOBIAS.dob,
           code: "verified",
-          sentence: (s) => s.startsWith(VERIFIED_PREFIX) ? null : `sentence was "${s}"`,
+          sentence: (s) => s.startsWith(verifiedPrefix(ref.callKey)) ? null : `sentence was "${s}"`,
         });
         const status = (args: Record<string, unknown>, code: Code, sentence: string) =>
           c.tool(ref, {
@@ -1003,7 +1015,7 @@ export function smokeCases(): SmokeCase[] {
             { claim_number_last3: "198", claim_type: "home", status: "awaiting_documents" },
             { claim_number_last3: "115", claim_type: "auto", status: "payment_issued" },
           ],
-        });
+        }, ref.callKey);
         await status({ detail: "claim", claim_ending: "777" }, "claim_not_identified", which);
         await status({ detail: "claim", claim_ending: "198 or 115" }, "claim_not_identified", which);
         await status({ detail: "claim" }, "claim_not_identified", which);
@@ -1014,7 +1026,7 @@ export function smokeCases(): SmokeCase[] {
           name: "verify_identity",
           args: RONAN_DOB,
           code: "verified",
-          sentence: (s) => s.startsWith("Thanks, Ronan. You're all verified.") ? null : `sentence was "${s}"`,
+          sentence: (s) => s.startsWith(verifiedThanks("Ronan", ronan.callKey)) ? null : `sentence was "${s}"`,
         });
         await c.tool(ronan, { name: "get_claim_status", args: { detail: "documents" }, code: "no_documents_needed" });
         // his only claim is the one he means, even by a type it is not
@@ -1050,15 +1062,15 @@ export function smokeCases(): SmokeCase[] {
         // A chat, so no team alert is paged; the customer's confirmation goes to the address on file.
         const ref = c.ref("", "chat");
         await c.tool(ref, { name: "lookup_customer", args: { phone: SLOANE.phone }, code: "needs_dob" });
-        const opening = verifiedFileClaimSentence(sentenceFor("verified", { first_name: "Sloane" }));
+        const opening = verifiedFileClaimSentence(sentenceFor("verified", { first_name: "Sloane" }, ref.callKey));
         await c.tool(ref, {
           name: "verify_identity",
           args: { ...SLOANE.dob, intent: "file_claim" },
           code: "verified",
           // the welcome-back variant keeps its opening and ends the same way
           sentence: (s) =>
-            s.startsWith("Thanks, Sloane. You're all verified.") &&
-              s.endsWith(opening.slice("Thanks, Sloane. You're all verified.".length))
+            s.startsWith(verifiedThanks("Sloane", ref.callKey)) &&
+              s.endsWith(opening.slice(verifiedThanks("Sloane", ref.callKey).length))
               ? null
               : `sentence was "${s}"`,
         });
@@ -1077,7 +1089,7 @@ export function smokeCases(): SmokeCase[] {
           name: "start_claim",
           args: earlier,
           code: "claim_readback",
-          sentence: claimReadback(c, earlier),
+          sentence: claimReadback(c, ref.callKey, earlier),
         });
         await c.tool(ref, { name: "confirm_claim", args: { correct: false }, code: "claim_retry" });
         const corrected = { ...BUMPER, loss_date: "yesterday" };
@@ -1085,11 +1097,11 @@ export function smokeCases(): SmokeCase[] {
           name: "start_claim",
           args: corrected,
           code: "claim_readback",
-          sentence: claimReadback(c, corrected),
+          sentence: claimReadback(c, ref.callKey, corrected),
         });
         const confirmId = `${ref.callKey}-confirm`;
         const filedShape =
-          /^You're all set\. Your claim number ends in [a-z]+ [a-z]+ [a-z]+(, and I've emailed the details to the email on file)?\. An adjuster will reach out within one business day\. Is there anything else I can help with\?$/;
+          /^[^.]+\. Your claim number ends in [a-z]+ [a-z]+ [a-z]+(, and I've emailed the details to the email on file)?\. An adjuster will reach out within one business day\. [^.?]+\?$/;
         const filed = await c.tool(ref, {
           name: "confirm_claim",
           id: confirmId,
@@ -1098,7 +1110,8 @@ export function smokeCases(): SmokeCase[] {
           sentence: filedShape,
           // "emailed" only when Resend returned an id: either answer is honest, and the sentence matches it
           check: (r) =>
-            /^\d{3}$/.test(String(r.data?.claim_last3 ?? "")) && r.sentence === sentenceFor("claim_filed", r.data ?? {})
+            /^\d{3}$/.test(String(r.data?.claim_last3 ?? "")) &&
+              r.sentence === sentenceFor("claim_filed", r.data ?? {}, ref.callKey)
               ? null
               : `data ${JSON.stringify(r.data)} does not match the sentence`,
         });
@@ -1115,7 +1128,7 @@ export function smokeCases(): SmokeCase[] {
           name: "start_claim",
           args: corrected,
           code: "claim_already_filed",
-          sentence: sentenceFor("claim_already_filed", last3 ? { claim_last3: last3 } : {}),
+          sentence: sentenceFor("claim_already_filed", last3 ? { claim_last3: last3 } : {}, ref.callKey),
         });
         const db = c.cfg.db;
         if (db) {
@@ -1165,7 +1178,7 @@ export function smokeCases(): SmokeCase[] {
           name: "lookup_customer",
           args: { phone: UNKNOWN_PHONE },
           code: "not_found",
-          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }),
+          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }, ref.callKey),
         });
         await c.tool(ref, { name: "lookup_customer", args: { phone: UNKNOWN_PHONE }, code: "not_found_final" });
         // no details yet, and then unconfirmed details: the way in is the caller's name
@@ -1183,7 +1196,7 @@ export function smokeCases(): SmokeCase[] {
             last_name: "Tester",
             ...(owner ? { email: owner } : {}),
             callback_phone: CALLBACK_PHONE,
-          }),
+          }, ref.callKey),
         });
         await c.tool(ref, { name: "start_claim", args: TREE, code: "claim_needs_contact" });
         // the loss was told before the details, so the yes asks to take that claim down now
@@ -1198,17 +1211,18 @@ export function smokeCases(): SmokeCase[] {
               has_email: false,
               resume_claim: true,
             },
+            ref.callKey,
           ),
         });
         await c.tool(ref, {
           name: "start_claim",
           args: TREE,
           code: "claim_readback",
-          sentence: claimReadback(c, TREE),
+          sentence: claimReadback(c, ref.callKey, TREE),
         });
         const confirmId = `${ref.callKey}-confirm`;
-        const plain = sentenceFor("claim_intake_saved", { first_name: "Smoke", emailed: false });
-        const emailed = sentenceFor("claim_intake_saved", { first_name: "Smoke", emailed: true });
+        const plain = sentenceFor("claim_intake_saved", { first_name: "Smoke", emailed: false }, ref.callKey);
+        const emailed = sentenceFor("claim_intake_saved", { first_name: "Smoke", emailed: true }, ref.callKey);
         const saved = await c.tool(ref, {
           name: "confirm_claim",
           id: confirmId,

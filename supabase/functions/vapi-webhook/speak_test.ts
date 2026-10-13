@@ -11,6 +11,7 @@ import {
   documentsSentence,
   MAX_TURN_WORDS,
   numberToWords,
+  PHRASINGS,
   sentenceFor,
   speakDate,
   speakDigits,
@@ -20,8 +21,10 @@ import {
   speakPhone,
   spokenName,
   spokenWords,
+  variantIndex,
   verifiedFileClaimSentence,
   verifiedStatusSentence,
+  verifiedThanks,
   withoutTrailingQuestion,
 } from "./speak.ts";
 
@@ -165,18 +168,47 @@ const VARIANTS: [Code, Record<string, unknown> | undefined][] = [
   ["claim_intake_saved", { first_name: "{{first}}" }],
 ];
 
-Deno.test("every code has a non-empty speakable sentence, with and without data", () => {
+/** A call key that hears phrasing i of a code (speak.ts variantIndex). */
+function keyFor(code: string, i: number): string {
+  for (let n = 0; n < 1000; n++) if (variantIndex(`call-${n}`, code) === i) return `call-${n}`;
+  throw new Error(`no call key picks phrasing ${i} of ${code}`);
+}
+
+// The codes whose phrasing is picked by more than the code: not_found by the number it reads back, and
+// claim_readback by the date and summary it reads (speak.ts claimReadbackKey).
+const KEYED_BY_DATA = new Set<Code>(["not_found", "claim_readback"]);
+
+/** Every phrasing of a code's sentence for this data, first phrasing first (one for a code with one). */
+function everyPhrasing(code: Code, data?: Record<string, unknown>): string[] {
+  const all = new Set([
+    sentenceFor(code, data),
+    ...Array.from({ length: PHRASINGS }, (_, i) => sentenceFor(code, data, keyFor(code, i))),
+  ]);
+  if (KEYED_BY_DATA.has(code)) {
+    for (let n = 0; n < 300 && all.size < PHRASINGS; n++) all.add(sentenceFor(code, data, `call-${n}`));
+  }
+  return [...all];
+}
+
+/** Every data variant of every code, in every phrasing. */
+const ALL_SPOKEN: [Code, string][] = VARIANTS.flatMap(([code, data]) =>
+  everyPhrasing(code, data).map((s): [Code, string] => [code, s])
+);
+
+Deno.test("every code has a non-empty speakable sentence, with and without data, in every phrasing", () => {
   for (const code of CODES) {
     const s = sentenceFor(code);
     assert(s.trim().length > 0, `${code} has no sentence`);
     assertSpeakable(s);
   }
-  for (const [code, data] of VARIANTS) assertSpeakable(sentenceFor(code, data));
+  for (const [code, s] of ALL_SPOKEN) {
+    assert(s.trim().length > 0, `${code} has an empty phrasing`);
+    assertSpeakable(s);
+  }
 });
 
 Deno.test("no sentence leaks markup, programming words or long digit runs", () => {
-  for (const [code, data] of VARIANTS) {
-    const s = sentenceFor(code, data);
+  for (const [code, s] of ALL_SPOKEN) {
     for (const bad of ["{{", "<<", "{", "}", "must not", "JSON", "json", "null", "undefined", "tool", "function"]) {
       assert(!s.includes(bad), `${code} contains ${bad}`);
     }
@@ -189,7 +221,7 @@ Deno.test("exact fixed sentences", () => {
   assertEquals(sentenceFor("bad_args"), "Sorry, I didn't quite catch that. Could you say it again?");
   assertEquals(
     sentenceFor("system_error"),
-    "Sorry, I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?",
+    "Sorry, I'm having trouble on our end right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?",
   );
   assertEquals(sentenceFor("unknown_tool"), sentenceFor("system_error"));
   assertEquals(sentenceFor("dob_give_up"), sentenceFor("locked"));
@@ -200,7 +232,7 @@ Deno.test("exact fixed sentences", () => {
   );
   assertEquals(
     sentenceFor("needs_dob"),
-    "Thanks! And just to keep your account safe, what's the date of birth on the account?",
+    "Got it. And just to keep your account safe, what's the date of birth on the account?",
   );
   assertEquals(sentenceFor("dob_unreadable"), "Just to be sure, could you give me the month, day and year?");
   assertEquals(
@@ -221,7 +253,7 @@ Deno.test("exact fixed sentences", () => {
 Deno.test("dynamic sentences", () => {
   assertEquals(
     sentenceFor("not_found", { digits: "6025550199" }),
-    "I'm not finding an account under six zero two... five five five... zero one nine nine. Is that the right number?",
+    "I'm not finding an account under six zero two, five five five, zero one nine nine. Is that the right number?",
   );
   assertEquals(
     sentenceFor("verified", { first_name: "Tobias" }),
@@ -231,11 +263,11 @@ Deno.test("dynamic sentences", () => {
   assertEquals(sentenceFor("verified", { first_name: "{{name}}" }).includes("{"), false);
   assertEquals(
     sentenceFor("not_verified", { level: "phone_found" }),
-    "Happy to help with that once you're verified. What's the date of birth?",
+    "I can help with that once you're verified. What's the date of birth?",
   );
   assertEquals(
     sentenceFor("not_verified", { level: "none" }),
-    "Happy to help with that once I've verified you. What's the phone number on your account?",
+    "I can help with that once I've verified you. What's the phone number on your account?",
   );
   const queued = (at: string) =>
     `I've passed this to our claims team. Someone will call you back at ${at} within one business day. Anything else I can help with?`;
@@ -247,7 +279,7 @@ Deno.test("dynamic sentences", () => {
   assertEquals(sentenceFor("rep_queued", { target: "caller_id" }), queued("the number you're calling from"));
   assertEquals(
     sentenceFor("callback_updated", { digits: "6025550101" }),
-    "Got it, six zero two... five five five... zero one zero one. Anything else I can help with?",
+    "Got it, six zero two, five five five, zero one zero one. Anything else I can help with?",
   );
   assertEquals(
     sentenceFor("ok", { claims: byNumber("CLM-240230"), refDate: TODAY }),
@@ -856,8 +888,8 @@ Deno.test("speakDigits spaces digits and drops everything else", () => {
   assertEquals(speakDigits(""), "");
 });
 
-Deno.test("speakPhone reads three groups with pauses", () => {
-  const spoken = "six zero two... five five five... zero one nine nine";
+Deno.test("speakPhone reads three groups with a comma between them", () => {
+  const spoken = "six zero two, five five five, zero one nine nine";
   assertEquals(speakPhone("+16025550199"), spoken);
   assertEquals(speakPhone("6025550199"), spoken);
   assertEquals(speakPhone("(602) 555-0199"), spoken);
@@ -950,7 +982,7 @@ Deno.test("numberToWords", () => {
 Deno.test("assertSpeakable accepts plain speech and the main line only", () => {
   assertSpeakable("Your auto claim ending in one one five is closed.");
   assertSpeakable(`Please call our main line at ${MAIN_LINE_SPOKEN}, and someone there will help you.`);
-  assertSpeakable("I'm not finding an account under six zero two... five five five... zero one nine nine.");
+  assertSpeakable("I'm not finding an account under six zero two, five five five, zero one nine nine.");
   assertSpeakable("A 30-day window, 1,000 options, 555 people.");
   const rejects = [
     "",
@@ -1021,11 +1053,11 @@ Deno.test("contact sentences: exact wording", () => {
       email: "john.smith42@gmail.com",
       callback_phone: "+16025550177",
     }),
-    "Thanks! Let me read that back. John Smith, your email is J, O, H, N, dot, S, M, I, T, H, four, two, at gmail dot com, and the best number is six zero two... five five five... zero one seven seven. Did I get that right?",
+    "Thanks! Let me read that back. John Smith, your email is J, O, H, N, dot, S, M, I, T, H, four, two, at gmail dot com, and the best number is six zero two, five five five, zero one seven seven. Did I get that right?",
   );
   assertEquals(
     sentenceFor("contact_readback", { first_name: "Jane", last_name: "O'Brien", callback_phone: "6025550177" }),
-    "Thanks! Just to confirm, that's Jane O'Brien, and the best number is six zero two... five five five... zero one seven seven. Did I get that right?",
+    "Thanks! Just to confirm, that's Jane O'Brien, and the best number is six zero two, five five five, zero one seven seven. Did I get that right?",
   );
   // a number that is not ten digits is left out rather than read wrong
   assertEquals(
@@ -1095,20 +1127,20 @@ Deno.test("contact sentences: exact wording", () => {
   // taking the loss down now comes first: a new caller who called to report one is offered exactly that
   assertEquals(
     sentenceFor("contact_saved_new", { first_name: "Jane" }),
-    "Perfect, I've saved your details. I can take down what happened now, email you the steps to start a claim, or have someone from our claims team call you back. Which would you like?",
+    "I've saved your details. I can take down what happened now, email you the steps to start a claim, or have someone from our claims team call you back. Which would you like?",
   );
   assertEquals(
     sentenceFor("contact_saved_new", { first_name: "Jane", has_email: false }),
-    "Perfect, I've saved your details. I can take down what happened now, have someone from our claims team call you back, or you can find the steps to start a claim at observeinsurance dot com slash claims. Which would you like?",
+    "I've saved your details. I can take down what happened now, have someone from our claims team call you back, or you can find the steps to start a claim at observeinsurance dot com slash claims. Which would you like?",
   );
   // a start_claim already asked for these details: the loss was told, so the claim is taken down now
   for (const has_email of [true, false]) {
     assertEquals(
       sentenceFor("contact_saved_new", { first_name: "Jane", has_email, resume_claim: true }),
-      "Perfect, I've saved your details. Shall I go ahead and take down that claim now?",
+      "I've saved your details. Shall I go ahead and take down that claim now?",
     );
   }
-  assertStringIncludes(sentenceFor("contact_saved_new"), "Perfect, I've saved your details.");
+  assertStringIncludes(sentenceFor("contact_saved_new"), "I've saved your details.");
   assertEquals(
     sentenceFor("contact_saved_existing", { first_name: "Teague" }),
     "Got it. I've passed that email to our team to add to your account. Is there anything else I can help with?",
@@ -1143,8 +1175,7 @@ Deno.test("spokenName folds accents and refuses what cannot be spoken", () => {
 });
 
 Deno.test("no spoken string carries banned words or a double dash", () => {
-  for (const [code, data] of VARIANTS) {
-    const s = sentenceFor(code, data);
+  for (const [code, s] of ALL_SPOKEN) {
     assert(!s.includes("--"), `${code} has a double dash`);
     for (
       const banned of [
@@ -1154,6 +1185,14 @@ Deno.test("no spoken string carries banned words or a double dash", () => {
         /\bsweetie\b/i,
         /\bdear\b/i,
         /I understand your concern/i,
+        // the reference prompt's call-center phrases and stock reactions
+        /\bAbsolutely\b/,
+        /\bCertainly\b/,
+        /great question/i,
+        /happy to (help|assist|check)/i,
+        /I understand your frustration/i,
+        /\bsystem\b/i,
+        /\bdatabase\b/i,
       ]
     ) {
       assert(!banned.test(s), `${code} says ${banned}`);
@@ -1190,14 +1229,15 @@ Deno.test("spokenWords: a number in figures counts one word per digit, as it is 
 
 Deno.test("warm wording: no office phrases, contractions throughout, the caller's first name at most once", () => {
   for (const [code, data] of VARIANTS) {
-    const s = sentenceFor(code, data);
-    for (const re of OFFICE_WORDING) assert(!re.test(s), `${code} says ${re}: ${s}`);
-    // a claim's details quote the claims system's own note ("is not covered by the policy") as written
-    if (code !== "claim_detail") assert(!UNCONTRACTED.test(s), `${code} has an uncontracted form: ${s}`);
-    const first = typeof data?.first_name === "string" ? spokenName(data.first_name).split(" ")[0] : "";
-    if (first) {
-      const times = s.split(/[^A-Za-z']+/).filter((w) => w === first).length;
-      assert(times <= 1, `${code} says the first name ${times} times: ${s}`);
+    for (const s of everyPhrasing(code, data)) {
+      for (const re of OFFICE_WORDING) assert(!re.test(s), `${code} says ${re}: ${s}`);
+      // a claim's details quote the claims system's own note ("is not covered by the policy") as written
+      if (code !== "claim_detail") assert(!UNCONTRACTED.test(s), `${code} has an uncontracted form: ${s}`);
+      const first = typeof data?.first_name === "string" ? spokenName(data.first_name).split(" ")[0] : "";
+      if (first) {
+        const times = s.split(/[^A-Za-z']+/).filter((w) => w === first).length;
+        assert(times <= 1, `${code} says the first name ${times} times: ${s}`);
+      }
     }
   }
   // one sympathy per moment: a lock says sorry once, and the lock's claim refusal does not say it again
@@ -1226,12 +1266,13 @@ Deno.test("warm wording: no office phrases, contractions throughout, the caller'
   assert(!/\bperfect\b/i.test(verified), verified);
   // no "no documents" answer frames a claim's state as good news (it can follow a denial)
   assert(!/good news/i.test(sentenceFor("no_documents_needed")));
-  // a callback queued and an email sent, often back to back, open differently
+  // a callback queued and an email sent, often back to back, open differently in every phrasing
   const opener = (t: string) => t.split(/[ ,.!]/)[0];
-  assertNotEquals(opener(sentenceFor("rep_queued", { target: "account" })), opener(sentenceFor("email_sent")));
+  for (const queued of everyPhrasing("rep_queued", { target: "account" })) {
+    for (const sent of everyPhrasing("email_sent")) assertNotEquals(opener(queued), opener(sent));
+  }
   // and never two apologies in one sentence
-  for (const [code, data] of VARIANTS) {
-    const s = sentenceFor(code, data);
+  for (const [code, s] of ALL_SPOKEN) {
     assert((s.match(/\bsorry\b/gi) ?? []).length <= 1, `${code} apologises twice: ${s}`);
   }
 });
@@ -1352,11 +1393,12 @@ Deno.test("every question for a date of birth, a phone number or an email is one
     ["contact_readback", { first_name: "Jane", last_name: "Doe", email: "jane.doe@gmail.com" }],
   ];
   for (const [code, data] of asks) {
-    const s = sentenceFor(code, data);
-    assert(asksForSensitive(s), `${code} no longer reads as a question for a DOB, number or email: ${s}`);
+    for (const s of everyPhrasing(code, data)) {
+      assert(asksForSensitive(s), `${code} no longer reads as a question for a DOB, number or email: ${s}`);
+    }
   }
   // and an answer to "anything else" is not masked
-  assert(!asksForSensitive(sentenceFor("email_sent")));
+  for (const s of everyPhrasing("email_sent")) assert(!asksForSensitive(s), s);
   assert(!asksForSensitive(sentenceFor("rep_recorded")));
 });
 
@@ -1475,8 +1517,7 @@ Deno.test("claim_readback: the article, the type, the summary when given and the
 Deno.test("claim sentences: one question each, at most sixty words, digits as words and never 'oh'", () => {
   const codes = CODES.filter((c) => c.startsWith("claim_"));
   assertEquals(codes.length, 18);
-  for (const [code, data] of VARIANTS.filter(([c]) => c.startsWith("claim_"))) {
-    const s = sentenceFor(code, data);
+  for (const [code, s] of ALL_SPOKEN.filter(([c]) => c.startsWith("claim_"))) {
     assertEquals(s.split("?").length - 1, 1, `${code}: ${s}`);
     assert(s.trimEnd().endsWith("?"), `${code} ends on its question`);
     assert(s.split(/\s+/).length <= 60, `${code} has ${s.split(/\s+/).length} words`);
@@ -1541,9 +1582,10 @@ Deno.test("every spoken sentence fits one turn: sixty words at most, seventy-fiv
     ["claim_filed", { claim_last3: "472", emailed: true }],
   ];
   for (const [code, data] of cases) {
-    const s = sentenceFor(code, data);
-    const limit = SPELLING_READBACKS.has(code) ? MAX_READBACK_WORDS : MAX_TURN_WORDS;
-    assert(spokenWords(s) <= limit, `${code} has ${spokenWords(s)} words: ${s}`);
+    for (const s of everyPhrasing(code, data)) {
+      const limit = SPELLING_READBACKS.has(code) ? MAX_READBACK_WORDS : MAX_TURN_WORDS;
+      assert(spokenWords(s) <= limit, `${code} has ${spokenWords(s)} words: ${s}`);
+    }
   }
   // every code is covered, and the seeded account's answers fit with room to spare
   for (const code of CODES) assert(cases.some(([c]) => c === code), `${code} has no representative case`);
@@ -1603,5 +1645,403 @@ Deno.test("verify intents: the verified opening without its question, then the s
   assertEquals(
     verifiedStatusSentence(plain, sentenceFor("no_claims")),
     "Thanks, Tobias. You're all verified. I'm not seeing any claims on file for your account. Would you like me to explain how to start one?",
+  );
+});
+
+// ---------------------------------------------------------------------------------------------
+// Variety: the most-heard sentences come in several phrasings, picked by the call key and the code.
+// ---------------------------------------------------------------------------------------------
+const ANYTHING_ELSE_ASK = /\banything else\b[^?]*\?$/i;
+// [code, data, how every phrasing ends, words every phrasing says, words none says]
+const VARIED: [Code, Record<string, unknown> | undefined, RegExp, string[], string[]][] = [
+  ["needs_dob", undefined, /date of birth on the account\?$/, ["safe", "date of birth on the account"], ["Thank"]],
+  [
+    "not_found",
+    { digits: "6025550199" },
+    /\. Is that the right number\?$/,
+    ["an account under six zero two, five five five, zero one nine nine."],
+    [],
+  ],
+  ["not_found", undefined, /\. Is that the right number\?$/, ["an account under that number."], []],
+  [
+    "not_found_final",
+    undefined,
+    /\. Could I get your first and last name\?$/,
+    ["still", "account", "that number", "If you're new with us", "get", "started"],
+    [],
+  ],
+  ["verified", { first_name: "Tobias" }, /\b(help you with|do for you|help you) today\?$/, ["Tobias", "verified."], []],
+  ["verified", undefined, /\b(help you with|do for you|help you) today\?$/, ["verified."], []],
+  [
+    "ok",
+    { claims: SEED_CLAIMS.filter((c) => c.customer_id === TOBIAS), refDate: TODAY },
+    /\bgo over what's needed, or email you the list\?$/,
+    [
+      "You have two claims.",
+      "Your home claim ending in one nine eight needs documents from you by October twenty-fourth.",
+      "Your auto claim ending in one one five was paid, four thousand eight hundred twenty dollars on October eighth.",
+    ],
+    [],
+  ],
+  [
+    "ok",
+    { claims: byNumber("CLM-240177"), refDate: TODAY },
+    /\bthe reason and how to appeal\?$/,
+    ["Your property claim ending in one seven seven was denied, I'm sorry to say."],
+    [],
+  ],
+  [
+    "ok",
+    { claims: SEED_CLAIMS, refDate: TODAY },
+    /\bgo over what's needed, or email you the list\?$/,
+    ["You have five claims.", "more claims on file."],
+    [],
+  ],
+  ["ok", { claims: byNumber("CLM-240230"), refDate: TODAY }, /\babout it\?$/, [
+    "Your home claim ending in two three zero was received on October tenth and is waiting for an adjuster.",
+  ], []],
+  [
+    "rep_queued",
+    { target: "account" },
+    ANYTHING_ELSE_ASK,
+    ["our claims team", "Someone will call you back at the number on your account within one business day."],
+    [],
+  ],
+  [
+    "rep_queued",
+    { target: "given", digits: "6025550177" },
+    ANYTHING_ELSE_ASK,
+    ["Someone will call you back at the number you gave me, ending in zero one seven seven, within one business day."],
+    [],
+  ],
+  [
+    "rep_queued",
+    { target: "caller_id" },
+    ANYTHING_ELSE_ASK,
+    ["Someone will call you back at the number you're calling from within one business day."],
+    [],
+  ],
+  ["rep_queued", undefined, ANYTHING_ELSE_ASK, ["Someone will call you back within one business day."], []],
+  [
+    "email_sent",
+    undefined,
+    ANYTHING_ELSE_ASK,
+    ["I've emailed that to the address on your account", "within a few minutes"],
+    ["address you gave me"],
+  ],
+  [
+    "email_sent",
+    { target: "given" },
+    ANYTHING_ELSE_ASK,
+    ["I've emailed that to the address you gave me", "within a few minutes"],
+    ["on your account"],
+  ],
+  [
+    "claim_filed",
+    { claim_last3: "472", emailed: true },
+    ANYTHING_ELSE_ASK,
+    [
+      "Your claim number ends in four seven two, and I've emailed the details to the email on file.",
+      "An adjuster will reach out within one business day.",
+    ],
+    [],
+  ],
+  [
+    "claim_filed",
+    { claim_last3: "472", emailed: false },
+    ANYTHING_ELSE_ASK,
+    ["Your claim number ends in four seven two.", "An adjuster will reach out within one business day."],
+    ["email"],
+  ],
+  ["claim_filed", {}, ANYTHING_ELSE_ASK, ["Your claim is filed."], ["email"]],
+  [
+    "claim_intake_saved",
+    { first_name: "Jane", emailed: true },
+    ANYTHING_ELSE_ASK,
+    [
+      "Jane",
+      "claim details",
+      "our claims team",
+      "a confirmation to your email.",
+      "A specialist will call you within one business day to finish setting it up.",
+    ],
+    [],
+  ],
+  [
+    "claim_intake_saved",
+    { first_name: "Jane", emailed: false },
+    ANYTHING_ELSE_ASK,
+    ["Jane", "claim details", "our claims team", "A specialist will call you within one business day"],
+    ["confirmation", "email"],
+  ],
+  [
+    "contact_saved_new",
+    { first_name: "Jane" },
+    /\b(Which|What) would[^?]*\?$/,
+    [
+      "details",
+      "saved",
+      "I can take down what happened now, email you the steps to start a claim, or have someone from our claims team call you back.",
+    ],
+    ["Jane"],
+  ],
+  [
+    "contact_saved_new",
+    { first_name: "Jane", has_email: false },
+    /\b(Which|What) would[^?]*\?$/,
+    ["or you can find the steps to start a claim at observeinsurance dot com slash claims."],
+    ["Jane", "email you"],
+  ],
+  [
+    "contact_saved_new",
+    { first_name: "Jane", resume_claim: true },
+    /\. Shall I go ahead and take down that claim now\?$/,
+    ["details"],
+    ["Jane"],
+  ],
+  [
+    "claim_readback",
+    { claim_type: "auto", loss_date: "2026-10-10", summary: "a cracked windshield", today: TODAY },
+    /\. An auto claim, for a cracked windshield, from Saturday, October tenth\. Is that correct\?$/,
+    [],
+    [],
+  ],
+  [
+    "claim_readback",
+    { claim_type: "home", loss_date: "2025-12-24", today: TODAY },
+    /\. A home claim from Wednesday, December twenty-fourth, twenty twenty five\. Is that correct\?$/,
+    [],
+    [],
+  ],
+  [
+    "contact_readback",
+    { first_name: "Jane", last_name: "Doe", email: "jane.doe42@gmail.com", callback_phone: "+16025550177" },
+    /\bDid I get that right\?$/,
+    [
+      " Jane Doe, your email is J, A, N, E, dot, D, O, E, four, two, at gmail dot com, and the best number is six zero two, five five five, zero one seven seven.",
+    ],
+    [],
+  ],
+  [
+    "contact_readback",
+    { first_name: "Jane", last_name: "Doe", email: "jane.doe42@gmail.com" },
+    /\bDid I get that right\?$/,
+    [" Jane Doe, and your email is J, A, N, E, dot, D, O, E, four, two, at gmail dot com."],
+    [],
+  ],
+  [
+    "contact_readback",
+    { first_name: "Jane", last_name: "Doe", callback_phone: "+16025550177" },
+    /\bDid I get that right\?$/,
+    [" Jane Doe, and the best number is six zero two, five five five, zero one seven seven."],
+    [],
+  ],
+  ["contact_readback", { first_name: "Jane", last_name: "Doe" }, /\bDid I get that right\?$/, [" Jane Doe."], []],
+];
+
+const NUMBER_WORDS = new Set(
+  (
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen " +
+    "seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred thousand million " +
+    "first second third fourth fifth sixth seventh eighth ninth tenth eleventh twelfth thirteenth fourteenth " +
+    "fifteenth sixteenth seventeenth eighteenth nineteenth twentieth thirtieth dollars dollar cents cent"
+  ).split(" "),
+);
+const CALENDAR_WORDS = new Set(
+  "January February March April May June July August September October November December Sunday Monday Tuesday Wednesday Thursday Friday Saturday"
+    .split(" "),
+);
+
+/** The facts a sentence says, as a sorted list of words: numbers, ordinals and amounts in words, months
+ *  and weekdays, the letters of a spelled address, and the names in its data. */
+function factWords(s: string, data: Record<string, unknown> | undefined): string[] {
+  const names = new Set(
+    [data?.first_name, data?.last_name].flatMap((n) => (typeof n === "string" ? spokenName(n).split(" ") : [])),
+  );
+  const words = s.split(/[^A-Za-z']+/).filter((w) =>
+    NUMBER_WORDS.has(w.toLowerCase()) || CALENDAR_WORDS.has(w) || names.has(w)
+  );
+  // a spelled letter is followed by a comma ("J, A, N, E, dot"); the pronoun "I" is not
+  return [...words, ...(s.match(/\b[A-Z](?=,)/g) ?? [])].sort();
+}
+
+Deno.test("variety: each of the most-heard sentences has three phrasings", () => {
+  assertEquals(PHRASINGS, 3);
+  for (const [code, data] of VARIED) {
+    const all = everyPhrasing(code, data);
+    // the resume question is the one fixed ending; its opener still varies
+    assertEquals(all.length, PHRASINGS, `${code} ${JSON.stringify(data)}: ${all.join(" | ")}`);
+  }
+  // the verified opening shared by every verified answer, and the read-back opener the battery embeds
+  const openings = new Set([0, 1, 2].map((i) => verifiedThanks("Tobias", keyFor("verified", i))));
+  assertEquals(openings.size, PHRASINGS);
+});
+
+Deno.test("variety: every phrasing says the same facts, the same honest result and the same kind of question", () => {
+  for (const [code, data, ending, says, never] of VARIED) {
+    const all = everyPhrasing(code, data);
+    const facts = factWords(all[0], data);
+    for (const s of all) {
+      const where = `${code} ${JSON.stringify(data)}: ${s}`;
+      assertEquals(factWords(s, data), facts, `${where} says other facts than "${all[0]}"`);
+      assert(ending.test(s), `${where} does not end like ${ending}`);
+      assertEquals((s.match(/\?/g) ?? []).length, 1, `${where}: one question`);
+      for (const part of says) assertStringIncludes(s, part, where);
+      for (const part of never) assert(!s.includes(part), `${where} says "${part}"`);
+      assertSpeakable(s);
+      const limit = SPELLING_READBACKS.has(code) ? MAX_READBACK_WORDS : MAX_TURN_WORDS;
+      assert(spokenWords(s) <= limit, `${where}: ${spokenWords(s)} words`);
+    }
+  }
+});
+
+Deno.test("variety: the phrasing is a pure function of the call key and the code", () => {
+  // pinned: the same key and code pick the same phrasing in every process, on every replay of the call
+  assertEquals(
+    ["needs_dob", "not_found", "verified", "ok", "rep_queued", "email_sent"].map((c) =>
+      variantIndex("5f0c2a9e-7b1d-4c3e-9a8f-1b2c3d4e5f60", c)
+    ),
+    [1, 2, 0, 2, 1, 0],
+  );
+  for (const [code, data] of VARIED) {
+    for (let n = 0; n < 20; n++) {
+      const key = `call-${n}`;
+      assertEquals(sentenceFor(code, data, key), sentenceFor(code, data, key), `${code} ${key}`);
+    }
+    // no key (docs, a test) is the first phrasing
+    assertEquals(sentenceFor(code, data), everyPhrasing(code, data)[0], code);
+    assertEquals(sentenceFor(code, data, ""), sentenceFor(code, data), code);
+  }
+  // every phrasing is heard: three hundred keys land on each of them
+  for (const code of ["needs_dob", "verified", "rep_queued", "contact_readback"]) {
+    const counts = [0, 0, 0];
+    for (let n = 0; n < 300; n++) counts[variantIndex(`${crypto.randomUUID()}`, code)]++;
+    assert(counts.every((c) => c > 50), `${code}: ${counts}`);
+  }
+  assertEquals(variantIndex("any", "needs_dob", 1), 0);
+});
+
+Deno.test("variety: the verified openings are one length, so the chained read says the same claims", () => {
+  const sets: Claim[][] = [
+    tobiasClaims(),
+    SEED_CLAIMS,
+    (["awaiting_documents", "denied", "payment_issued", "under_review"] as const).map((status, i) =>
+      claim({ ...WORST, status, claim_number: `CLM-3${i}999${i}`, filed_on: `2025-12-${10 + i}` })
+    ),
+  ];
+  for (const welcome of [false, true]) {
+    const openings = [0, 1, 2].map((i) => {
+      const thanks = verifiedThanks("Tobias", keyFor("verified", i));
+      return welcome ? `${thanks} Welcome back.` : thanks;
+    });
+    assertEquals(new Set(openings.map(spokenWords)).size, 1, openings.join(" | "));
+    for (const claims of sets) {
+      const reads = openings.map((opening, i) => {
+        const key = keyFor("ok", i);
+        return withoutTrailingQuestion(claimsSentence(claims, TODAY, MAX_TURN_WORDS - spokenWords(opening), key));
+      });
+      assertEquals(new Set(reads).size, 1, reads.join(" | "));
+    }
+  }
+  // the claims the summary only counted do not depend on the phrasing either
+  for (const claims of sets) {
+    const unread = claimsUnread(claims, TODAY).map((c) => c.claim_number);
+    for (let i = 0; i < PHRASINGS; i++) {
+      const text = claimsSentence(claims, TODAY, MAX_TURN_WORDS, keyFor("ok", i));
+      for (const c of claims.filter((c) => unread.includes(c.claim_number))) {
+        assert(!text.includes(speakDigits(c.claim_number.slice(-3))), `${c.claim_number} read in ${text}`);
+      }
+    }
+  }
+});
+
+Deno.test("variety: the read-back opener the battery embeds is the server's", async () => {
+  const { claimReadbackOpener } = await import("./speak.ts");
+  for (let n = 0; n < 30; n++) {
+    const key = `call-${n}`;
+    const s = sentenceFor("claim_readback", { claim_type: "home", loss_date: "2026-10-11", today: TODAY }, key);
+    assert(s.startsWith(`${claimReadbackOpener(key, "2026-10-11", "")} A home claim`), s);
+    const pipe = sentenceFor("claim_readback", {
+      claim_type: "home",
+      loss_date: "2026-10-11",
+      summary: "A burst pipe.",
+      today: TODAY,
+    }, key);
+    assert(pipe.startsWith(`${claimReadbackOpener(key, "2026-10-11", "a burst pipe")} A home claim`), pipe);
+  }
+});
+
+// The same frame twice in one call sounds read out: a second number that misses and a corrected
+// read-back are picked afresh, from what they read, while a replay of either still gets the same words.
+Deno.test("variety: a second number and a corrected read-back are picked by what they read", () => {
+  const lead = (s: string) => s.replace(/ six .*$| that number.*$/, "");
+  const readOpener = (s: string) => s.replace(/ An? (auto|home|property) claim.*$/, "");
+  let differentLead = 0;
+  let differentOpener = 0;
+  for (let n = 0; n < 300; n++) {
+    const key = crypto.randomUUID();
+    const first = sentenceFor("not_found", { digits: "6025550199" }, key);
+    assertEquals(sentenceFor("not_found", { digits: "6025550199" }, key), first, key);
+    if (lead(sentenceFor("not_found", { digits: "6025550198" }, key)) !== lead(first)) differentLead++;
+    const told = { claim_type: "home", loss_date: "2026-10-11", summary: "a burst pipe", today: TODAY };
+    const before = sentenceFor("claim_readback", told, key);
+    assertEquals(sentenceFor("claim_readback", told, key), before, key);
+    const after = sentenceFor("claim_readback", { ...told, loss_date: "2026-10-09" }, key);
+    if (readOpener(after) !== readOpener(before)) differentOpener++;
+  }
+  // about two calls in three hear a different frame the second time (one in three by chance the same)
+  assert(differentLead > 150, `${differentLead}`);
+  assert(differentOpener > 150, `${differentOpener}`);
+});
+
+// A new caller hears the contact read-back, the saved answer and then the claim read-back a few turns
+// apart: no opener is heard twice, and no two turns in a row open with the same word.
+Deno.test("variety: the contact and claim read-backs never share an opener", () => {
+  const contact = { first_name: "Dana", last_name: "Whitfield", email: "dana@example.com" };
+  for (let n = 0; n < 300; n++) {
+    const key = crypto.randomUUID();
+    const readback = sentenceFor("contact_readback", contact, key);
+    const contactOpener = readback.replace(/^(Thanks!|Thank you\.) /, "").replace(/ Dana Whitfield.*$/, "");
+    const claim = sentenceFor("claim_readback", {
+      claim_type: "home",
+      loss_date: "2026-10-12",
+      summary: "a tree branch on the roof",
+      today: TODAY,
+    }, key);
+    const claimOpener = claim.replace(/ A home claim.*$/, "");
+    assertNotEquals(claimOpener, contactOpener, key);
+    assert(!/read that back|what I have/i.test(claimOpener), claim);
+    const saved = sentenceFor("contact_saved_new", { first_name: "Dana" }, key);
+    assertNotEquals(readback.split(/[ ,.!]/)[0], saved.split(/[ ,.!]/)[0], `${readback} | ${saved}`);
+  }
+});
+
+// needs_dob is answered by the verified opening, which thanks the caller: needs_dob never does, so the
+// caller does not hear thanks in two turns in a row. Nothing cheerful follows a reported loss.
+Deno.test("variety: no stacked thanks before the verified opening, nothing cheerful after a loss", () => {
+  for (const s of everyPhrasing("needs_dob")) assert(!/\bthank/i.test(s), s);
+  for (const data of [{ first_name: "Dana" }, { first_name: "Dana", resume_claim: true }]) {
+    for (const s of everyPhrasing("contact_saved_new", data)) assert(!/\b(perfect|great)\b/i.test(s), s);
+  }
+  for (const s of everyPhrasing("claim_filed", { claim_last3: "472", emailed: true })) {
+    assert(!/\b(all done|perfect|great)\b/i.test(s), s);
+  }
+  // the short phrasings of the claims summary's closing question do not say "any" twice
+  const three = ["1090", "0849", "0311"].map((n, i) =>
+    claim({ claim_number: `CLM-24${n}`, status: "received", adjuster_name: null, filed_on: `2026-10-0${2 + i}` })
+  );
+  const questions = new Set(
+    Array.from(
+      { length: 60 },
+      (_, n) => claimsSentence(three, TODAY, MAX_TURN_WORDS, `call-${n}`).replace(/^.*\. /, ""),
+    ),
+  );
+  assertEquals(
+    [...questions].sort(),
+    [
+      "Any questions about them?",
+      "Anything you'd like to know about them?",
+      "Do you have any questions about any of them?",
+    ],
   );
 });

@@ -396,7 +396,7 @@ Deno.test("computeFlags: a clean verified call has no flags", () => {
         ),
         user("six oh two five five five oh one oh one"),
         toolResult("lookup_customer", "needs_dob"),
-        bot("Thanks! And just to keep your account safe, what's the date of birth on the account?"),
+        bot("Got it. And just to keep your account safe, what's the date of birth on the account?"),
         user("March fourteenth nineteen eighty six"),
         toolResult("verify_identity", "verified"),
         bot("Thanks, Tobias. You're all verified. What can I help you with today?"),

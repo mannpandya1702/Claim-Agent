@@ -52,19 +52,31 @@ function newestCall(rows: PriorInteraction[], enabled: boolean): Date | null {
 }
 
 /** Verified sentence with optional welcome-back clause. rows = last completed interactions (newest first,
- *  already excluding this call). enabled=false, empty rows -> plain sentence. Date in words in America/New_York. */
-export function verifiedSentence(firstName: string, rows: PriorInteraction[], enabled: boolean, now: Date): string {
+ *  already excluding this call). enabled=false, empty rows -> plain sentence. Date in words in America/New_York.
+ *  callKey picks the phrasing of the opening, as speak.ts does for every verified answer on the call. */
+export function verifiedSentence(
+  firstName: string,
+  rows: PriorInteraction[],
+  enabled: boolean,
+  now: Date,
+  callKey?: string,
+): string {
   // The plain sentence is speak.ts's own, so the two verified answers can never drift apart.
   const newest = newestCall(rows, enabled);
-  if (!newest) return sentenceFor("verified", { first_name: firstName });
-  return `${verifiedThanks(firstName)} Welcome back. I see you called on ${spokenCallDate(newest, now)}. ` +
+  if (!newest) return sentenceFor("verified", { first_name: firstName }, callKey);
+  return `${verifiedThanks(firstName, callKey)} Welcome back. I see you called on ${spokenCallDate(newest, now)}. ` +
     "Is this about the same claim as last time, or something else?";
 }
 
 /** The opening of verify_identity's chained claims read: "Thanks, Tobias. You're all verified.", plus
  *  "Welcome back." when the welcome-back clause would be said. The date of the last call is left out,
  *  so the summary that follows has the rest of one short turn. */
-export function statusOpening(firstName: string, rows: PriorInteraction[], enabled: boolean): string {
-  const thanks = verifiedThanks(firstName);
+export function statusOpening(
+  firstName: string,
+  rows: PriorInteraction[],
+  enabled: boolean,
+  callKey?: string,
+): string {
+  const thanks = verifiedThanks(firstName, callKey);
   return newestCall(rows, enabled) ? `${thanks} Welcome back.` : thanks;
 }

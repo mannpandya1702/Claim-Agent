@@ -158,6 +158,32 @@ Deno.test("asksForSensitive: the model's own wording of a DOB question counts", 
   }
 });
 
+Deno.test("asksForSensitive: a number taken in pieces masks every piece", () => {
+  for (
+    const q of [
+      "Let's take the phone number three digits at a time.",
+      "Got it. And the next three digits?",
+      "And the last four?",
+      "Okay, the first three?",
+    ]
+  ) {
+    assert(asksForSensitive(q), q);
+  }
+  for (const q of ["Your claim ending in four seven two was approved.", "There are three more claims on file."]) {
+    assertFalse(asksForSensitive(q), q);
+  }
+});
+
+Deno.test("redactPII: a read-back with commas between the groups is a phone", () => {
+  assertEquals(
+    redactPII(
+      "I'm not finding an account under six zero two, five five five, zero one nine nine. Is that the right number?",
+    ),
+    "I'm not finding an account under [phone ending 0199]. Is that the right number?",
+  );
+  assertEquals(redactPII("Got it, six zero two, five five five, zero one zero one."), "Got it, [phone ending 0101].");
+});
+
 Deno.test("redactPII: null and undefined pass through as null", () => {
   assertEquals(redactPII(null), null);
   assertEquals(redactPII(undefined), null);

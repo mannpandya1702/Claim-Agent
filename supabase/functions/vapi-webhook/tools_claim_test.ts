@@ -30,17 +30,20 @@ const TODAY = "2026-10-13";
 // file_claim_intake's draw, pinned so the number is known: CLM-482472, spoken "four seven two".
 const DRAW = () => 0.4824725;
 
-const VERIFIED_TOBIAS = "Thanks, Tobias. You're all verified. What can I help you with today?";
+// This call key hears the third phrasing of the verified answer and the intake's thanks, and the second
+// of the filed claim's and the saved details' (speak.ts variantIndex); a read-back's opener is picked by
+// the date and summary it reads (claimReadbackKey). The facts are the same in every phrasing.
+const VERIFIED_TOBIAS = "All right, Tobias, you're verified. How can I help you today?";
 const READBACK_AUTO =
   "Let me make sure I have this right. An auto claim, for backed into in a parking lot, from Saturday, October tenth. Is that correct?";
 const FILED_EMAILED =
-  "You're all set. Your claim number ends in four seven two, and I've emailed the details to the email on file. An adjuster will reach out within one business day. Is there anything else I can help with?";
+  "Thanks for walking me through that. Your claim number ends in four seven two, and I've emailed the details to the email on file. An adjuster will reach out within one business day. Anything else I can help with?";
 const FILED_PLAIN =
-  "You're all set. Your claim number ends in four seven two. An adjuster will reach out within one business day. Is there anything else I can help with?";
+  "Thanks for walking me through that. Your claim number ends in four seven two. An adjuster will reach out within one business day. Anything else I can help with?";
 const ALREADY_FILED =
   "Your claim is already filed, with a number ending in four seven two. Is there anything else I can help with?";
 const SAVED_JANE =
-  "Thanks, Jane. I've passed your claim details to our claims team, and sent a confirmation to your email. A specialist will call you within one business day to finish setting it up. Is there anything else I can help with?";
+  "All right, Jane. I've sent your claim details to our claims team, and a confirmation to your email. A specialist will call you within one business day to finish setting it up. Can I help with anything else?";
 
 const AUTO_ARGS = {
   claim_type: "auto",
@@ -186,7 +189,7 @@ Deno.test("verify intent file_claim: the verified opening leads straight into th
   assertEquals(r, {
     code: "verified",
     sentence:
-      "Thanks, Tobias. You're all verified. I'm sorry you're dealing with this. Let's get your claim started. Can you tell me a little more about what happened?",
+      "All right, Tobias, you're verified. I'm sorry you're dealing with this. Let's get your claim started. Can you tell me a little more about what happened?",
     data: { first_name: "Tobias" },
   });
   // nothing else is read or recorded for it
@@ -198,7 +201,7 @@ Deno.test("verify intent file_claim after start_claim asked for verification: ta
   await lookup(h, "6025550101");
   // the caller told the loss before the date of birth; start_claim sent them to verify first
   assertEquals((await h.run("start_claim", AUTO_ARGS)).code, "claim_needs_verification");
-  const resume = "Thanks, Tobias. You're all verified. Shall I go ahead and take down that claim now?";
+  const resume = "All right, Tobias, you're verified. Shall I go ahead and take down that claim now?";
   const args = { dob_month: 3, dob_day: 14, dob_year: 1986, intent: "file_claim" };
   assertEquals((await h.run("verify_identity", args, "tc_v")).sentence, resume);
   // a replay of the same delivery says the same
@@ -222,17 +225,17 @@ Deno.test("verify intent file_claim keeps the welcome-back clause and replaces o
   });
   assertEquals(
     (await verifyTobias(h, { intent: "file_claim" })).sentence,
-    "Thanks, Tobias. You're all verified. Welcome back. I see you called on October tenth. I'm sorry you're dealing with this. Let's get your claim started. Can you tell me a little more about what happened?",
+    "All right, Tobias, you're verified. Welcome back. I see you called on October tenth. I'm sorry you're dealing with this. Let's get your claim started. Can you tell me a little more about what happened?",
   );
 });
 
 Deno.test("verify intent claim_status: the claims are read in the same call and recorded as a status read", async () => {
   const h = harness();
   const r = await verifyTobias(h, { intent: "claim_status" }, "tc_verify");
-  const status = claimsSentence(tobiasClaims(h), TODAY);
+  const status = claimsSentence(tobiasClaims(h), TODAY, MAX_TURN_WORDS, CALL_KEY);
   assertEquals(r, {
     code: "verified",
-    sentence: `Thanks, Tobias. You're all verified. ${status}`,
+    sentence: `All right, Tobias, you're verified. ${status}`,
     data: {
       first_name: "Tobias",
       status_read: true,
@@ -273,11 +276,11 @@ Deno.test("verify intent claim_status for a returning caller: welcome back, with
     ended_at: "2026-10-11T02:36:00Z",
     analysis_status: "ok",
   });
-  const opening = "Thanks, Tobias. You're all verified. Welcome back.";
+  const opening = "All right, Tobias, you're verified. Welcome back.";
   const r = await verifyTobias(h, { intent: "claim_status" });
   assertEquals(
     r.sentence,
-    `${opening} ${claimsSentence(tobiasClaims(h), TODAY, MAX_TURN_WORDS - spokenWords(opening))}`,
+    `${opening} ${claimsSentence(tobiasClaims(h), TODAY, MAX_TURN_WORDS - spokenWords(opening), CALL_KEY)}`,
   );
   assert(!r.sentence.includes("I see you called"), r.sentence);
   // both claims still fit the turn after the longer opening
@@ -291,7 +294,7 @@ Deno.test("verify intent claim_status: no claims gives the no_claims sentence af
   const r = await verifyAs(h, "6025550105", [5, 9, 1990], { intent: "claim_status" }, "tc_v");
   assertEquals(
     r.sentence,
-    "Thanks, Ines. You're all verified. I'm not seeing any claims on file for your account. Would you like me to explain how to start one?",
+    "All right, Ines, you're verified. I'm not seeing any claims on file for your account. Would you like me to explain how to start one?",
   );
   assertEquals(r.data, { first_name: "Ines", status_read: true, claims: [] });
   assertEquals(h.attempts().at(-1)?.code, "no_claims");
@@ -340,7 +343,7 @@ Deno.test("verify intent claim_status: a busy account still fits one turn after 
     });
   }
   const r = await verifyTobias(h, { intent: "claim_status" });
-  assert(r.sentence.startsWith("Thanks, Tobias. You're all verified. You have fourteen claims."), r.sentence);
+  assert(r.sentence.startsWith("All right, Tobias, you're verified. You have fourteen claims."), r.sentence);
   assert(spokenWords(r.sentence) <= MAX_TURN_WORDS, `${spokenWords(r.sentence)} words`);
   assertStringIncludes(r.sentence, "more claims on file");
 });
@@ -842,7 +845,7 @@ Deno.test("start_claim: the read-back never repeats the caller's first person as
   // "my" and "our" are said as "your"
   assertEquals(
     await said("a tree branch on my roof"),
-    "Let me make sure I have this right. A home claim, for a tree branch on your roof, from Friday, October ninth. Is that correct?",
+    "Let me check I have this right. A home claim, for a tree branch on your roof, from Friday, October ninth. Is that correct?",
   );
   assertEquals(h.intake()?.summary, "a tree branch on your roof");
   assertStringIncludes(await said("Our basement flooded"), "for your basement flooded,");
@@ -895,7 +898,7 @@ Deno.test("start_claim: a year other than this one is said in the read-back", as
   const r = await h.run("start_claim", { ...AUTO_ARGS, loss_date: "December 24", summary: "" });
   assertEquals(
     r.sentence,
-    "Let me make sure I have this right. An auto claim from Wednesday, December twenty-fourth, twenty twenty five. Is that correct?",
+    "Let me check I have this right. An auto claim from Wednesday, December twenty-fourth, twenty twenty five. Is that correct?",
   );
 });
 
@@ -1134,7 +1137,7 @@ Deno.test("lead intake: a confirmed new caller's loss is taken for a specialist,
   });
   assertEquals(
     read.sentence,
-    "Let me make sure I have this right. A property claim, for break-in at your rental, from Saturday, October tenth. Is that correct?",
+    "Let me check I have this right. A property claim, for break-in at your rental, from Saturday, October tenth. Is that correct?",
   );
   assertEquals([h.intake()?.kind, h.intake()?.customer_id], ["lead_intake", null]);
 
@@ -1184,7 +1187,7 @@ Deno.test("lead intake without an email: saved, and no confirmation is promised"
   const r = await h.run("confirm_claim", { correct: true });
   assertEquals(
     r.sentence,
-    "Thanks, Jane. I've passed your claim details to our claims team. A specialist will call you within one business day to finish setting it up. Is there anything else I can help with?",
+    "All right, Jane. I've sent your claim details to our claims team. A specialist will call you within one business day to finish setting it up. Can I help with anything else?",
   );
   assertEquals(h.resendCalls().map((c) => body(c).to[0]), ["team@example.com"]);
 });
@@ -1208,7 +1211,7 @@ Deno.test("new caller who came to report a loss: once their details are saved, t
   });
   const resume: ToolResult = {
     code: "contact_saved_new",
-    sentence: "Perfect, I've saved your details. Shall I go ahead and take down that claim now?",
+    sentence: "Your details are saved now. Shall I go ahead and take down that claim now?",
     data: { first_name: "Jane", resume_claim: true },
   };
   assertEquals(await t.run("confirm_contact", { correct: true }, "tc_yes"), resume);
@@ -1236,10 +1239,10 @@ Deno.test("lead intake: no number to call back on asks for one before the claim 
     email: "jane.doe42@gmail.com",
     callback_phone: "6025550177",
   });
-  assertStringIncludes(read.sentence, "six zero two... five five five... zero one seven seven");
+  assertStringIncludes(read.sentence, "six zero two, five five five, zero one seven seven");
   assertEquals(
     (await h.run("confirm_contact", { correct: true })).sentence,
-    "Perfect, I've saved your details. Shall I go ahead and take down that claim now?",
+    "Your details are saved now. Shall I go ahead and take down that claim now?",
   );
   assertEquals((await h.run("start_claim", loss)).code, "claim_readback");
   // a phone call's caller id is a number to call: no question

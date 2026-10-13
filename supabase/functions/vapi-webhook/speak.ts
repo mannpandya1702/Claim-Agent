@@ -44,16 +44,11 @@ const MAX_NAME_CHARS = 60;
 // ---------------------------------------------------------------------------------------------
 const ANYTHING_ELSE = "Anything else I can help with?";
 const BAD_ARGS = "Sorry, I didn't quite catch that. Could you say it again?";
+// "on our end", never "system" (rules.md rule 5): the model reads this one aloud, so it says nothing the
+// prompt tells it never to say.
 const SYSTEM_ERROR =
-  "Sorry, I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?";
+  "Sorry, I'm having trouble on our end right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?";
 const INVALID_PHONE = "Sorry, I'll need the full ten-digit number on the account. Could you say it again?";
-// The new-caller branch starts here: the sentence ends the turn, so it asks for the name itself. It
-// says "if you're new", so a policyholder whose account is under another number can say so and be
-// offered a callback instead of new-claim intake (branches-identity.md NOT FOUND).
-const NOT_FOUND_FINAL =
-  "I'm sorry, I still can't find an account for that number. If you're new with us, I'd be glad to help you get started. Could I get your first and last name?";
-// "the date of birth on the account": a caller may be asking about a spouse's or a client's account.
-const NEEDS_DOB = "Thanks! And just to keep your account safe, what's the date of birth on the account?";
 const ALREADY_VERIFIED = "You're already verified, so we're all set there. What can I help you with?";
 // One apology for a lock: the lock's other sentences (claim_locked) do not say sorry again.
 // The steps before a lock (auth_failed, dob_unreadable) do not say sorry, so the apology is not stacked.
@@ -61,10 +56,12 @@ const LOCKED =
   "I'm sorry, but I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?";
 const AUTH_FAILED =
   "That doesn't quite match what we have on file. Could you give me your date of birth one more time?";
-const NO_LOOKUP_YET = "Happy to check that. First, I'll just need the phone number on the account. What's the number?";
+// Plain "I can", not the stock "Happy to" (style.md: no call-center phrases), and no "Sure": the
+// lookup filler that follows the number opens with it.
+const NO_LOOKUP_YET = "I can check that. First, I'll just need the phone number on the account. What's the number?";
 const DOB_UNREADABLE = "Just to be sure, could you give me the month, day and year?";
-const NOT_VERIFIED_PHONE_FOUND = "Happy to help with that once you're verified. What's the date of birth?";
-const NOT_VERIFIED_NONE = "Happy to help with that once I've verified you. What's the phone number on your account?";
+const NOT_VERIFIED_PHONE_FOUND = "I can help with that once you're verified. What's the date of birth?";
+const NOT_VERIFIED_NONE = "I can help with that once I've verified you. What's the phone number on your account?";
 const NO_CLAIMS = "I'm not seeing any claims on file for your account. Would you like me to explain how to start one?";
 const REP_QUEUED_NO_NUMBER =
   "Done, I've sent your request to our claims team. What's the best number for a representative to reach you?";
@@ -76,11 +73,6 @@ const REP_UNAVAILABLE =
 // The emergency lines keep their safety content word for word; they may only get warmer, never longer.
 const EMERGENCY_LOGGED = "I've told our team. Are you safe right now?";
 const EMERGENCY_DB_FAILED = "Please stay on the line. Are you safe right now?";
-const EMAIL_SENT =
-  `There you go, I've emailed that to the address on your account. It should arrive within a few minutes. ${ANYTHING_ELSE}`;
-// A new caller's copy goes to the address they spelled on this call, not to any account.
-const EMAIL_SENT_GIVEN =
-  `There you go, I've emailed that to the address you gave me. It should arrive within a few minutes. ${ANYTHING_ELSE}`;
 const EMAIL_ALREADY_SENT = `No worries, I've already sent that to your email on this call. ${ANYTHING_ELSE}`;
 // A spelled address goes to staff as a pending update (capture_contact); nothing is sent to it.
 const NO_EMAIL_ON_FILE =
@@ -138,6 +130,152 @@ const WEEKDAY_NAMES = "Sunday Monday Tuesday Wednesday Thursday Friday Saturday"
 const MAX_READBACK_SUMMARY_CHARS = 80;
 
 // ---------------------------------------------------------------------------------------------
+// Variety. The sentences a caller hears most come in three phrasings with the same facts, the same
+// honest-result clause and the same kind of closing question, so two calls do not sound alike. Which
+// one a call hears is a pure function of the call key and the code (variantIndex), and for a lookup
+// miss or a claim read-back of what it reads back too, so a second number or a corrected claim is not
+// always framed the same way: a VAPI retry of the same toolCallId, a ledger replay and every later
+// answer on the call with the same facts get the same words. Without a call key (docs, most tests) a
+// sentence is its first phrasing. Each list keeps the cue words the endpointing rules and the
+// transcript masking key on ("date of birth", "right number", "that number", "your email is", "the
+// best number is").
+// ---------------------------------------------------------------------------------------------
+/** How many phrasings each varied sentence has. */
+export const PHRASINGS = 3;
+
+/** The phrasing a call hears for one code: 0..count-1 from FNV-1a over the call key and the code.
+ *  No clock, no randomness and no runtime hash seed, so every replay of the call picks the same one. */
+export function variantIndex(callKey: string | undefined, code: string, count: number = PHRASINGS): number {
+  if (typeof callKey !== "string" || callKey === "" || !Number.isInteger(count) || count <= 1) return 0;
+  const text = `${callKey}|${code}`;
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash % count;
+}
+
+function pick<T>(choices: readonly T[], callKey: string | undefined, code: string): T {
+  return choices[variantIndex(callKey, code, choices.length)];
+}
+
+// "the date of birth on the account": a caller may be asking about a spouse's or a client's account.
+// No thanks here: the caller has only given a number, and the verified opening that answers the date
+// of birth thanks them (VERIFIED_OPENINGS), so two turns in a row never both open with it.
+const NEEDS_DOB = [
+  "Got it. And just to keep your account safe, what's the date of birth on the account?",
+  "To keep your account safe, what's the date of birth on the account?",
+  "Just to be safe, could you tell me the date of birth on the account?",
+] as const;
+// The first lookup miss reads the number back and asks whether it is right ("right number" is the
+// endpointing cue for a corrected number in progress). The lead is picked per number, so a second
+// number that misses is not always framed the same way as the first.
+const NOT_FOUND_LEADS = [
+  "I'm not finding an account under",
+  "I don't see an account under",
+  "I couldn't find an account under",
+] as const;
+// The new-caller branch starts here: the sentence ends the turn, so it asks for the name itself. It
+// says "if you're new", so a policyholder whose account is under another number can say so and be
+// offered a callback instead of new-claim intake (branches-identity.md NOT FOUND).
+const NOT_FOUND_FINAL = [
+  "I'm sorry, I still can't find an account for that number. If you're new with us, I'd be glad to help you get started. Could I get your first and last name?",
+  "I'm sorry, there's still no account under that number. If you're new with us, I can help you get started. Could I get your first and last name?",
+  "Sorry, I still can't find an account for that number. If you're new with us, I can get you started. Could I get your first and last name?",
+] as const;
+// The verified opening every verified answer shares (verifiedThanks), with the plain answer's question.
+// Each opening has the same number of spoken words, so the chained claims read that follows it gets
+// the same share of the turn and says the same claims whichever phrasing the call hears.
+const VERIFIED_OPENINGS = [
+  (name: string) => (name ? `Thanks, ${name}. You're all verified.` : "Thanks. You're all verified."),
+  (name: string) => (name ? `Thank you, ${name}. You're verified.` : "Thank you. You're verified."),
+  (name: string) => (name ? `All right, ${name}, you're verified.` : "All right, you're verified."),
+] as const;
+const VERIFIED_QUESTIONS = [
+  "What can I help you with today?",
+  "What can I do for you today?",
+  "How can I help you today?",
+] as const;
+// rep_queued: "passed" and "sent" mean Telegram or the team email confirmed delivery (rep_recorded
+// otherwise); the callback, its target and its timeframe are the same in every phrasing.
+const REP_QUEUED_LEADS = [
+  "I've passed this to our claims team.",
+  "Your request is with our claims team now.",
+  "I've sent this to our claims team.",
+] as const;
+const ANYTHING_ELSES = [ANYTHING_ELSE, ANYTHING_ELSE_SHORT, "Can I help with anything else?"] as const;
+// "emailed" only when Resend returned an id (the honest-result rule). A new caller's copy goes to the
+// address they spelled on this call, not to any account. No phrasing opens the way a rep_queued one
+// does, since the two often come back to back.
+const EMAIL_SENT = [
+  (to: string) => `There you go, I've emailed that to ${to}. It should arrive within a few minutes. ${ANYTHING_ELSE}`,
+  (to: string) => `Done, I've emailed that to ${to}. It should be there within a few minutes. ${ANYTHING_ELSE_SHORT}`,
+  (to: string) =>
+    `Okay, I've emailed that to ${to}, and it should arrive within a few minutes. Can I help with anything else?`,
+] as const;
+// Calm, not cheerful: a fire, a flood or an injury is often what was just filed.
+const CLAIM_FILED_OPENERS = [
+  "You're all set.",
+  "Thanks for walking me through that.",
+  "That's taken care of.",
+] as const;
+// The closing question of the claim answers (claim_filed, claim_intake_saved), first phrasing first.
+const CLAIM_CLOSINGS = [ANYTHING_ELSE_SHORT, ANYTHING_ELSE, "Can I help with anything else?"] as const;
+// claim_intake_saved: the details went to the team (and the confirmation, when Resend took it).
+const INTAKE_SAVED = [
+  (thanks: string, mail: boolean) =>
+    `${thanks} I've passed your claim details to our claims team${
+      mail ? ", and sent a confirmation to your email" : ""
+    }.`,
+  (thanks: string, mail: boolean) =>
+    `${thanks} Your claim details are with our claims team now${
+      mail ? ", and I've sent a confirmation to your email" : ""
+    }.`,
+  (thanks: string, mail: boolean) =>
+    `${thanks} I've sent your claim details to our claims team${mail ? ", and a confirmation to your email" : ""}.`,
+] as const;
+const INTAKE_THANKS = [
+  (name: string) => (name ? `Thanks, ${name}.` : "Thanks."),
+  (name: string) => (name ? `Thank you, ${name}.` : "Thank you."),
+  (name: string) => (name ? `All right, ${name}.` : "All right."),
+] as const;
+// contact_saved_new: the read-back just thanked them, so none of these thanks them again, and none is
+// cheerful ("Perfect", "Great"): a reported loss often comes next (RESUME_CLAIM_QUESTION).
+const CONTACT_SAVED_OPENERS = [
+  "I've saved your details.",
+  "Your details are saved now.",
+  "I've got your details saved.",
+] as const;
+const CHOICE_QUESTIONS = ["Which would you like?", "What would you prefer?", "Which would be best for you?"] as const;
+// start_claim's read-back: only the opener changes; the claim, the date and "Is that correct?" stay.
+// None shares words with a contact read-back opener, since a new caller hears both a few turns apart.
+// Exported for the battery's start_claim mock, which picks one the way claimReadbackOpener does.
+export const CLAIM_READBACK_OPENERS = [
+  "Let me make sure I have this right.",
+  "Let me check I have this right.",
+  "So, to make sure I've got it right.",
+] as const;
+// capture_contact's read-back openers, with an email (spelled after "your email is") and without one.
+const CONTACT_READBACK_OPENERS = [
+  { spelled: "Thanks! Let me read that back.", plain: "Thanks! Just to confirm, that's" },
+  { spelled: "Thanks! Here's what I have.", plain: "Thanks! So that's" },
+  { spelled: "Thank you. Let me read that back.", plain: "Thank you. Just to check, that's" },
+] as const;
+
+/** The variant key of a claim read-back: the date and the summary it reads, so a replay of the same
+ *  read-back gets the same opener and a corrected one is picked afresh. */
+export function claimReadbackKey(lossDate: string, summary: string): string {
+  return `claim_readback|${lossDate}|${summary}`;
+}
+
+/** start_claim's read-back opener for this call and this read-back ("Let me make sure I have this
+ *  right."): lossDate is the ISO date it reads and summary the phrase it says ("" when it says none). */
+export function claimReadbackOpener(callKey?: string, lossDate = "", summary = ""): string {
+  return pick(CLAIM_READBACK_OPENERS, callKey, claimReadbackKey(lossDate, summary));
+}
+
+// ---------------------------------------------------------------------------------------------
 // Number and date words.
 // ---------------------------------------------------------------------------------------------
 function digitsOf(v: unknown): string {
@@ -149,13 +287,14 @@ export function speakDigits(digits: string): string {
   return [...digitsOf(digits)].map((c) => SMALL[Number(c)]).join(" ");
 }
 
-/** "+16025550199" or "6025550199" -> "six zero two... five five five... zero one nine nine". */
+/** "+16025550199" or "6025550199" -> "six zero two, five five five, zero one nine nine". */
 export function speakPhone(phone: string): string {
   let d = digitsOf(phone);
   if (d.length === 11 && d[0] === "1") d = d.slice(1);
-  // Three groups with a pause, the way a person reads a number back.
+  // Three groups with a comma between them, the way a person reads a number back: a comma gives a
+  // short, even pause, where an ellipsis made the voice trail off and sound unsure.
   if (d.length !== 10) return speakDigits(d);
-  return `${speakDigits(d.slice(0, 3))}... ${speakDigits(d.slice(3, 6))}... ${speakDigits(d.slice(6))}`;
+  return `${speakDigits(d.slice(0, 3))}, ${speakDigits(d.slice(3, 6))}, ${speakDigits(d.slice(6))}`;
 }
 
 function belowThousand(n: number): string {
@@ -595,17 +734,43 @@ function summaryItems(claims: Claim[], refYear: number | undefined): SummaryItem
   return items;
 }
 
-/** The one question the summary ends on: what the claims read lead to next. */
-function summaryQuestion(read: Claim[], total: number): string {
+/** The question the summary ends on, in each of its phrasings: what the claims read lead to next. The
+ *  options keep their order in every phrasing ("the second one" is always the email), and the denial's
+ *  keeps "the reason" and "appeal", which the prompt's yes is about. */
+function summaryQuestions(read: Claim[], total: number): readonly string[] {
   if (read.some((c) => c.status === "awaiting_documents")) {
-    return "Would you like me to go over what's needed, or email you the list?";
+    return [
+      "Would you like me to go over what's needed, or email you the list?",
+      "Should I go over what's needed, or email you the list?",
+      "Do you want me to go over what's needed, or email you the list?",
+    ];
   }
-  if (read.some((c) => c.status === "denied")) return "Would you like to hear the reason and how to appeal?";
-  return `Do you have any questions about ${total === 1 ? "it" : total === 2 ? "either one" : "any of them"}?`;
+  if (read.some((c) => c.status === "denied")) {
+    return [
+      "Would you like to hear the reason and how to appeal?",
+      "Shall I go over the reason and how to appeal?",
+      "Do you want to hear the reason and how to appeal?",
+    ];
+  }
+  const them = total === 1 ? "it" : total === 2 ? "either one" : "any of them";
+  // "Any questions about any of them?" says "any" twice: the shorter phrasings say "them".
+  const short = total === 1 ? "it" : total === 2 ? "either one" : "them";
+  return [
+    `Do you have any questions about ${them}?`,
+    `Any questions about ${short}?`,
+    `Anything you'd like to know about ${short}?`,
+  ];
 }
 
-/** The summary as spoken, and the claims it named (in reading order); the rest were only counted. */
-function summaryPlan(claims: Claim[], refDate: string, maxWords: number): { text: string; read: Claim[] } {
+/** The summary as spoken, and the claims it named (in reading order); the rest were only counted.
+ *  How many clauses are read is decided against every phrasing of the closing question, so the
+ *  phrasing a call hears never changes which claims it names. */
+function summaryPlan(
+  claims: Claim[],
+  refDate: string,
+  maxWords: number,
+  callKey?: string,
+): { text: string; read: Claim[] } {
   if (!Array.isArray(claims) || claims.length === 0) throw new Error("claimsSentence: no claims");
   const total = claims.length;
   const items = summaryItems(claims, refYearOf(refDate));
@@ -619,16 +784,17 @@ function summaryPlan(claims: Claim[], refDate: string, maxWords: number): { text
       : rest === 1
       ? "There's one more claim on file."
       : `There are ${numberToWords(rest)} more claims on file.`;
-    const text = [lead, ...items.slice(0, count).map((item) => item.text), more, summaryQuestion(read, total)]
-      .filter(Boolean)
-      .join(" ");
-    return { text, read };
+    const texts = summaryQuestions(read, total).map((question) =>
+      [lead, ...items.slice(0, count).map((item) => item.text), more, question].filter(Boolean).join(" ")
+    );
+    return { texts, read };
   };
   let count = Math.min(MAX_SUMMARY_ITEMS, items.length);
   let plan = compose(count);
-  while (count > 1 && spokenWords(plan.text) > maxWords) plan = compose(--count);
-  assertSpeakable(plan.text);
-  return plan;
+  while (count > 1 && plan.texts.some((t) => spokenWords(t) > maxWords)) plan = compose(--count);
+  const text = pick(plan.texts, callKey, "ok");
+  assertSpeakable(text);
+  return { text, read: plan.read };
 }
 
 /** get_claim_status's summary (code ok) for a verified caller's claims (non-empty list): "You have two
@@ -637,9 +803,14 @@ function summaryPlan(claims: Claim[], refDate: string, maxWords: number): { text
  *  maxWords; the claims left over are counted ("There's one more claim on file."), never dropped
  *  silently, and a question about which claim offers them first (claimsUnread). refDate = today
  *  (YYYY-MM-DD) in America/New_York. verify_identity's chained read passes what is left of the turn
- *  after its opening. */
-export function claimsSentence(claims: Claim[], refDate: string, maxWords: number = MAX_TURN_WORDS): string {
-  return summaryPlan(claims, refDate, maxWords).text;
+ *  after its opening. callKey picks the closing question's phrasing (variantIndex). */
+export function claimsSentence(
+  claims: Claim[],
+  refDate: string,
+  maxWords: number = MAX_TURN_WORDS,
+  callKey?: string,
+): string {
+  return summaryPlan(claims, refDate, maxWords, callKey).text;
 }
 
 /** The claims the default summary (a whole turn's words) only counted, in reading order. */
@@ -953,25 +1124,23 @@ function fromClaims(d: Record<string, unknown>, compose: (claims: Claim[], refDa
   }
 }
 
-function repQueued(d: Record<string, unknown>): string {
+function repQueued(d: Record<string, unknown>, callKey?: string): string {
   const last4 = digitsOf(d.digits).slice(-4);
   let at = "";
   if (d.target === "account") at = " at the number on your account";
   else if (d.target === "given") {
     at = last4 ? ` at the number you gave me, ending in ${speakDigits(last4)},` : " at the number you gave me";
   } else if (d.target === "caller_id") at = " at the number you're calling from";
-  // "passed": rep_queued means Telegram or the team email confirmed delivery (rep_recorded otherwise).
-  // With the account or caller-id number this is 28 spoken words, so VAPI speaks it with no model turn.
-  return `I've passed this to our claims team. Someone will call you back${at} within one business day. ${ANYTHING_ELSE}`;
+  const i = variantIndex(callKey, "rep_queued");
+  return `${REP_QUEUED_LEADS[i]} Someone will call you back${at} within one business day. ${ANYTHING_ELSES[i]}`;
 }
 
 /** "Thanks, Tobias. You're all verified." The opening every verified sentence shares (the plain one here,
  *  prior_contacts' welcome-back variant, and the chained claims read and file-claim openings built from
- *  them), so the name is cleaned the same way in all. It stays neutral ("Thanks", not "Perfect"): a
- *  denial or a reported loss can follow it in the same breath. */
-export function verifiedThanks(firstName: unknown): string {
-  const name = speakableName(firstName);
-  return name ? `Thanks, ${name}. You're all verified.` : "Thanks. You're all verified.";
+ *  them), so the name is cleaned the same way in all, and one call hears one phrasing of it. It stays
+ *  neutral ("Thanks", not "Perfect"): a denial or a reported loss can follow it in the same breath. */
+export function verifiedThanks(firstName: unknown, callKey?: string): string {
+  return pick(VERIFIED_OPENINGS, callKey, "verified")(speakableName(firstName));
 }
 
 /** The verified sentence without its closing question: "Thanks, Tobias. You're all verified." (the
@@ -1016,7 +1185,7 @@ function readbackSummary(raw: unknown): string {
 /** start_claim's read-back from {claim_type, loss_date, summary?, today?}: "Let me make sure I have
  *  this right. An auto claim, for a cracked windshield, from Saturday, October tenth. Is that
  *  correct?" The year is said only when it is not this year (today's). */
-function claimReadback(d: Record<string, unknown>): string {
+function claimReadback(d: Record<string, unknown>, callKey?: string): string {
   const type = typeof d.claim_type === "string" && (CLAIM_TYPES as readonly string[]).includes(d.claim_type)
     ? d.claim_type
     : "";
@@ -1032,11 +1201,10 @@ function claimReadback(d: Record<string, unknown>): string {
   if (!type || !when) return CLAIM_READBACK_PLAIN;
   const article = type === "auto" ? "An" : "A";
   const summary = readbackSummary(d.summary);
-  const full = `Let me make sure I have this right. ${article} ${type} claim${
-    summary ? `, for ${summary},` : ""
-  } from ${when}. Is that correct?`;
+  const opener = claimReadbackOpener(callKey, typeof d.loss_date === "string" ? d.loss_date.trim() : "", summary);
+  const full = `${opener} ${article} ${type} claim${summary ? `, for ${summary},` : ""} from ${when}. Is that correct?`;
   if (isSpeakable(full)) return full;
-  const plain = `Let me make sure I have this right. ${article} ${type} claim from ${when}. Is that correct?`;
+  const plain = `${opener} ${article} ${type} claim from ${when}. Is that correct?`;
   return isSpeakable(plain) ? plain : CLAIM_READBACK_PLAIN;
 }
 
@@ -1051,7 +1219,7 @@ function nationalDigits(v: unknown): string | null {
  *  (a number taken from caller id is not read back: nobody said it, so nothing can be misheard).
  *  Without a speakable name there is nothing to read back, so the plain confirmation question stands
  *  in (the tool never stores such a name). */
-function contactReadback(d: Record<string, unknown>): string {
+function contactReadback(d: Record<string, unknown>, callKey?: string): string {
   const first = speakableName(d.first_name);
   const full = speakableName(
     `${typeof d.first_name === "string" ? d.first_name : ""} ${typeof d.last_name === "string" ? d.last_name : ""}`,
@@ -1068,15 +1236,16 @@ function contactReadback(d: Record<string, unknown>): string {
   const digits = nationalDigits(d.callback_phone);
   const number = digits ? `the best number is ${speakPhone(digits)}` : "";
   // The full name is the first thing read back, so the thanks before it does not say the name too.
+  const { spelled, plain } = pick(CONTACT_READBACK_OPENERS, callKey, "contact_readback");
   let text: string;
   if (email && number) {
-    text = `Thanks! Let me read that back. ${full}, your email is ${email}, and ${number}. Did I get that right?`;
+    text = `${spelled} ${full}, your email is ${email}, and ${number}. Did I get that right?`;
   } else if (email) {
-    text = `Thanks! Let me read that back. ${full}, and your email is ${email}. Did I get that right?`;
+    text = `${spelled} ${full}, and your email is ${email}. Did I get that right?`;
   } else if (number) {
-    text = `Thanks! Just to confirm, that's ${full}, and ${number}. Did I get that right?`;
+    text = `${plain} ${full}, and ${number}. Did I get that right?`;
   } else {
-    text = `Thanks! Just to confirm, that's ${full}. Did I get that right?`;
+    text = `${plain} ${full}. Did I get that right?`;
   }
   return isSpeakable(text) && text.length <= MAX_SPOKEN_CHARS ? text : CONTACT_READBACK_PLAIN;
 }
@@ -1094,8 +1263,9 @@ function contactRetry(d: Record<string, unknown>): string {
   return `Sorry about that. What did I get wrong, ${which}?`;
 }
 
-/** Code -> sentence. data carries the few dynamic parts (see CONTRACTS). */
-export function sentenceFor(code: Code, data?: Record<string, unknown>): string {
+/** Code -> sentence. data carries the few dynamic parts (see CONTRACTS); callKey picks the phrasing of
+ *  the sentences that have several (variantIndex), and without it every sentence is its first phrasing. */
+export function sentenceFor(code: Code, data?: Record<string, unknown>, callKey?: string): string {
   const d = data ?? {};
   switch (code) {
     case "bad_args":
@@ -1107,21 +1277,20 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
       return INVALID_PHONE;
     case "not_found": {
       const digits = nationalDigits(d.digits);
-      return digits
-        ? `I'm not finding an account under ${speakPhone(digits)}. Is that the right number?`
-        : "I'm not finding an account under that number. Is that the right number?";
+      const lead = pick(NOT_FOUND_LEADS, callKey, digits ? `${code}|${digits}` : code);
+      return `${lead} ${digits ? speakPhone(digits) : "that number"}. Is that the right number?`;
     }
     case "not_found_final":
-      return NOT_FOUND_FINAL;
+      return pick(NOT_FOUND_FINAL, callKey, code);
     case "needs_dob":
-      return NEEDS_DOB;
+      return pick(NEEDS_DOB, callKey, code);
     case "already_verified":
       return ALREADY_VERIFIED;
     case "locked":
     case "dob_give_up":
       return LOCKED;
     case "verified":
-      return `${verifiedThanks(d.first_name)} What can I help you with today?`;
+      return `${verifiedThanks(d.first_name, callKey)} ${pick(VERIFIED_QUESTIONS, callKey, code)}`;
     case "auth_failed":
       return AUTH_FAILED;
     case "no_lookup_yet":
@@ -1129,7 +1298,7 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
     case "dob_unreadable":
       return DOB_UNREADABLE;
     case "ok":
-      return fromClaims(d, claimsSentence);
+      return fromClaims(d, (claims, refDate) => claimsSentence(claims, refDate, MAX_TURN_WORDS, callKey));
     case "no_claims":
       return NO_CLAIMS;
     case "claim_documents":
@@ -1148,7 +1317,7 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
       if (d.level === "locked") return LOCKED;
       return NOT_VERIFIED_NONE;
     case "rep_queued":
-      return repQueued(d);
+      return repQueued(d, callKey);
     case "rep_queued_no_number":
       return REP_QUEUED_NO_NUMBER;
     case "callback_updated": {
@@ -1164,7 +1333,9 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
     case "emergency_logged":
       return d.db_failed === true ? EMERGENCY_DB_FAILED : EMERGENCY_LOGGED;
     case "email_sent":
-      return d.target === "given" ? EMAIL_SENT_GIVEN : EMAIL_SENT;
+      return pick(EMAIL_SENT, callKey, code)(
+        d.target === "given" ? "the address you gave me" : "the address on your account",
+      );
     case "email_already_sent":
       return EMAIL_ALREADY_SENT;
     case "no_email_on_file":
@@ -1172,7 +1343,7 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
     case "email_failed":
       return EMAIL_FAILED;
     case "contact_readback":
-      return contactReadback(d);
+      return contactReadback(d, callKey);
     case "contact_invalid_email":
       return CONTACT_INVALID_EMAIL;
     case "contact_needs_name":
@@ -1191,18 +1362,23 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
       // A start_claim already asked for these details first: the loss was told, so it is taken down now.
       // Otherwise taking it down on this call comes first; without an address there is nothing to email
       // the steps to, so the website stands in.
+      const i = variantIndex(callKey, code);
       const offer = d.resume_claim === true
         ? RESUME_CLAIM_QUESTION
         : d.has_email === false
-        ? `I can take down what happened now, have someone from our claims team call you back, or you can find the steps to start a claim at ${CLAIMS_URL_SPOKEN}. Which would you like?`
-        : "I can take down what happened now, email you the steps to start a claim, or have someone from our claims team call you back. Which would you like?";
-      return `Perfect, I've saved your details. ${offer}`;
+        ? `I can take down what happened now, have someone from our claims team call you back, or you can find the steps to start a claim at ${CLAIMS_URL_SPOKEN}. ${
+          CHOICE_QUESTIONS[i]
+        }`
+        : `I can take down what happened now, email you the steps to start a claim, or have someone from our claims team call you back. ${
+          CHOICE_QUESTIONS[i]
+        }`;
+      return `${CONTACT_SAVED_OPENERS[i]} ${offer}`;
     }
     case "contact_saved_existing":
       // The read-back just thanked them and said their name, so this says neither again.
       return "Got it. I've passed that email to our team to add to your account. Is there anything else I can help with?";
     case "claim_readback":
-      return claimReadback(d);
+      return claimReadback(d, callKey);
     case "claim_needs_lookup":
       return CLAIM_NEEDS_LOOKUP;
     case "claim_needs_contact":
@@ -1232,17 +1408,21 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
     case "claim_retry":
       return CLAIM_RETRY;
     case "claim_filed": {
+      const i = variantIndex(callKey, code);
       const last3 = claimLast3(d.claim_last3);
       const number = last3 ? `Your claim number ends in ${speakDigits(last3)}` : "Your claim is filed";
       // "emailed" only when Resend returned an id for the confirmation (the honest-result rule)
       const mail = d.emailed === true ? ", and I've emailed the details to the email on file" : "";
-      return `You're all set. ${number}${mail}. An adjuster will reach out within one business day. ${ANYTHING_ELSE_SHORT}`;
+      return `${CLAIM_FILED_OPENERS[i]} ${number}${mail}. An adjuster will reach out within one business day. ${
+        CLAIM_CLOSINGS[i]
+      }`;
     }
     case "claim_intake_saved": {
-      const name = speakableName(d.first_name);
-      const mail = d.emailed === true ? ", and sent a confirmation to your email" : "";
-      return `${name ? `Thanks, ${name}.` : "Thanks."} I've passed your claim details to our claims team${mail}. ` +
-        `A specialist will call you within one business day to finish setting it up. ${ANYTHING_ELSE_SHORT}`;
+      const i = variantIndex(callKey, code);
+      const saved = INTAKE_SAVED[i](INTAKE_THANKS[i](speakableName(d.first_name)), d.emailed === true);
+      return `${saved} A specialist will call you within one business day to finish setting it up. ${
+        CLAIM_CLOSINGS[i]
+      }`;
     }
     default: {
       // Exhaustive over CODES at compile time; an off-list code at runtime gets the trouble line.

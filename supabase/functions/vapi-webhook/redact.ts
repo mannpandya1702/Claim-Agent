@@ -380,9 +380,13 @@ export function redactPII(text: string | null | undefined): string | null {
 // is", so that answer is withheld the same way: the confirmed address is kept in caller_contacts.
 // The model words its own email questions too ("Could I get your email?", "What email should I
 // use?"), so any question asking for an email counts; "that email" or "email the documents" does not.
+// A number the model takes in pieces after missing it (rules.md rule 23: "Let's take the phone number
+// three digits at a time.", then "And the next three digits?", "And the last four?") asks for each
+// piece without saying "phone number", and a piece is too short for redactPII, so asking for digits
+// or for the next or last group counts too.
 // The window to the question mark is bounded, so a long line costs linear time.
 const SENSITIVE_ASK_RE =
-  /(date of birth|birth ?date|birthday|\bborn\b|\bDOB\b|(month|day|year) of birth|(what|which) year|phone number|number on (the|your) account|ten-digit|ten digit|month, day,? and (the )?year|(best|right) number|reach you|email address|\bspell|your email is|what(?:'s| is) (?:the best |your )?email|\b(?:your|an|which|what) email\b[^.?!]{0,80}\?)/i;
+  /(date of birth|birth ?date|birthday|\bborn\b|\bDOB\b|(month|day|year) of birth|(what|which) year|phone number|number on (the|your) account|ten-digit|ten digit|month, day,? and (the )?year|(best|right) number|reach you|email address|\bspell|your email is|what(?:'s| is) (?:the best |your )?email|\b(?:your|an|which|what) email\b[^.?!]{0,80}\?|\bdigits\b|\b(?:next|last|first) (?:three|four)\b)/i;
 
 /** A short re-ask of whatever the caller just said ("Sorry, I didn't quite catch that. Could you say that
  *  again?", rules.md rule 23, the low-confidence hook, bad_args). Right after a sensitive question it

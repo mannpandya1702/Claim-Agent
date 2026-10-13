@@ -367,7 +367,7 @@ Deno.test("buildInteractionRow: the answers to the phone and DOB questions are m
 // ---------------------------------------------------------------------------------------------
 // Masking across ASR shapes, in all three stored views.
 // ---------------------------------------------------------------------------------------------
-const DOB_QUESTION = "Thanks! And just to keep your account safe, what's the date of birth on the account?";
+const DOB_QUESTION = "Got it. And just to keep your account safe, what's the date of birth on the account?";
 const PHONE_QUESTION = "I can help with that. What's the phone number on your account?";
 const ASR_ANSWERS: [string, string, string[]][] = [
   [DOB_QUESTION, "march 14th 1986", ["14", "1986"]],
@@ -503,6 +503,38 @@ Deno.test("masking: a re-ask right after a DOB question still withholds the repe
   assertEquals(
     maskTranscript(`AI: ${PHONE_QUESTION}\nUser: six oh two\nAI: ${reask}\nUser: six oh two five five five`),
     `AI: ${PHONE_QUESTION}\nUser: ${MASKED_ANSWER}\nAI: ${reask}\nUser: ${MASKED_ANSWER}`,
+  );
+});
+
+Deno.test("masking: a phone number taken in pieces after a re-ask is withheld piece by piece", () => {
+  const pieces = "Let's take the phone number three digits at a time.";
+  assertEquals(
+    maskTranscript(
+      [
+        `AI: ${PHONE_QUESTION}`,
+        "User: six oh two five",
+        `AI: Sorry, I missed part of that. ${pieces}`,
+        "User: six oh two",
+        "AI: Got it. And the next three digits?",
+        "User: five five five",
+        "AI: And the last four?",
+        "User: oh one oh one",
+        "AI: Thanks.",
+        "User: What happens now?",
+      ].join("\n"),
+    ),
+    [
+      `AI: ${PHONE_QUESTION}`,
+      `User: ${MASKED_ANSWER}`,
+      `AI: Sorry, I missed part of that. ${pieces}`,
+      `User: ${MASKED_ANSWER}`,
+      "AI: Got it. And the next three digits?",
+      `User: ${MASKED_ANSWER}`,
+      "AI: And the last four?",
+      `User: ${MASKED_ANSWER}`,
+      "AI: Thanks.",
+      "User: What happens now?",
+    ].join("\n"),
   );
 });
 

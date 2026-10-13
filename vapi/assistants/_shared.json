@@ -12,7 +12,7 @@
     "voice": {
       "provider": "11labs",
       "voiceId": "bP6y87KyX5lwNEi7xOkX",
-      "model": "eleven_turbo_v2_5",
+      "model": "eleven_flash_v2_5",
       "speed": 1.0,
       "stability": 0.45,
       "style": 0.35,
@@ -139,12 +139,12 @@
       {
         "on": "customer.speech.timeout",
         "options": { "timeoutSeconds": 10, "triggerMaxCount": 3, "triggerResetMode": "onUserSpeech" },
-        "do": [{ "type": "say", "exact": "Are you still there? No rush, take your time." }]
+        "do": [{ "type": "say", "exact": "No rush, I'm right here." }]
       },
       {
         "on": "customer.speech.timeout",
         "options": { "timeoutSeconds": 20, "triggerMaxCount": 3, "triggerResetMode": "onUserSpeech" },
-        "do": [{ "type": "say", "exact": "I'm still here whenever you're ready." }]
+        "do": [{ "type": "say", "exact": "Take all the time you need." }]
       },
       {
         "on": "customer.speech.timeout",
@@ -159,7 +159,7 @@
       },
       {
         "on": "assistant.transcriber.endpointedSpeechLowConfidence[confidence=0.1:0.3]",
-        "do": [{ "type": "say", "exact": "Sorry, I missed that. Could you say it one more time?" }]
+        "do": [{ "type": "say", "exact": "Sorry, could you repeat that?" }]
       }
     ],
     "silenceTimeoutSeconds": 45,

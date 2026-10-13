@@ -17,12 +17,12 @@ const TEAGUE = "6b0d6f0e-1c11-4c7a-9a01-000000000104";
 const NOW = new Date("2026-10-12T15:00:00Z");
 
 const READBACK_JANE =
-  "Thanks! Let me read that back. Jane Doe, and your email is J, A, N, E, dot, D, O, E, at gmail dot com. Did I get that right?";
+  "Thanks! Here's what I have. Jane Doe, and your email is J, A, N, E, dot, D, O, E, at gmail dot com. Did I get that right?";
 // The number a caller said is read back too; one taken from caller id is not (nobody said it).
 const READBACK_JANE_NUMBER =
-  "Thanks! Let me read that back. Jane Doe, your email is J, A, N, E, dot, D, O, E, at gmail dot com, and the best number is six zero two... five five five... zero one seven seven. Did I get that right?";
+  "Thanks! Here's what I have. Jane Doe, your email is J, A, N, E, dot, D, O, E, at gmail dot com, and the best number is six zero two, five five five, zero one seven seven. Did I get that right?";
 const SAVED_JANE =
-  "Perfect, I've saved your details. I can take down what happened now, email you the steps to start a claim, or have someone from our claims team call you back. Which would you like?";
+  "Your details are saved now. I can take down what happened now, email you the steps to start a claim, or have someone from our claims team call you back. What would you prefer?";
 
 type Responder = (
   url: string,
@@ -270,7 +270,7 @@ Deno.test("capture_contact: the number a caller said is read back; a caller id n
   });
   assertEquals(
     nameOnly.sentence,
-    "Thanks! Just to confirm, that's Jane Doe, and the best number is six zero two... five five five... zero one seven seven. Did I get that right?",
+    "Thanks! So that's Jane Doe, and the best number is six zero two, five five five, zero one seven seven. Did I get that right?",
   );
   const phone = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550166" });
   const fromCallerId = await phone.run("capture_contact", {
@@ -297,7 +297,7 @@ Deno.test("capture_contact: a correction that leaves the number out keeps the nu
     email: "jayne.doe@gmail.com",
   });
   assertEquals([h.contact()?.callback_phone, h.contact()?.callback_source], ["+16025550177", "argument"]);
-  assertStringIncludes(again.sentence, "the best number is six zero two... five five five... zero one seven seven");
+  assertStringIncludes(again.sentence, "the best number is six zero two, five five five, zero one seven seven");
   // a number said in the correction replaces it
   await h.run("capture_contact", {
     first_name: "Jane",
@@ -341,7 +341,7 @@ Deno.test("capture_contact: no email reads back the name only; a full name in fi
   });
   assertEquals(
     read.sentence,
-    "Thanks! Just to confirm, that's Mary-Jane O'Neil. Did I get that right?",
+    "Thanks! So that's Mary-Jane O'Neil. Did I get that right?",
   );
   assertEquals([
     h.contact()?.first_name,
@@ -355,7 +355,7 @@ Deno.test("capture_contact: no email reads back the name only; a full name in fi
     sentenceFor("contact_saved_new", {
       first_name: "Mary-Jane",
       has_email: false,
-    }),
+    }, CALL_KEY),
   );
 });
 
@@ -572,7 +572,7 @@ Deno.test("verified with no email: the name comes from the account, the address 
   });
   assertEquals(
     read.sentence,
-    "Thanks! Let me read that back. Teague Ashdown, and your email is T, E, A, G, U, E, at gmail dot com. Did I get that right?",
+    "Thanks! Here's what I have. Teague Ashdown, and your email is T, E, A, G, U, E, at gmail dot com. Did I get that right?",
   );
   assertEquals([
     h.contact()?.kind,
@@ -692,7 +692,7 @@ Deno.test("new caller: how_to_start goes to the captured address only after the 
   assertEquals(sent.code, "email_sent");
   assertEquals(
     sent.sentence,
-    "There you go, I've emailed that to the address you gave me. It should arrive within a few minutes. Anything else I can help with?",
+    "Okay, I've emailed that to the address you gave me, and it should arrive within a few minutes. Can I help with anything else?",
   );
   const [mail] = h.resendCalls();
   const b = body(mail);

@@ -41,7 +41,7 @@
     {
       "type": "request-start",
       "blocking": false,
-      "content": "Of course. Let me get that to our team."
+      "content": "Of course, one moment."
     },
     {
       "type": "request-response-delayed",

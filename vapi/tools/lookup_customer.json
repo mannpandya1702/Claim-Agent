@@ -37,7 +37,7 @@
     },
     {
       "type": "request-failed",
-      "content": "Sorry, I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?"
+      "content": "Sorry, I'm having trouble on our end right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?"
     }
   ]
 }

@@ -42,7 +42,9 @@ import { parseLossDate } from "../supabase/functions/vapi-webhook/loss_date.ts";
 import { statusOpening, verifiedSentence } from "../supabase/functions/vapi-webhook/prior_contacts.ts";
 import {
   byReadingPriority,
+  CLAIM_READBACK_OPENERS,
   claimDetailSentence,
+  claimReadbackKey,
   claimsSentence,
   documentsSentence,
   MAX_SPOKEN_CHARS,
@@ -52,6 +54,7 @@ import {
   speakDate,
   speakLossDate,
   spokenWords,
+  variantIndex,
   verifiedFileClaimSentence,
   verifiedStatusSentence,
 } from "../supabase/functions/vapi-webhook/speak.ts";
@@ -234,6 +237,10 @@ export interface ClaimPlan {
   badDate: MockResult;
   tooOld: MockResult;
   requestId: string;
+  // The read-back's openers and this conversation's call key: the mock picks the opener from the date
+  // and the summary it reads, as speak.ts claimReadbackOpener does.
+  openers: string[];
+  callKey: string;
 }
 
 /** capture_contact answers. A read-back needs the spoken name, address and number, so the ones a
@@ -317,10 +324,13 @@ export interface PlanCtx {
   phones: string[]; // every ten-digit number the persona says, so read-backs use real digits
   requestId: string;
   now: Date;
+  // The conversation's stand-in for a call key: it picks the phrasing of every varied sentence the mocks
+  // answer with (speak.ts variantIndex), the same on every turn, as the server's call key does.
+  callKey: string;
 }
 
 function result(ctx: PlanCtx, code: Code, data?: Obj, sentence?: string): MockResult {
-  const message = sentence ?? sentenceFor(code, data);
+  const message = sentence ?? sentenceFor(code, data, ctx.callKey);
   return {
     code,
     message,
@@ -349,7 +359,7 @@ function verifiedAnswer(ctx: PlanCtx, customerId: string | null): MockResult {
   const customer = customerById(customerId);
   const first = customer?.first_name ?? "";
   const prior = ctx.persona.priorCalls;
-  const sentence = verifiedSentence(first, prior ?? [], prior !== undefined, ctx.now);
+  const sentence = verifiedSentence(first, prior ?? [], prior !== undefined, ctx.now, ctx.callKey);
   return result(ctx, "verified", first ? { first_name: first } : undefined, sentence);
 }
 
@@ -362,10 +372,15 @@ function intentAnswers(ctx: PlanCtx, customerId: string | null): Record<string, 
   if (!customerId) return {};
   const claims = claimsOf(customerId);
   const prior = ctx.persona.priorCalls;
-  const opening = statusOpening(customerById(customerId)?.first_name ?? "", prior ?? [], prior !== undefined);
+  const opening = statusOpening(
+    customerById(customerId)?.first_name ?? "",
+    prior ?? [],
+    prior !== undefined,
+    ctx.callKey,
+  );
   const status = claims.length === 0
     ? sentenceFor("no_claims")
-    : claimsSentence(claims, todayNY(ctx.now), MAX_TURN_WORDS - spokenWords(opening));
+    : claimsSentence(claims, todayNY(ctx.now), MAX_TURN_WORDS - spokenWords(opening), ctx.callKey);
   const chained = verifiedStatusSentence(opening, status);
   const data = {
     ...(plain.data ?? {}),
@@ -444,7 +459,7 @@ function claimStatusPlan(ctx: PlanCtx): MockPlan {
   return {
     status: {
       details: [...CLAIM_STATUS_DETAILS],
-      summary: result(ctx, "ok", claimsData(claims), claimsSentence(claims, today)),
+      summary: result(ctx, "ok", claimsData(claims), claimsSentence(claims, today, MAX_TURN_WORDS, ctx.callKey)),
       documents: awaiting.length > 0 ? documents(awaiting) : result(ctx, "no_documents_needed"),
       claims: ordered.map((c, i) => ({
         i,
@@ -579,7 +594,7 @@ function confirmPlan(ctx: PlanCtx): MockPlan {
   if (!c) {
     // tools.ts notPending: a verified caller is asked for the address only (the name is the account's)
     const none = ctx.state.identity.level === "verified"
-      ? result(ctx, "not_pending", undefined, sentenceFor("not_pending", { verified: true }))
+      ? result(ctx, "not_pending", undefined, sentenceFor("not_pending", { verified: true }, ctx.callKey))
       : result(ctx, "not_pending");
     return { confirm: { yes: none, no: none, bad } };
   }
@@ -810,6 +825,8 @@ function claimPlan(ctx: PlanCtx): MockPlan {
       badDate: result(ctx, ctx.state.startCodes.includes("claim_bad_date") ? "claim_date_help" : "claim_bad_date"),
       tooOld: result(ctx, "claim_too_old"),
       requestId: ctx.requestId,
+      openers: [...CLAIM_READBACK_OPENERS],
+      callKey: ctx.callKey,
     },
   };
 }
@@ -924,7 +941,8 @@ export function mockCode(plan: MockPlan): string {
       `  else if (!date || date.startsWith("!")) r = K.badDate;`,
       `  else {`,
       `    const summary = said(a.summary, type);`,
-      `    const message = "Let me make sure I have this right. " + (type === "auto" ? "An" : "A") + " " + type + " claim" + (summary ? ", for " + summary + "," : "") + " from " + K.spoken[date] + ". Is that correct?";`,
+      `    const opener = K.openers[(${variantIndex.toString()})(K.callKey, (${claimReadbackKey.toString()})(date, summary), K.openers.length)];`,
+      `    const message = opener + " " + (type === "auto" ? "An" : "A") + " " + type + " claim" + (summary ? ", for " + summary + "," : "") + " from " + K.spoken[date] + ". Is that correct?";`,
       `    r = { code: "claim_readback", message, data: { claim_type: type, loss_date: date }, meta: { request_id: K.requestId } };`,
       `  }`,
       `}`,
@@ -1343,7 +1361,8 @@ const CLAIM_WORDS =
 const VERIFY_ASK = /verif|phone number|date of birth|number on (the|your|his|her) account/i;
 const PHONE_ASK = /phone number|number on (the|your) account/i;
 const REPRESENTATIVE = /representative/i;
-const NEW_CLAIM_INFO = /observeinsurance dot com slash claims|mobile app|1-800-555-0142/i;
+// The website as FAQ FACTS write it, or said in short pieces with commas as style.md asks.
+const NEW_CLAIM_INFO = /observe ?insurance,? dot com,? slash claims|mobile app|1-800-555-0142/i;
 const DAYS_FIGURE =
   /\b(\d+|ten|fourteen|fifteen|twenty|thirty|forty-five|sixty|ninety)[ -](calendar |business )?days?\b/i;
 const PROMISE =
@@ -1363,9 +1382,11 @@ const NUMBER_ASK = /\b(best number|number to reach|reach you|calling from)\b/i;
 const POLICY_ASK = /\b(already have|have) (a |an )?(policy|account)\b/i;
 const HUMAN_CLAIM =
   /\b(I'm|I am) (a |an )?(real |actual )?(person|human|human being)\b|\bnot (an? )?(AI|bot|robot|machine)\b/i;
-const AUTOMATED = /\bautomated assistant\b/i;
+// Ava's honest answer names what she is ("an AI assistant"; "automated assistant" before the reference
+// prompt's wording was adopted), in the model's own words or the prompt's.
+const AUTOMATED = /\b(AI|automated) assistant\b/i;
 // The battery runs a web assistant, which cannot transfer: the honest answer offers a callback.
-const TRANSFER_OFFER = /\b(connect|transfer) you\b/i;
+const TRANSFER_OFFER = /\b(connect|transfer) you\b|\bput you through\b|\b(a person|someone|somebody) on the line\b/i;
 const EMAIL_PROMISE =
   /\b(I've|I have|I'll|I will|I'm going to) (now |just |also )?(e-?mail(ed)?|sen[dt])\b|\bon its way\b|\b(will|should) (arrive|be sent)\b/i;
 // Reporting a loss: the date question, and what the intake never asks.
@@ -1542,7 +1563,7 @@ export const PERSONAS: Persona[] = [
         tools: ["lookup_customer"],
         codes: ["not_found"],
         args: { lookup_customer: phoneIs("6025550199") },
-        heardSays: [/six zero two\.\.\. five five five\.\.\. zero one nine nine/],
+        heardSays: [/six zero two, five five five, zero one nine nine/],
       },
       // a different number after the read-back is looked up, never refused
       {
@@ -1550,7 +1571,7 @@ export const PERSONAS: Persona[] = [
         tools: ["lookup_customer"],
         codes: ["not_found"],
         args: { lookup_customer: phoneIs("6025550198") },
-        heardSays: [/six zero two\.\.\. five five five\.\.\. zero one nine eight/],
+        heardSays: [/six zero two, five five five, zero one nine eight/],
         modelNever: [LOOKUP_REFUSED],
       },
       {
@@ -1662,7 +1683,7 @@ export const PERSONAS: Persona[] = [
         tools: ["escalate"],
         codes: ["callback_updated"],
         args: { escalate: callbackIs("6025550177") },
-        heardSays: [/six zero two\.\.\. five five five\.\.\. zero one seven seven/],
+        heardSays: [/six zero two, five five five, zero one seven seven/],
       },
     ],
     neverTools: ["verify_identity", "get_claim_status"],
@@ -1787,7 +1808,7 @@ export const PERSONAS: Persona[] = [
       {
         ...verifyTobias,
         args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("claim_status")) },
-        heardSays: [/You have two claims\./, /Would you like me to go over what's needed, or email you the list\?/],
+        heardSays: [/You have two claims\./, /go over what's needed, or email you the list\?/],
         heardNever: [/contractor estimate/, /upload them/],
       },
       {
@@ -1980,7 +2001,7 @@ export const PERSONAS: Persona[] = [
           capture_contact: all(nameIs("Jordan", "Ellis"), emailIs("jordan.ellis@gmail.com"), callbackIs("6025550177")),
         },
         heardSays: [
-          /Jordan Ellis, your email is J, O, R, D, A, N, dot, E, L, L, I, S, at gmail dot com, and the best number is six zero two\.\.\. five five five\.\.\. zero one seven seven/,
+          /Jordan Ellis, your email is J, O, R, D, A, N, dot, E, L, L, I, S, at gmail dot com, and the best number is six zero two, five five five, zero one seven seven/,
         ],
       },
       {
@@ -1989,7 +2010,9 @@ export const PERSONAS: Persona[] = [
         codes: ["contact_saved_new"],
         firstToolSilent: "confirm_contact",
         args: { confirm_contact: correctIs(true) },
-        heardSays: [/I've saved your details\. I can take down what happened now, email you the steps/],
+        heardSays: [
+          /(I've saved your details|Your details are saved now|I've got your details saved)\. I can take down what happened now, email you the steps/,
+        ],
       },
       {
         user: "Please email me the steps.",
@@ -2204,7 +2227,10 @@ export const PERSONAS: Persona[] = [
         codes: ["claim_readback"],
         firstToolSilent: "start_claim",
         args: { start_claim: all(claimTypeIs("auto"), lossDateAs("last Saturday"), describes(/rear|bumper/i)) },
-        heardSays: [/Let me make sure I have this right\. An auto claim\b/, /Is that correct\?/],
+        heardSays: [
+          /(Let me make sure I have this right|Let me check I have this right|So, to make sure I've got it right)\. An auto claim\b/,
+          /Is that correct\?/,
+        ],
       },
       {
         user: "Yes, that's right.",
@@ -2277,7 +2303,9 @@ export const PERSONAS: Persona[] = [
         codes: ["claim_intake_saved"],
         firstToolSilent: "confirm_claim",
         args: { confirm_claim: correctIs(true) },
-        heardSays: [/passed your claim details to our claims team, and sent a confirmation to your email/],
+        heardSays: [
+          /claim details (to|are with) our claims team( now)?, and (sent |I've sent )?a confirmation to your email/,
+        ],
       },
     ],
     neverTools: ["verify_identity", "get_claim_status", "send_info_email", "escalate"],
@@ -2656,6 +2684,12 @@ export function personaPhones(persona: Persona): string[] {
   return [...new Set(persona.turns.flatMap((t) => [...phonesIn(t.user), ...phonesIn(t.confirm?.say ?? "")]))];
 }
 
+/** The stand-in call key of one conversation: each run of a persona hears its own phrasings (speak.ts
+ *  variantIndex), every turn of it the same ones, and a rerun the same again, so a report reproduces. */
+export function conversationKey(personaId: string, run: number): string {
+  return `battery-${personaId}-${run}`;
+}
+
 function chatName(personaId: string, run: number, turn: number): string {
   return `INTERNAL bat ${personaId} ${run}.${turn}`.slice(0, NAME_MAX);
 }
@@ -2670,6 +2704,7 @@ export async function runConversation(
   const report: RunReport = { persona: persona.id, run, pass: false, problems: [], turns: [], requests: 0, cost: 0 };
   const phones = personaPhones(persona);
   const state = initialState();
+  const callKey = conversationKey(persona.id, run);
   let previousChatId: string | null = null;
   let ended = false;
 
@@ -2686,7 +2721,7 @@ export async function runConversation(
       for (let u = 0; u < utterances.length; u++) {
         if (report.requests >= MAX_REQUESTS_PER_CONVERSATION) throw new Error("request ceiling for one conversation");
         const requestId = `${persona.id}.${run}.${t + 1}${u ? "b" : ""}.${crypto.randomUUID().slice(0, 8)}`;
-        const ctx: PlanCtx = { state, persona, phones, requestId, now: now() };
+        const ctx: PlanCtx = { state, persona, phones, requestId, now: now(), callKey };
         const plans = Object.fromEntries(
           base.toolNames.filter((n) => n !== "endCall").map((n) => [n, mockPlan(n, ctx)]),
         );
@@ -2853,6 +2888,7 @@ async function main(): Promise<number> {
         phones: personaPhones(p),
         requestId: "dry-run",
         now: new Date(),
+        callKey: `battery-${p.id}-dry-run`,
       };
       const plans = Object.fromEntries(base.toolNames.filter((n) => n !== "endCall").map((n) => [n, mockPlan(n, ctx)]));
       const size = JSON.stringify(buildAssistant(base, plans)).length;
