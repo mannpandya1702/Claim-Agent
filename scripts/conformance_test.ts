@@ -51,32 +51,36 @@ const REP_PHONE = "+16025550188";
 const ENDCALL_GOODBYE = "Thanks for calling Observe Insurance. Take care.";
 const FIRST_MESSAGE =
   "Hey, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. How can I help you today?";
-// The ElevenLabs voice every assistant speaks with (field names per the VAPI ElevenLabsVoice schema).
+// The ElevenLabs voice every assistant speaks with (field names per the VAPI ElevenLabsVoice schema):
+// a natural pace (speed 1.0; 0.8 sounded slow on test calls), a little more expression
+// (stability 0.45, style 0.35), and a ChunkPlan that sends text to TTS from 15 characters, so audio
+// starts sooner while the default punctuation boundaries still decide where a chunk ends.
 const VOICE = {
   provider: "11labs",
   voiceId: "bP6y87KyX5lwNEi7xOkX",
   model: "eleven_turbo_v2_5",
-  speed: 0.8,
-  stability: 0.7,
-  style: 0.3,
+  speed: 1.0,
+  stability: 0.45,
+  style: 0.35,
   similarityBoost: 0.75,
   useSpeakerBoost: true,
   optimizeStreamingLatency: 3,
+  chunkPlan: { enabled: true, minCharacters: 15 },
 };
 // What the platform says while a tool runs: request-start and the delayed line. Every tool sets its
 // own request-start: without one VAPI picks a default filler ("Hold on a sec", "Just a sec").
 const DELAYED = "Thanks for bearing with me, almost there.";
 const FILLERS: Record<string, { start: string; delayed: string }> = {
-  lookup_customer: { start: "Sure, one moment.", delayed: DELAYED },
+  lookup_customer: { start: "Sure, let me look that up.", delayed: DELAYED },
   verify_identity: { start: "Okay, let me check that.", delayed: DELAYED },
   get_claim_status: { start: "Alright, let me pull up your claims.", delayed: DELAYED },
   escalate: { start: "Of course. Let me get that to our team.", delayed: DELAYED },
   // Outcome-neutral: most results are not a send (no address on file, not verified, already sent).
-  send_info_email: { start: "Sure, let me check on that.", delayed: DELAYED },
-  // The read-back opens with "Thanks, <name>", so the filler does not thank them too.
-  capture_contact: { start: "Okay, one second.", delayed: DELAYED },
+  send_info_email: { start: "One moment, let me check on that.", delayed: DELAYED },
+  // The read-back opens with "Thanks!", so the filler does not thank them too.
+  capture_contact: { start: "Got it, one second.", delayed: DELAYED },
   // Without a request-start VAPI speaks a default filler of its own ("Hold on a sec"), and the
-  // result opens with "Perfect", "Thanks" or "Sorry", so the filler is a neutral acknowledgement.
+  // result opens with "Perfect", "Got it" or "Sorry", so the filler is a neutral acknowledgement.
   confirm_contact: { start: "Okay.", delayed: DELAYED },
   // Outcome-neutral: most results are not a read-back (verify first, details first, locked, a date it
   // cannot read, already filed), and "Let me write that down." before a refusal says the opposite.
@@ -87,7 +91,7 @@ const FILLERS: Record<string, { start: string; delayed: string }> = {
   // An emergency keeps a steady line rather than a cheerful one.
   report_emergency: {
     start:
-      "If anyone is hurt or in immediate danger, please hang up and call 911 right now. If you are thinking about harming yourself, call or text 988.",
+      "If anyone is hurt or in immediate danger, please hang up and call 911 right now. If you're thinking about harming yourself, call or text 988.",
     delayed: "I'm still here with you.",
   },
 };
@@ -353,6 +357,51 @@ Deno.test("conversation style rules are in every prompt", () => {
   }
 });
 
+// Call 01a13449: garbled speech right after a barge-in ("Red desk, the home team, please?")
+// was escalated, and "the second claim" reached the tool with no ending although the summary had
+// just named both claims in order.
+Deno.test("garbled speech is re-asked, never escalated; an interruption is answered; order words name a claim", () => {
+  for (const key of ASSISTANT_KEYS) {
+    const prompt = Deno.readTextFileSync(promptPath(key));
+    assertMatch(prompt, /^23\. UNCLEAR SPEECH: .*don't guess what they meant and don't call a tool on it\./m, key);
+    assertMatch(prompt, /"Sorry, I didn't quite catch that\. Could you say that again\?", in different words/, key);
+    // a cut-off emergency is still an emergency, a pause inside a number is not unclear speech, and
+    // the re-asks stop after two with an offer of a callback
+    assertMatch(prompt, /This never overrides rule 9: if anything you can make out says someone is hurt/, key);
+    assertMatch(
+      prompt,
+      /A caller who stops partway through a phone number, a date of birth or a spelling isn't unclear: follow rule 21 and let them carry on\./,
+      key,
+    );
+    assertMatch(
+      prompt,
+      /If you still can't make it out after asking twice, offer once to have a claims representative call them back\./,
+      key,
+    );
+    assertMatch(
+      prompt,
+      /Never call escalate unless they clearly ask for a person, a callback or a representative, or say yes to a callback that was offered\./,
+      key,
+    );
+    assertMatch(prompt, /^24\. AFTER AN INTERRUPTION: when the caller cuts in, answer what they said\./m, key);
+    if (key === "knowledge") continue;
+    assertMatch(
+      prompt,
+      /ORDER REFERENCES: "the first claim", "the second one" or "the last one" mean the claims in the order the last summary named them/,
+      key,
+    );
+    assertMatch(prompt, /Pass that claim's last three digits, as digits, as claim_ending\./, key);
+    // a count the summary only gave, or more than one fit, goes to the tool's own question
+    assertMatch(prompt, /the summary also counted claims it didn't name, or more than one claim could fit, leave/, key);
+    // "the second one" after "go over what's needed, or email you the list" is the email, not a claim
+    assertMatch(
+      prompt,
+      /When they're choosing between options a sentence just offered, .* "the first one" or "the second one" picks that option, not a claim\./,
+      key,
+    );
+  }
+});
+
 // ---------------------------------------------------------------------------------------------
 // Assistant config
 // ---------------------------------------------------------------------------------------------
@@ -520,6 +569,12 @@ Deno.test("function tools: the server tools, flat non-strict schemas, Bearer ser
   // which detail and which claim only; the account still comes from the verified call
   assertEquals(props("get_claim_status"), { detail: "string", claim_ending: "string" });
   assertEquals(withRep.tools.get_claim_status.function.parameters.required, undefined);
+  // an order word ("the second one") becomes that claim's ending from the summary, as claims.md says,
+  // so the schema the model weighs on each call does not tell it to leave the ending out
+  assertMatch(
+    withRep.tools.get_claim_status.function.parameters.properties.claim_ending.description,
+    /by its place in the summary they just heard \(the first one, the second one\), pass that claim's last three digits/,
+  );
   assertEquals(props("escalate"), { reason: "string", details: "string", callback_phone: "string" });
   assertEquals(props("report_emergency"), { note: "string" });
   assertEquals(props("send_info_email"), { topic: "string" });
@@ -545,6 +600,48 @@ Deno.test("function tools: the server tools, flat non-strict schemas, Bearer ser
   assertEquals(withRep.tools.confirm_contact.function.parameters.required, ["correct"]);
   const start = withRep.tools.report_emergency.messages[0].content;
   assert(start.includes("911") && start.includes("988"));
+});
+
+// Wording a warm person at a claims desk would never use on the phone.
+const OFFICE_WORDING = [
+  /for security purposes/i,
+  /please be advised/i,
+  /\bkindly\b/i,
+  /valued customer/i,
+  /apologi[sz]e for (any|the) inconvenience/i,
+  /\bat this time\b/i,
+  /\bassist you\b/i,
+];
+// The safety lines as they stood before the warmth pass: they may get warmer, never weaker or longer.
+const SAFETY_911 = "If anyone is hurt or in immediate danger, please hang up and call 911 right now.";
+const SAFETY_988 = "call or text 988.";
+const SAFETY_START_MAX_WORDS = 27;
+
+Deno.test("the platform's own lines sound warm, and the safety lines keep every word that matters", () => {
+  for (const [label, r] of BOTH) {
+    for (const { where, text } of spokenStrings(r)) {
+      for (const re of OFFICE_WORDING) assert(!re.test(text), `${label} ${where} says ${re}: ${text}`);
+    }
+  }
+  const start = withRep.tools.report_emergency.messages[0].content;
+  assert(start.startsWith(SAFETY_911) && start.endsWith(SAFETY_988), start);
+  assert(start.split(/\s+/).length <= SAFETY_START_MAX_WORDS, start);
+  assertEquals(withRep.tools.report_emergency.messages[2].content, "Please stay on the line. Are you safe right now?");
+  // the silence hooks: two gentle nudges, then the emergency-safe goodbye and the hangup
+  const says = (p: any) => p.hooks.map((h: any) => h.do.filter((d: any) => d.type === "say").map((d: any) => d.exact));
+  for (const key of ASSISTANT_KEYS) {
+    assertEquals(says(withRep.assistants[key].payload), [
+      ["Are you still there? No rush, take your time."],
+      ["I'm still here whenever you're ready."],
+      ["If this is an emergency, please hang up and call 911. Otherwise, call us back any time. Take care."],
+      ["Sorry, I missed that. Could you say it one more time?"],
+    ], key);
+  }
+  // a tool's transport-failure line is the server's own sentence for the same outcome, word for word
+  const failed = (name: string) => withRep.tools[name].messages.find((m: any) => m.type === "request-failed").content;
+  assertEquals(failed("lookup_customer"), sentenceFor("system_error"));
+  assertEquals(failed("escalate"), sentenceFor("rep_unavailable"));
+  assertEquals(failed("send_info_email"), sentenceFor("email_failed"));
 });
 
 Deno.test("tool enums match enums.ts", () => {
@@ -770,7 +867,7 @@ Deno.test("the claim sentences say what the prompt expects of them", async () =>
   const verified = sentenceFor("verified", { first_name: "Tobias" });
   assertEquals(
     verifiedFileClaimSentence(verified),
-    "Thank you, Tobias, you're verified. Let's get your claim started. Can you tell me a little more about what happened?",
+    "Thanks, Tobias. You're all verified. I'm sorry you're dealing with this. Let's get your claim started. Can you tell me a little more about what happened?",
   );
   // "When a sentence asks whether to take down that claim now"
   assertMatch(verifiedFileClaimSentence(verified, true), /take down that claim now\?$/);
@@ -780,7 +877,7 @@ Deno.test("the claim sentences say what the prompt expects of them", async () =>
   );
   // "If it asks for the best number to reach them"
   assertMatch(sentenceFor("claim_needs_phone"), /best number for our claims team to reach you\?$/);
-  assertEquals(withoutTrailingQuestion(verified), "Thank you, Tobias, you're verified.");
+  assertEquals(withoutTrailingQuestion(verified), "Thanks, Tobias. You're all verified.");
   // the gate's sentences ask for exactly the step the prompt sends the caller back to
   assertMatch(sentenceFor("claim_needs_lookup"), /phone number on your account\?$/);
   assertMatch(sentenceFor("claim_needs_verification"), /date of birth on the account\?$/);
@@ -980,6 +1077,34 @@ Deno.test("endpointing: every question that asks for a number waits for a partia
   }
 });
 
+Deno.test("endpointing: every question for a date of birth, a spelled email or what happened keeps its cue", () => {
+  const dobAsks = [
+    sentenceFor("needs_dob"),
+    sentenceFor("auth_failed"),
+    sentenceFor("dob_unreadable"),
+    sentenceFor("not_verified", { level: "phone_found" }),
+    sentenceFor("claim_needs_verification"),
+  ];
+  for (const text of dobAsks) {
+    assertEquals(endpointingWait(text, "March fourteenth"), 1.6, `a partial date must wait after "${text}"`);
+    assertEquals(endpointingWait(text, "March fourteenth nineteen eighty six"), null, text);
+  }
+  const longest = Math.max(...RULES.map((r) => r.timeoutSeconds));
+  const spellAsks = [
+    sentenceFor("contact_invalid_email"),
+    sentenceFor("not_pending", { verified: true }),
+    sentenceFor("contact_retry", { part: "email" }),
+    sentenceFor("no_email_on_file"),
+  ];
+  for (const text of spellAsks) assertEquals(endpointingWait(text, "j o h n"), longest, text);
+  const lossAsks = [
+    verifiedFileClaimSentence(sentenceFor("verified", { first_name: "Tobias" })),
+    sentenceFor("claim_needs_description"),
+    sentenceFor("claim_not_pending"),
+  ];
+  for (const text of lossAsks) assertEquals(endpointingWait(text, "A pipe burst"), 1.2, text);
+});
+
 // StopSpeakingPlan defaults in VAPI's openapi, written out so the config says what it does and
 // sync:check compares them: interruption phrases always stop Ava at once, acknowledgements never do.
 const VAPI_INTERRUPTION_PHRASES = [
@@ -1037,7 +1162,9 @@ Deno.test("barge-in: one word stops Ava, backchannels never do, and the greeting
     assertEquals(p.stopSpeakingPlan, {
       numWords: 1,
       voiceSeconds: 0.2,
-      backoffSeconds: 1,
+      // after an interruption Ava answers half a second later, not a full second (a test call
+      // heard about four seconds of silence after cutting in)
+      backoffSeconds: 0.5,
       interruptionPhrases: [...VAPI_INTERRUPTION_PHRASES, ...EXTRA_INTERRUPTION_PHRASES],
       acknowledgementPhrases: VAPI_ACKNOWLEDGEMENT_PHRASES,
     }, key);

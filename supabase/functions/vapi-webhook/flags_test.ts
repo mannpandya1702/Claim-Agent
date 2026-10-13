@@ -72,8 +72,7 @@ function flags(p: Partial<FlagInput>) {
 // ---------------------------------------------------------------------------------------------
 // promised_callback_without_escalation
 // ---------------------------------------------------------------------------------------------
-const PROMISE =
-  "A representative will call you back within one business day. Is there anything else I can help you with?";
+const PROMISE = "A representative will call you back within one business day. Anything else I can help with?";
 
 Deno.test("promised_callback: fires when the agent promises a callback and no escalation exists", () => {
   assertEquals(flags({ messages: [user("Can I talk to someone?"), bot(PROMISE)] }), [
@@ -131,8 +130,8 @@ Deno.test("promised_callback: an offer or a question is not a promise", () => {
   for (
     const line of [
       // the server's system_error and locked sentences: an offer with nothing recorded yet
-      "I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?",
-      "I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?",
+      "Sorry, I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?",
+      "I'm sorry, but I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?",
       "Would you like a representative to call you back?",
       "If you'd like, someone will call you back.",
     ]
@@ -273,7 +272,8 @@ Deno.test("tool_markup: braces in the caller's words or in tool results never co
 // ---------------------------------------------------------------------------------------------
 // email_promised_without_send
 // ---------------------------------------------------------------------------------------------
-const EMAILED = "Done, I've emailed that to the address on your account. It should arrive within a few minutes.";
+const EMAILED =
+  "There you go, I've emailed that to the address on your account. It should arrive within a few minutes.";
 
 Deno.test("email_promised: fires when the agent says it emailed and no email was sent", () => {
   assertEquals(flags({ messages: [bot(EMAILED)], attempts: VERIFIED }), ["email_promised_without_send"]);
@@ -337,7 +337,7 @@ Deno.test("email_promised: curly apostrophes and the other phrasings match", () 
 
 Deno.test("email_promised: the rep_queued sentence (request sent to the team) is not an email promise", () => {
   const line =
-    "I've sent your request and a summary to our claims team. A representative will call you back at the number on your account within one business day.";
+    "I've passed this to our claims team. Someone will call you back at the number on your account within one business day.";
   assertEquals(flags({ messages: [bot(line)], escalations: [escalation("sent")] }), []);
 });
 
@@ -396,10 +396,10 @@ Deno.test("computeFlags: a clean verified call has no flags", () => {
         ),
         user("six oh two five five five oh one oh one"),
         toolResult("lookup_customer", "needs_dob"),
-        bot("Thanks. For security, what's the date of birth on the account?"),
+        bot("Thanks! And just to keep your account safe, what's the date of birth on the account?"),
         user("March fourteenth nineteen eighty six"),
         toolResult("verify_identity", "verified"),
-        bot("Thank you, Tobias, you're verified. What can I help you with today?"),
+        bot("Thanks, Tobias. You're all verified. What can I help you with today?"),
         toolResult("get_claim_status", "ok"),
         bot(STATUS),
       ],

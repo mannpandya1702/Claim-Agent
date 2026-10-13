@@ -50,7 +50,7 @@
     },
     {
       "type": "request-failed",
-      "content": "I'm sorry, I couldn't record your request just now. Please call our main line at 1-800-555-0142, and someone will help you. Is there anything else I can help you with?"
+      "content": "I'm sorry, I couldn't record your request just now. Please call our main line at 1-800-555-0142, and someone there will help you. Anything else I can help with?"
     }
   ]
 }

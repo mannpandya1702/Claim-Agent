@@ -40,7 +40,7 @@ import { computeFlags } from "./flags.ts";
 import { callerIdNumber, usableCallbackNumber } from "./identity.ts";
 import { deliverSoon, enqueueInteraction } from "./outbox.ts";
 import type { CallFacts } from "./post_call_facts.ts";
-import { asksForSensitive, MASKED_ANSWER, redactDeep, redactPII } from "./redact.ts";
+import { asksForSensitive, MASKED_ANSWER, REASK_RE, redactDeep, redactPII } from "./redact.ts";
 import type { StoreExtras } from "./store.ts";
 import type {
   AttemptRow,
@@ -267,7 +267,8 @@ export function buildMessages(raw: unknown): StoredMessage[] | null {
         const text = textOf(m);
         if (!text) break;
         const clean = redactPII(text);
-        masking = asksForSensitive(clean);
+        // a re-ask right after a sensitive question asks for the same answer, so masking carries on
+        masking = asksForSensitive(clean) || (masking && REASK_RE.test(clean));
         const name = str(m.assistantName);
         out.push(name ? { role: "assistant", text: clean, t, name } : { role: "assistant", text: clean, t });
         break;
@@ -300,7 +301,11 @@ export function maskTranscript(text: string): string {
     if (speaker === "user" && masking) return label ? `${label[0]}${MASKED_ANSWER}` : MASKED_ANSWER;
     const clean = redactPII(line);
     // a wrapped continuation of the same assistant turn can still carry the question
-    if (speaker === "assistant") masking = label ? asksForSensitive(clean) : masking || asksForSensitive(clean);
+    if (speaker === "assistant") {
+      masking = label
+        ? asksForSensitive(clean) || (masking && REASK_RE.test(clean))
+        : masking || asksForSensitive(clean);
+    }
     return clean;
   }).join("\n");
 }

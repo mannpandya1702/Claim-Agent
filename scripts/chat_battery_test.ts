@@ -214,7 +214,7 @@ Deno.test("verify mock follows the identity ladder from the replayed state", asy
   const found = stateAfter([TOBIAS_LOOKUP]);
   const ok = await answer("verify_identity", found, TOBIAS_VERIFY.args);
   assertEquals([ok.code, ok.data], ["verified", { first_name: "Tobias" }]);
-  assertEquals(ok.message, "Thank you, Tobias, you're verified. What can I help you with today?");
+  assertEquals(ok.message, "Thanks, Tobias. You're all verified. What can I help you with today?");
   assertEquals(
     (await answer("verify_identity", found, { dob_month: "3", dob_day: "14", dob_year: "1986" })).code,
     "verified",
@@ -579,7 +579,7 @@ Deno.test("verify mock with an intent: straight into the claim, or the claims re
   assertEquals([file.code, file.message], ["verified", verifiedFileClaimSentence(plain)]);
   const status = await answer("verify_identity", found, { ...TOBIAS_FILE_VERIFY, intent: " Claim_Status " });
   const claims = await answer("get_claim_status", stateAfter([TOBIAS_LOOKUP, TOBIAS_VERIFY]), {});
-  assertEquals(status.message, verifiedStatusSentence("Thank you, Tobias, you're verified.", claims.message));
+  assertEquals(status.message, verifiedStatusSentence("Thanks, Tobias. You're all verified.", claims.message));
   assertEquals(status.data, { first_name: "Tobias", status_read: true, claims: claims.data?.claims });
   assert(spokenWords(status.message) <= MAX_TURN_WORDS);
   // a returning caller: "Welcome back." without the date, and still both claims in one turn
@@ -588,7 +588,7 @@ Deno.test("verify mock with an intent: straight into the claim, or the claims re
   });
   assertEquals(
     returning.message,
-    verifiedStatusSentence("Thank you, Tobias, you're verified. Welcome back.", claims.message),
+    verifiedStatusSentence("Thanks, Tobias. You're all verified. Welcome back.", claims.message),
   );
   assert(spokenWords(returning.message) <= MAX_TURN_WORDS);
   // other, an unknown intent or none: the plain answer
@@ -603,11 +603,14 @@ Deno.test("verify mock with an intent: straight into the claim, or the claims re
     dob_year: 1990,
     intent: "claim_status",
   });
-  assertEquals(none.message, `Thank you, Ines, you're verified. ${sentenceFor("no_claims")}`);
+  assertEquals(none.message, `Thanks, Ines. You're all verified. ${sentenceFor("no_claims")}`);
   assertEquals(none.data?.claims, []);
   // the welcome-back variant keeps its opening and loses only its closing question
   const back = await answer("verify_identity", found, { ...TOBIAS_FILE_VERIFY }, { persona: persona("returning") });
-  assertMatch(back.message, /Welcome back\. I see you called on October tenth\. Let's get your claim started\./);
+  assertMatch(
+    back.message,
+    /Welcome back\. I see you called on October tenth\. I'm sorry you're dealing with this\. Let's get your claim started\./,
+  );
   // a wrong date of birth never reads anything, whatever the intent
   assertEquals(
     (await answer("verify_identity", found, { dob_month: 6, dob_day: 2, dob_year: 1984, intent: "claim_status" })).code,
@@ -1052,7 +1055,7 @@ Deno.test("the transient assistant is the rendered solo-core prompt with code mo
     assertEquals(t.function, base.tools[t.function.name].function);
     assertEquals(t.messages, base.tools[t.function.name].messages);
   }
-  assert(base.fillers.has("Sure, one moment."));
+  assert(base.fillers.has("Sure, let me look that up."));
 });
 
 Deno.test("parseTurn separates the model's words, VAPI's filler and the mock's sentence", () => {
@@ -1069,7 +1072,7 @@ Deno.test("parseTurn separates the model's words, VAPI's filler and the mock's s
           function: { name: "lookup_customer", arguments: '{"phone": "6025550101"}' },
         }],
       },
-      { role: "assistant", content: "Sure, one moment." },
+      { role: "assistant", content: "Sure, let me look that up." },
       {
         role: "tool",
         tool_call_id: "c1",
@@ -1079,8 +1082,8 @@ Deno.test("parseTurn separates the model's words, VAPI's filler and the mock's s
   };
   const turn = parseTurn("my number", response, base.fillers, "r1");
   assertEquals(turn.model, ["Sure."]);
-  assertEquals(turn.filler, ["Sure, one moment."]);
-  assertEquals(turn.heard, ["Sure.", "Sure, one moment.", "Thanks."]);
+  assertEquals(turn.filler, ["Sure, let me look that up."]);
+  assertEquals(turn.heard, ["Sure.", "Sure, let me look that up.", "Thanks."]);
   assertEquals(turn.calls[0].args, { phone: "6025550101" });
   assertEquals(turn.calls[0].wordsBefore, true);
   assertEquals(turn.calls[0].result?.code, "needs_dob");
@@ -1133,10 +1136,10 @@ Deno.test("parseTurn: words after a server tool's spoken sentence are a /chat co
 });
 
 Deno.test("fillers VAPI speaks back to back are still fillers, and model words never are", () => {
-  assert(isFillerText("Sure, one moment.Thanks for bearing with me, almost there.", base.fillers));
-  assert(isFillerText("Sure, one moment.  Thanks for bearing with me, almost there.", base.fillers));
+  assert(isFillerText("Sure, let me look that up.Thanks for bearing with me, almost there.", base.fillers));
+  assert(isFillerText("Sure, let me look that up.  Thanks for bearing with me, almost there.", base.fillers));
   assert(isFillerText("Okay.", base.fillers));
-  assert(!isFillerText("Sure, one moment. Your claim is approved.", base.fillers));
+  assert(!isFillerText("Sure, let me look that up. Your claim is approved.", base.fillers));
   assert(!isFillerText("", base.fillers));
 });
 

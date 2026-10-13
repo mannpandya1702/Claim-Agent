@@ -367,7 +367,7 @@ Deno.test("buildInteractionRow: the answers to the phone and DOB questions are m
 // ---------------------------------------------------------------------------------------------
 // Masking across ASR shapes, in all three stored views.
 // ---------------------------------------------------------------------------------------------
-const DOB_QUESTION = "Thanks. For security, what's the date of birth on the account?";
+const DOB_QUESTION = "Thanks! And just to keep your account safe, what's the date of birth on the account?";
 const PHONE_QUESTION = "I can help with that. What's the phone number on your account?";
 const ASR_ANSWERS: [string, string, string[]][] = [
   [DOB_QUESTION, "march 14th 1986", ["14", "1986"]],
@@ -437,25 +437,25 @@ Deno.test("masking: an answer split over several caller turns is withheld until 
     { role: "tool_call_result", toolCallId: "c1", name: "verify_identity", result: '{"code":"verified"}' },
     {
       role: "bot",
-      message: "Thank you, Tobias, you're verified. What can I help you with today?",
+      message: "Thanks, Tobias. You're all verified. What can I help you with today?",
       secondsFromStart: 9,
     },
     { role: "user", message: "My claim status, please.", secondsFromStart: 12 },
   ];
   message.artifact.transcript =
-    `AI: ${DOB_QUESTION}\nUser: march fourteenth\nUser: nineteen eighty six\nAI: Thank you, Tobias, you're verified.\nUser: My claim status, please.`;
+    `AI: ${DOB_QUESTION}\nUser: march fourteenth\nUser: nineteen eighty six\nAI: Thanks, Tobias. You're all verified.\nUser: My claim status, please.`;
   const row = buildInteractionRow(message, facts());
   assertEquals(textsOf(row.messages, "user"), [MASKED_ANSWER, MASKED_ANSWER, "My claim status, please."]);
   assertEquals(
     row.transcript,
-    `AI: ${DOB_QUESTION}\nUser: ${MASKED_ANSWER}\nUser: ${MASKED_ANSWER}\nAI: Thank you, Tobias, you're verified.\nUser: My claim status, please.`,
+    `AI: ${DOB_QUESTION}\nUser: ${MASKED_ANSWER}\nUser: ${MASKED_ANSWER}\nAI: Thanks, Tobias. You're all verified.\nUser: My claim status, please.`,
   );
 
   const { store, deps } = harness();
   await onTranscript(liveLine("assistant", DOB_QUESTION, 1000), deps);
   await onTranscript(liveLine("user", "march fourteenth", 4000), deps);
   await onTranscript(liveLine("user", "nineteen eighty six", 6000), deps);
-  await onTranscript(liveLine("assistant", "Thank you, Tobias, you're verified.", 9000), deps);
+  await onTranscript(liveLine("assistant", "Thanks, Tobias. You're all verified.", 9000), deps);
   await onTranscript(liveLine("user", "My claim status, please.", 12000), deps);
   assertEquals(
     store.tables.transcript_lines.filter((l) => l.role === "user").map((l) => l.text),
@@ -471,6 +471,39 @@ Deno.test("masking: a DOB question the model words itself withholds a two-digit-
   const row = buildInteractionRow(askAndAnswer("And what year?", "eighty six"), facts());
   assertEquals(textsOf(row.messages, "user"), [MASKED_ANSWER, "Okay."]);
   assertFalse(String(row.transcript).includes("eighty six"));
+});
+
+Deno.test("masking: a re-ask right after a DOB question still withholds the repeated answer", () => {
+  const reask = "Sorry, I didn't quite catch that. Could you say that again?";
+  const message = fixture("full");
+  message.artifact.messages = [
+    { role: "bot", message: DOB_QUESTION, secondsFromStart: 1 },
+    { role: "user", message: "march fourt- sorry", secondsFromStart: 4 },
+    { role: "bot", message: reask, secondsFromStart: 6 },
+    { role: "user", message: "march fourteenth nineteen eighty six", secondsFromStart: 8 },
+    { role: "bot", message: "Thanks, Tobias. You're all verified.", secondsFromStart: 10 },
+    { role: "user", message: "Sorry, I didn't catch that either.", secondsFromStart: 12 },
+  ];
+  message.artifact.transcript = [
+    `AI: ${DOB_QUESTION}`,
+    "User: march fourt- sorry",
+    `AI: ${reask}`,
+    "User: march fourteenth nineteen eighty six",
+    "AI: Thanks, Tobias. You're all verified.",
+    "User: Sorry, I didn't catch that either.",
+  ].join("\n");
+  const row = buildInteractionRow(message, facts());
+  // the re-ask carries the DOB question's masking; a re-ask with no sensitive question before it does not
+  assertEquals(textsOf(row.messages, "user"), [MASKED_ANSWER, MASKED_ANSWER, "Sorry, I didn't catch that either."]);
+  assertFalse(String(row.transcript).includes("eighty six"));
+  assertEquals(
+    maskTranscript(`AI: What happened?\nUser: a pipe burst\nAI: ${reask}\nUser: a pipe burst under the sink`),
+    `AI: What happened?\nUser: a pipe burst\nAI: ${reask}\nUser: a pipe burst under the sink`,
+  );
+  assertEquals(
+    maskTranscript(`AI: ${PHONE_QUESTION}\nUser: six oh two\nAI: ${reask}\nUser: six oh two five five five`),
+    `AI: ${PHONE_QUESTION}\nUser: ${MASKED_ANSWER}\nAI: ${reask}\nUser: ${MASKED_ANSWER}`,
+  );
 });
 
 Deno.test("maskTranscript: labels, wrapped lines and blank lines", () => {

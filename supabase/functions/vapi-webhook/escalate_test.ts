@@ -13,14 +13,14 @@ const TOKEN = "987654:ESCALATE-test-token";
 const OUR_LINE = "+15205210277";
 const NOW = new Date("2026-10-12T15:00:00Z");
 
-const ANYTHING_ELSE = "Is there anything else I can help you with?";
+const ANYTHING_ELSE = "Anything else I can help with?";
 const REP_QUEUED_NO_NUMBER =
-  "I've sent your request to our claims team. What's the best number for a representative to reach you?";
-const REP_RECORDED = `I've recorded your request. ${ANYTHING_ELSE}`;
+  "Done, I've sent your request to our claims team. What's the best number for a representative to reach you?";
+const REP_RECORDED = `Okay, I've recorded your request. ${ANYTHING_ELSE}`;
 const REP_ALREADY_QUEUED =
-  `Your request is already with our claims team. A representative will call you back within one business day. ${ANYTHING_ELSE}`;
+  `Your request is already with our claims team, so someone will call you back within one business day. ${ANYTHING_ELSE}`;
 const queuedAt = (at: string) =>
-  `I've sent your request and a summary to our claims team. A representative will call you back at ${at} within one business day. ${ANYTHING_ELSE}`;
+  `I've passed this to our claims team. Someone will call you back at ${at} within one business day. ${ANYTHING_ELSE}`;
 
 type Responder = (url: string, init: RequestInit) => Response | Promise<Response>;
 
@@ -200,7 +200,7 @@ Deno.test("Telegram sent but the email down: rep_queued, and the email error is 
   const r = await h.run("escalate", { callback_phone: "(602) 555-0177" });
   assertEquals(r, {
     code: "rep_queued",
-    sentence: queuedAt("the number you gave me, ending in zero one seven seven"),
+    sentence: queuedAt("the number you gave me, ending in zero one seven seven,"),
     data: { target: "given", digits: "0177" },
   });
   assertEquals(h.rows()[0].alert_status, "sent");
@@ -402,7 +402,7 @@ Deno.test("a database failure is rep_unavailable and sends nothing", async () =>
   assertEquals(await h.run("escalate", { reason: "representative_requested" }), {
     code: "rep_unavailable",
     sentence:
-      `I'm sorry, I couldn't record your request just now. Please call our main line at 1-800-555-0142, and someone will help you. ${ANYTHING_ELSE}`,
+      `I'm sorry, I couldn't record your request just now. Please call our main line at 1-800-555-0142, and someone there will help you. ${ANYTHING_ELSE}`,
   });
   assertEquals(h.calls.length, 0);
   assertEquals(h.store.tables.escalations.length, 0);
@@ -497,7 +497,7 @@ Deno.test("a replayed rep_queued speaks the first answer's target, never one a l
   assertEquals(replay, {
     code: "rep_queued",
     sentence:
-      `I've sent your request and a summary to our claims team. A representative will call you back within one business day. ${ANYTHING_ELSE}`,
+      `I've passed this to our claims team. Someone will call you back within one business day. ${ANYTHING_ELSE}`,
   });
 
   // a number given in the first request is rebuilt from the retry's own arguments

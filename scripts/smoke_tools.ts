@@ -79,7 +79,7 @@ const FIRST_MESSAGE =
 const NEW_CALLER = { first_name: "smoke", last_name: "tester" };
 // Spelled the way a caller says it, so the server's spoken-form reading is exercised end to end.
 const SPOKEN_EMAIL = "s m o k e dot t e s t at example dot com";
-const VERIFIED_PREFIX = "Thank you, Tobias, you're verified.";
+const VERIFIED_PREFIX = "Thanks, Tobias. You're all verified.";
 // A loss as a caller reports it; loss_date is replaced per step.
 const BUMPER = {
   claim_type: "auto",
@@ -856,7 +856,7 @@ export function smokeCases(): SmokeCase[] {
           name: "verify_identity",
           args: TEAGUE.dob,
           code: "verified",
-          sentence: (s) => s.startsWith("Thank you, Teague, you're verified.") ? null : `sentence was "${s}"`,
+          sentence: (s) => s.startsWith("Thanks, Teague. You're all verified.") ? null : `sentence was "${s}"`,
         });
         await c.tool(ref, {
           name: "send_info_email",
@@ -1014,7 +1014,7 @@ export function smokeCases(): SmokeCase[] {
           name: "verify_identity",
           args: RONAN_DOB,
           code: "verified",
-          sentence: (s) => s.startsWith("Thank you, Ronan, you're verified.") ? null : `sentence was "${s}"`,
+          sentence: (s) => s.startsWith("Thanks, Ronan. You're all verified.") ? null : `sentence was "${s}"`,
         });
         await c.tool(ronan, { name: "get_claim_status", args: { detail: "documents" }, code: "no_documents_needed" });
         // his only claim is the one he means, even by a type it is not
@@ -1057,8 +1057,8 @@ export function smokeCases(): SmokeCase[] {
           code: "verified",
           // the welcome-back variant keeps its opening and ends the same way
           sentence: (s) =>
-            s.startsWith("Thank you, Sloane, you're verified.") &&
-              s.endsWith(opening.slice("Thank you, Sloane, you're verified.".length))
+            s.startsWith("Thanks, Sloane. You're all verified.") &&
+              s.endsWith(opening.slice("Thanks, Sloane. You're all verified.".length))
               ? null
               : `sentence was "${s}"`,
         });

@@ -12,10 +12,10 @@ const RONAN = "6b0d6f0e-1c11-4c7a-9a01-000000000102";
 const NOW = new Date("2026-10-12T15:00:00Z");
 
 const SYSTEM_ERROR =
-  "I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?";
+  "Sorry, I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?";
 const LOCKED =
-  "I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?";
-const NEEDS_DOB = "Thanks. For security, what's the date of birth on the account?";
+  "I'm sorry, but I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?";
+const NEEDS_DOB = "Thanks! And just to keep your account safe, what's the date of birth on the account?";
 
 type Responder = (url: string, init: RequestInit) => Response | Promise<Response>;
 
@@ -121,7 +121,7 @@ Deno.test("happy path: lookup -> needs_dob -> verify -> verified -> get_claim_st
 
   const verify = await h.run("verify_identity", { dob_month: 3, dob_day: 14, dob_year: 1986 });
   assertEquals(verify.code, "verified");
-  assertEquals(verify.sentence, "Thank you, Tobias, you're verified. What can I help you with today?");
+  assertEquals(verify.sentence, "Thanks, Tobias. You're all verified. What can I help you with today?");
   assertEquals(verify.data, { first_name: "Tobias" });
   assertFalse(JSON.stringify(verify).includes("1986"));
 
@@ -176,7 +176,7 @@ Deno.test("smuggled identity fields in get_claim_status arguments are ignored", 
   assertEquals(none.data, { level: "none" });
   assertEquals(
     none.sentence,
-    "I need to verify your identity before I can share that. What's the phone number on your account?",
+    "Happy to help with that once I've verified you. What's the phone number on your account?",
   );
 
   const found = harness();
@@ -186,7 +186,7 @@ Deno.test("smuggled identity fields in get_claim_status arguments are ignored", 
   assertEquals(phoneFound.data, { level: "phone_found" });
   assertEquals(
     phoneFound.sentence,
-    "For security, I need the date of birth on the account before I can share that. What's the date of birth?",
+    "Happy to help with that once you're verified. What's the date of birth?",
   );
 
   // Verified as Tobias: another customer's id or phone in the args still reads Tobias's claims only.
@@ -205,7 +205,7 @@ Deno.test("locked path: two wrong DOBs lock, the lock is sticky and every claim 
   const first = await h.run("verify_identity", { dob_month: 1, dob_day: 1, dob_year: 1980 });
   assertEquals(first, {
     code: "auth_failed",
-    sentence: "I'm sorry, that doesn't match what we have on file. Could you give me your date of birth one more time?",
+    sentence: "That doesn't quite match what we have on file. Could you give me your date of birth one more time?",
   });
   assertEquals(await h.run("verify_identity", { dob_month: 2, dob_day: 2, dob_year: 1980 }), {
     code: "locked",
@@ -236,7 +236,7 @@ Deno.test("not_found reads the number back; the same number again is not_found_f
   assertEquals(final.code, "not_found_final");
   assertEquals(
     final.sentence,
-    "I'm sorry, I still can't find an account for that number. If you're new with us, I can help you get started. Could I get your first and last name?",
+    "I'm sorry, I still can't find an account for that number. If you're new with us, I'd be glad to help you get started. Could I get your first and last name?",
   );
   // final for that number only: a different number is still looked up
   assertEquals((await h.run("lookup_customer", { phone: "6025550101" })).code, "needs_dob");
@@ -262,7 +262,7 @@ Deno.test("an unreadable phone number is never counted as a miss", async () => {
   const h = harness();
   assertEquals(await h.run("lookup_customer", { phone: "555-0101" }), {
     code: "invalid_phone",
-    sentence: "I need the full ten-digit number on the account. Could you say it again?",
+    sentence: "Sorry, I'll need the full ten-digit number on the account. Could you say it again?",
   });
   assertEquals((await h.run("lookup_customer", { phone: "6025550199" })).code, "not_found");
   assertEquals((await h.run("lookup_customer", {})).code, "invalid_phone");
@@ -275,12 +275,12 @@ Deno.test("verify_identity before a lookup, and three unreadable DOBs give dob_g
   const h = harness();
   assertEquals(await h.run("verify_identity", { dob_month: 3, dob_day: 14, dob_year: 1986 }), {
     code: "no_lookup_yet",
-    sentence: "Before I can check that, I need the phone number on the account. What's the number?",
+    sentence: "Happy to check that. First, I'll just need the phone number on the account. What's the number?",
   });
   assertEquals((await h.run("lookup_customer", { phone: "6025550101" })).code, "needs_dob");
   assertEquals(await h.run("verify_identity", { dob_month: 13, dob_day: 14, dob_year: 1986 }), {
     code: "dob_unreadable",
-    sentence: "Could you give me the month, day and year?",
+    sentence: "Just to be sure, could you give me the month, day and year?",
   });
   assertEquals((await h.run("verify_identity", { dob_month: 2, dob_day: 30, dob_year: 1986 })).code, "dob_unreadable");
   assertEquals(await h.run("verify_identity", { dob_month: 3, dob_day: 14 }), {
@@ -292,7 +292,7 @@ Deno.test("verify_identity before a lookup, and three unreadable DOBs give dob_g
 });
 
 Deno.test("verified with prior contacts enabled adds the welcome-back clause; disabled or failing gives the plain one", async () => {
-  const plain = "Thank you, Tobias, you're verified. What can I help you with today?";
+  const plain = "Thanks, Tobias. You're all verified. What can I help you with today?";
   const prior = async (h: Harness) => {
     await h.store.upsertInteraction({
       vapi_call_id: "prior-call-1",
@@ -312,7 +312,7 @@ Deno.test("verified with prior contacts enabled adds the welcome-back clause; di
   const welcome = await verifyTobias(on);
   assertEquals(
     welcome.sentence,
-    "Thank you, Tobias, you're verified. Welcome back. I see you called on October tenth. Is this about the same claim as last time, or something else?",
+    "Thanks, Tobias. You're all verified. Welcome back. I see you called on October tenth. Is this about the same claim as last time, or something else?",
   );
   assertFalse(welcome.sentence.includes("home claim"));
 
@@ -333,7 +333,7 @@ Deno.test("get_claim_status: no_claims for a verified customer without claims", 
   assertEquals((await verifyAs(h, "6025550105", [5, 9, 1990])).code, "verified");
   assertEquals(await h.run("get_claim_status", {}), {
     code: "no_claims",
-    sentence: "I don't see any claims on file for your account. Would you like me to explain how to start one?",
+    sentence: "I'm not seeing any claims on file for your account. Would you like me to explain how to start one?",
   });
 });
 
@@ -367,7 +367,7 @@ Deno.test("send_info_email: no_email_on_file for Teague, with no fetch and no le
   assertEquals(await h.run("send_info_email", { topic: "document_checklist" }), {
     code: "no_email_on_file",
     sentence:
-      "I don't see an email address on your account. If you'd like, you can spell one for me and I'll pass it to our team to add. Or you can find the same information at observeinsurance dot com slash claims. Which would you prefer?",
+      "I don't see an email address on your account. If you'd like, you can spell one for me, and I'll pass it to our team to add. Or you can find the same information at observeinsurance dot com slash claims. Which would you prefer?",
   });
   assertEquals(h.calls.length, 0);
   assertEquals(h.store.tables.emails.length, 0);
@@ -380,7 +380,7 @@ Deno.test("send_info_email sends once per topic: a repeat is email_already_sent 
   assertEquals(sent, {
     code: "email_sent",
     sentence:
-      "Done, I've emailed that to the address on your account. It should arrive within a few minutes. Is there anything else I can help you with?",
+      "There you go, I've emailed that to the address on your account. It should arrive within a few minutes. Anything else I can help with?",
   });
   assertEquals(h.resendCalls().length, 1);
   const req = h.resendCalls()[0];
@@ -397,7 +397,7 @@ Deno.test("send_info_email sends once per topic: a repeat is email_already_sent 
 
   assertEquals(await h.run("send_info_email", { topic: "document_checklist" }), {
     code: "email_already_sent",
-    sentence: "I've already sent that to your email on this call. Is there anything else I can help you with?",
+    sentence: "No worries, I've already sent that to your email on this call. Anything else I can help with?",
   });
   assertEquals(h.resendCalls().length, 1);
 
@@ -414,7 +414,7 @@ Deno.test("send_info_email: Resend 500 gives email_failed and a failed row, and 
   assertEquals(r, {
     code: "email_failed",
     sentence:
-      "I wasn't able to send that email just now. You can find the same information at observeinsurance dot com slash claims, or I can have a representative send it. Which would you prefer?",
+      "Sorry, that email didn't go through just now. You can find the same information at observeinsurance dot com slash claims, or I can have a representative send it. Which would you prefer?",
   });
   assertEquals(h.store.tables.emails.map((m) => [m.kind, m.status, m.resend_id, m.error]), [
     ["claim_summary", "failed", null, "resend 500: internal"],
@@ -430,7 +430,7 @@ Deno.test("send_info_email with an off-list or missing topic is bad_args before 
   for (const args of [{ topic: "policy_documents" }, {}, { topic: 3 }]) {
     assertEquals(await h.run("send_info_email", args), {
       code: "bad_args",
-      sentence: "Sorry, I didn't catch that. Could you say it again?",
+      sentence: "Sorry, I didn't quite catch that. Could you say it again?",
     });
   }
   assertEquals(h.store.tables.attempts.length, attemptsBefore);
@@ -463,7 +463,7 @@ Deno.test("escalate replay of the same toolCallId returns the same answer with n
 Deno.test("report_emergency writes the row, alerts both channels, and answers emergency_logged", async () => {
   const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
   const r = await h.run("report_emergency", { note: "Caller says there is smoke in the kitchen" });
-  assertEquals(r, { code: "emergency_logged", sentence: "Our team has been told. Are you safe right now?" });
+  assertEquals(r, { code: "emergency_logged", sentence: "I've told our team. Are you safe right now?" });
   const [row] = h.store.tables.escalations;
   assertEquals([row.kind, row.reason, row.alert_status, row.delivery_error], ["emergency", "emergency", "sent", null]);
   assertEquals([row.callback_phone, row.callback_source], ["+16025550188", "caller_id"]);
@@ -510,7 +510,7 @@ Deno.test("report_emergency never refuses: placeholder or unparseable arguments 
 
 Deno.test("bad arguments are bad_args before any database work", async () => {
   const h = harness();
-  const bad = { code: "bad_args", sentence: "Sorry, I didn't catch that. Could you say it again?" };
+  const bad = { code: "bad_args", sentence: "Sorry, I didn't quite catch that. Could you say it again?" };
   assertEquals(await h.run("lookup_customer", null), bad);
   assertEquals(await h.run("lookup_customer", { phone: "{{customer.number}}" }), bad);
   assertEquals(await h.run("verify_identity", { dob_month: "unknown", dob_day: 14, dob_year: 1986 }), bad);

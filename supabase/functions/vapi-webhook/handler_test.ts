@@ -434,23 +434,41 @@ Deno.test("result is one-line JSON with code and message; the native message spe
 
 Deno.test("a sentence over NATIVE_MAX_WORDS goes to the model to read: spoken false, no native message", async () => {
   // VAPI speaks a native tool message to the end with no way for the caller to interrupt it; the
-  // model's own speech can be interrupted, so long sentences are the model's to read word for word.
-  const long = sentenceFor("not_found", { digits: "6025550199" });
+  // model's own speech can be interrupted, so long sentences (a spelled read-back here) are the
+  // model's to read word for word. 28 words is about nine seconds at voice speed 1.0.
+  assertEquals(NATIVE_MAX_WORDS, 28);
+  const long = sentenceFor("contact_readback", {
+    first_name: "Jane",
+    last_name: "Doe",
+    email: "jane.doe@gmail.com",
+    callback_phone: "+16025550177",
+  });
   assert(spokenWords(long) > NATIVE_MAX_WORDS, `${spokenWords(long)} words`);
   const short = sentenceFor("needs_dob");
   assert(spokenWords(short) <= NATIVE_MAX_WORDS);
   assert(speaksNatively(short, true) && !speaksNatively(short, false) && !speaksNatively(long, true));
-  const { routes } = fakeRoutes(() => ({ code: "not_found", sentence: long, data: { digits: "6025550199" } }));
+  // a number read back with its question is short enough to be spoken natively, with no model turn
+  const readBack = sentenceFor("not_found", { digits: "6025550199" });
+  assert(speaksNatively(readBack, true), `${spokenWords(readBack)} words`);
+  // the common callback answers are native too (28 words), so no model-turn gap follows the filler
+  for (const target of ["account", "caller_id"]) {
+    const queued = sentenceFor("rep_queued", { target });
+    assert(speaksNatively(queued, true), `${target}: ${spokenWords(queued)} words`);
+  }
+  // the main line in figures is said digit by digit (38 words in all), so this stays model-read
+  // and the caller can cut in
+  assertFalse(speaksNatively(sentenceFor("rep_unavailable"), true));
+  const { routes } = fakeRoutes(() => ({ code: "contact_readback", sentence: long, data: { pending: true } }));
   const { deps, logs } = makeDeps({}, untouchableStore);
   const [r] = await results(
     await createHandler(routes)(
-      post({ message: callEnvelope({ toolCallList: [fnCall("t1", "lookup_customer", {})] }) }),
+      post({ message: callEnvelope({ toolCallList: [fnCall("t1", "capture_contact", {})] }) }),
       deps,
     ),
   );
   assertEquals(r.message, undefined);
   assertEquals(Object.keys(r.json), ["code", "message", "spoken", "data"]);
-  assertEquals(r.json, { code: "not_found", message: long, spoken: false, data: { digits: "6025550199" } });
+  assertEquals(r.json, { code: "contact_readback", message: long, spoken: false, data: { pending: true } });
   // a long sentence is not an error; only one over VAPI's character limit is logged
   assertFalse(String(logs.at(-1)?.error ?? "").includes("tool_message_too_long"));
 });
@@ -490,7 +508,7 @@ Deno.test("a tool that throws is a system_error sentence at HTTP 200", async () 
   );
   assertEquals(res.status, 200);
   const [r] = await results(res);
-  // longer than NATIVE_MAX_WORDS, so the model reads it (spoken: false) and VAPI speaks nothing itself
+  // spoken by VAPI, or left to the model (spoken: false) when longer than NATIVE_MAX_WORDS
   assertEquals(r.json, {
     code: "system_error",
     message: sentenceFor("system_error"),

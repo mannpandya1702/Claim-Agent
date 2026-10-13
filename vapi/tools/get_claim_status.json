@@ -15,7 +15,7 @@
         },
         "claim_ending": {
           "type": "string",
-          "description": "With detail claim: the claim the caller means, as they said it: the last digits written as digits (198), the claim type word (auto, home or property), or both (home 198). Leave it out when they have not said which."
+          "description": "With detail claim: the claim the caller means: the last digits written as digits (198), the claim type word they used (auto, home or property), or both (home 198). When they point to a claim by its place in the summary they just heard (the first one, the second one), pass that claim's last three digits from the summary: passing them is not answering from memory. Leave it out when they have not said which."
         }
       },
       "additionalProperties": false
@@ -39,7 +39,7 @@
     },
     {
       "type": "request-failed",
-      "content": "I'm having trouble pulling up your claims right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?"
+      "content": "Sorry, I'm having trouble pulling up your claims right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?"
     }
   ]
 }

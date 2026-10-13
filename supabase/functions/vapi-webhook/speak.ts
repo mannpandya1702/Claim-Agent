@@ -35,77 +35,91 @@ const MAX_DOCUMENT_LIST_CHARS = 320;
 const MAX_NAME_CHARS = 60;
 
 // ---------------------------------------------------------------------------------------------
-// Sentences (exact text; CONTRACTS.md "Sentences").
+// Sentences (exact text; CONTRACTS.md "Sentences"). Written the way a warm, capable person at a
+// claims front desk talks: contractions, short sentences, an opener now and then ("Got it.",
+// "There you go,", "No worries,") but never the same one twice in a row, sympathy once where it
+// matters (a loss being reported, a lock, a denial, a failure on our side) and never on the turn
+// before it too, and no stock phrases. Facts, honest-result clauses and each sentence's closing
+// question are what the flow and the prompt rely on; the words around them are free to sound human.
 // ---------------------------------------------------------------------------------------------
-const ANYTHING_ELSE = "Is there anything else I can help you with?";
-const BAD_ARGS = "Sorry, I didn't catch that. Could you say it again?";
+const ANYTHING_ELSE = "Anything else I can help with?";
+const BAD_ARGS = "Sorry, I didn't quite catch that. Could you say it again?";
 const SYSTEM_ERROR =
-  "I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?";
-const INVALID_PHONE = "I need the full ten-digit number on the account. Could you say it again?";
+  "Sorry, I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?";
+const INVALID_PHONE = "Sorry, I'll need the full ten-digit number on the account. Could you say it again?";
 // The new-caller branch starts here: the sentence ends the turn, so it asks for the name itself. It
 // says "if you're new", so a policyholder whose account is under another number can say so and be
 // offered a callback instead of new-claim intake (branches-identity.md NOT FOUND).
 const NOT_FOUND_FINAL =
-  "I'm sorry, I still can't find an account for that number. If you're new with us, I can help you get started. Could I get your first and last name?";
-const NEEDS_DOB = "Thanks. For security, what's the date of birth on the account?";
-const ALREADY_VERIFIED = "You're already verified. What can I help you with?";
+  "I'm sorry, I still can't find an account for that number. If you're new with us, I'd be glad to help you get started. Could I get your first and last name?";
+// "the date of birth on the account": a caller may be asking about a spouse's or a client's account.
+const NEEDS_DOB = "Thanks! And just to keep your account safe, what's the date of birth on the account?";
+const ALREADY_VERIFIED = "You're already verified, so we're all set there. What can I help you with?";
+// One apology for a lock: the lock's other sentences (claim_locked) do not say sorry again.
+// The steps before a lock (auth_failed, dob_unreadable) do not say sorry, so the apology is not stacked.
 const LOCKED =
-  "I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?";
+  "I'm sorry, but I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?";
 const AUTH_FAILED =
-  "I'm sorry, that doesn't match what we have on file. Could you give me your date of birth one more time?";
-const NO_LOOKUP_YET = "Before I can check that, I need the phone number on the account. What's the number?";
-const DOB_UNREADABLE = "Could you give me the month, day and year?";
-const NOT_VERIFIED_PHONE_FOUND =
-  "For security, I need the date of birth on the account before I can share that. What's the date of birth?";
-const NOT_VERIFIED_NONE =
-  "I need to verify your identity before I can share that. What's the phone number on your account?";
-const NO_CLAIMS = "I don't see any claims on file for your account. Would you like me to explain how to start one?";
+  "That doesn't quite match what we have on file. Could you give me your date of birth one more time?";
+const NO_LOOKUP_YET = "Happy to check that. First, I'll just need the phone number on the account. What's the number?";
+const DOB_UNREADABLE = "Just to be sure, could you give me the month, day and year?";
+const NOT_VERIFIED_PHONE_FOUND = "Happy to help with that once you're verified. What's the date of birth?";
+const NOT_VERIFIED_NONE = "Happy to help with that once I've verified you. What's the phone number on your account?";
+const NO_CLAIMS = "I'm not seeing any claims on file for your account. Would you like me to explain how to start one?";
 const REP_QUEUED_NO_NUMBER =
-  "I've sent your request to our claims team. What's the best number for a representative to reach you?";
-const REP_RECORDED = `I've recorded your request. ${ANYTHING_ELSE}`;
+  "Done, I've sent your request to our claims team. What's the best number for a representative to reach you?";
+const REP_RECORDED = `Okay, I've recorded your request. ${ANYTHING_ELSE}`;
 const REP_ALREADY_QUEUED =
-  `Your request is already with our claims team. A representative will call you back within one business day. ${ANYTHING_ELSE}`;
+  `Your request is already with our claims team, so someone will call you back within one business day. ${ANYTHING_ELSE}`;
 const REP_UNAVAILABLE =
-  `I'm sorry, I couldn't record your request just now. Please call our main line at ${MAIN_LINE_SPOKEN}, and someone will help you. ${ANYTHING_ELSE}`;
-const EMERGENCY_LOGGED = "Our team has been told. Are you safe right now?";
+  `I'm sorry, I couldn't record your request just now. Please call our main line at ${MAIN_LINE_SPOKEN}, and someone there will help you. ${ANYTHING_ELSE}`;
+// The emergency lines keep their safety content word for word; they may only get warmer, never longer.
+const EMERGENCY_LOGGED = "I've told our team. Are you safe right now?";
 const EMERGENCY_DB_FAILED = "Please stay on the line. Are you safe right now?";
 const EMAIL_SENT =
-  `Done, I've emailed that to the address on your account. It should arrive within a few minutes. ${ANYTHING_ELSE}`;
+  `There you go, I've emailed that to the address on your account. It should arrive within a few minutes. ${ANYTHING_ELSE}`;
 // A new caller's copy goes to the address they spelled on this call, not to any account.
 const EMAIL_SENT_GIVEN =
-  `Done, I've emailed that to the address you gave me. It should arrive within a few minutes. ${ANYTHING_ELSE}`;
-const EMAIL_ALREADY_SENT = `I've already sent that to your email on this call. ${ANYTHING_ELSE}`;
+  `There you go, I've emailed that to the address you gave me. It should arrive within a few minutes. ${ANYTHING_ELSE}`;
+const EMAIL_ALREADY_SENT = `No worries, I've already sent that to your email on this call. ${ANYTHING_ELSE}`;
 // A spelled address goes to staff as a pending update (capture_contact); nothing is sent to it.
 const NO_EMAIL_ON_FILE =
-  `I don't see an email address on your account. If you'd like, you can spell one for me and I'll pass it to our team to add. Or you can find the same information at ${CLAIMS_URL_SPOKEN}. Which would you prefer?`;
+  `I don't see an email address on your account. If you'd like, you can spell one for me, and I'll pass it to our team to add. Or you can find the same information at ${CLAIMS_URL_SPOKEN}. Which would you prefer?`;
 const EMAIL_FAILED =
-  `I wasn't able to send that email just now. You can find the same information at ${CLAIMS_URL_SPOKEN}, or I can have a representative send it. Which would you prefer?`;
+  `Sorry, that email didn't go through just now. You can find the same information at ${CLAIMS_URL_SPOKEN}, or I can have a representative send it. Which would you prefer?`;
 const CONTACT_INVALID_EMAIL =
   "Hmm, I didn't quite catch a full email address. Could you spell it for me, letter by letter?";
 const CONTACT_NEEDS_NAME = "Sorry, could I get your first and last name?";
 // A phone caller said to use the number they're calling from, but the call carries no usable caller id.
 const CONTACT_NEEDS_PHONE = "Sorry, I can't see the number you're calling from. What's the best number to reach you?";
-const NOT_PENDING = "Sorry, let me take your details again. What's your first and last name?";
+const NOT_PENDING = "Sorry about that, let me take your details again. What's your first and last name?";
 // A verified caller's name comes from the account, so only the address is asked for again.
 const NOT_PENDING_EMAIL = "Sorry, could you spell that email for me one more time, letter by letter?";
 // A verified caller's own address on file is never replaced from a call (account-takeover guard).
 const EMAIL_ON_FILE =
-  "There's already an email on your account, so I can't change it on this call. I can have someone from our claims team call you back about it. Would you like that?";
+  "There's already an email on your account, so I can't change it on this call, but I can have someone from our claims team call you back about it. Would you like that?";
 const CONTACT_RETRY_EMAIL = "Sorry about that. Could you spell your email for me one more time, slowly?";
 const CONTACT_RETRY_NAME = "Sorry about that. Could you tell me your first and last name one more time?";
 const CONTACT_READBACK_PLAIN = "Just to confirm, did I get your details right?";
 // start_claim / confirm_claim (first notice of loss).
 const ANYTHING_ELSE_SHORT = "Is there anything else I can help with?";
 // The caller has usually said what happened already (the greeting asks how Ava can help), so this asks
-// for more rather than for the story again.
-const START_CLAIM_QUESTION = "Let's get your claim started. Can you tell me a little more about what happened?";
+// for more rather than for the story again. It is the first sentence after the loss was reported, so it
+// says sorry once; the resume question and the read-back after it do not say it again.
+const START_CLAIM_QUESTION =
+  "I'm sorry you're dealing with this. Let's get your claim started. Can you tell me a little more about what happened?";
 // A start_claim earlier on the call was sent to verification or to the caller's details first: the loss
 // was told then, so on a yes the model files it from what it already has.
 const RESUME_CLAIM_QUESTION = "Shall I go ahead and take down that claim now?";
-const CLAIM_NEEDS_LOOKUP = "I can help you start a claim. First, what's the phone number on your account?";
+// These three answer a loss told before identity (start_claim's backstop), so each says sorry once; the
+// resume question that follows verification or the caller's details does not say it again.
+const CLAIM_NEEDS_LOOKUP =
+  "I'm sorry to hear that. I can help you start a claim. First, what's the phone number on your account?";
 const CLAIM_NEEDS_CONTACT =
-  "I can take down the details for our claims team. First, can I get your first and last name?";
-const CLAIM_NEEDS_VERIFICATION = "I'll just need to verify you first. What's the date of birth on the account?";
+  "I'm sorry to hear that. I can take down the details for our claims team. First, can I get your first and last name?";
+const CLAIM_NEEDS_VERIFICATION =
+  "I'm sorry to hear that. I'll just need to verify you first. What's the date of birth on the account?";
+// The lock already said sorry (LOCKED), so this one does not say it again.
 const CLAIM_LOCKED =
   "Since I wasn't able to verify your identity, I can't file a claim on this call. I can have a claims specialist call you back to help. Would you like that?";
 const CLAIM_NEEDS_DESCRIPTION = "Can you tell me briefly what happened?";
@@ -405,10 +419,13 @@ const MAX_SUMMARY_ITEMS = 4;
 // The documents answer lists at most this many claims; any other is mentioned, and the email lists it.
 const MAX_DOCUMENT_CLAIMS = 2;
 
-/** Spoken words in a finished sentence: every whitespace-separated token (figures are already words). */
+/** Spoken words in a finished sentence: every whitespace-separated token (figures are already words),
+ *  except a token of digits and hyphens, such as the main line "1-800-555-0142", which is said a digit
+ *  at a time and so counts one word per digit. */
 export function spokenWords(text: string): number {
   const t = typeof text === "string" ? text.trim() : "";
-  return t ? t.split(/\s+/).length : 0;
+  if (!t) return 0;
+  return t.split(/\s+/).reduce((n, w) => n + (/^[\d-]*\d[\d-]*[.,?!]?$/.test(w) ? w.replace(/\D/g, "").length : 1), 0);
 }
 
 function amountOf(v: unknown): number | null {
@@ -600,7 +617,7 @@ function summaryPlan(claims: Claim[], refDate: string, maxWords: number): { text
     const more = rest === 0
       ? ""
       : rest === 1
-      ? "There is one more claim on file."
+      ? "There's one more claim on file."
       : `There are ${numberToWords(rest)} more claims on file.`;
     const text = [lead, ...items.slice(0, count).map((item) => item.text), more, summaryQuestion(read, total)]
       .filter(Boolean)
@@ -617,7 +634,7 @@ function summaryPlan(claims: Claim[], refDate: string, maxWords: number): { text
 /** get_claim_status's summary (code ok) for a verified caller's claims (non-empty list): "You have two
  *  claims." when there are several, one short clause per claim (or per group of claims that read the
  *  same) in reading priority, and one closing question. At most four clauses, and only as many as fit
- *  maxWords; the claims left over are counted ("There is one more claim on file."), never dropped
+ *  maxWords; the claims left over are counted ("There's one more claim on file."), never dropped
  *  silently, and a question about which claim offers them first (claimsUnread). refDate = today
  *  (YYYY-MM-DD) in America/New_York. verify_identity's chained read passes what is left of the turn
  *  after its opening. */
@@ -941,19 +958,23 @@ function repQueued(d: Record<string, unknown>): string {
   let at = "";
   if (d.target === "account") at = " at the number on your account";
   else if (d.target === "given") {
-    at = last4 ? ` at the number you gave me, ending in ${speakDigits(last4)}` : " at the number you gave me";
+    at = last4 ? ` at the number you gave me, ending in ${speakDigits(last4)},` : " at the number you gave me";
   } else if (d.target === "caller_id") at = " at the number you're calling from";
-  return `I've sent your request and a summary to our claims team. A representative will call you back${at} within one business day. ${ANYTHING_ELSE}`;
+  // "passed": rep_queued means Telegram or the team email confirmed delivery (rep_recorded otherwise).
+  // With the account or caller-id number this is 28 spoken words, so VAPI speaks it with no model turn.
+  return `I've passed this to our claims team. Someone will call you back${at} within one business day. ${ANYTHING_ELSE}`;
 }
 
-/** "Thank you, Tobias, you're verified." The opening both verified sentences share (the plain one
- *  here and prior_contacts' welcome-back variant), so the name is cleaned the same way in both. */
+/** "Thanks, Tobias. You're all verified." The opening every verified sentence shares (the plain one here,
+ *  prior_contacts' welcome-back variant, and the chained claims read and file-claim openings built from
+ *  them), so the name is cleaned the same way in all. It stays neutral ("Thanks", not "Perfect"): a
+ *  denial or a reported loss can follow it in the same breath. */
 export function verifiedThanks(firstName: unknown): string {
   const name = speakableName(firstName);
-  return name ? `Thank you, ${name}, you're verified.` : "Thank you, you're verified.";
+  return name ? `Thanks, ${name}. You're all verified.` : "Thanks. You're all verified.";
 }
 
-/** The verified sentence without its closing question: "Thank you, Tobias, you're verified." (the
+/** The verified sentence without its closing question: "Thanks, Tobias. You're all verified." (the
  *  welcome-back variant keeps its "Welcome back. I see you called on ..." part). */
 export function withoutTrailingQuestion(sentence: string): string {
   const text = typeof sentence === "string" ? sentence.trim() : "";
@@ -1046,16 +1067,16 @@ function contactReadback(d: Record<string, unknown>): string {
   }
   const digits = nationalDigits(d.callback_phone);
   const number = digits ? `the best number is ${speakPhone(digits)}` : "";
+  // The full name is the first thing read back, so the thanks before it does not say the name too.
   let text: string;
   if (email && number) {
-    text =
-      `Thanks, ${first}. Let me read that back. ${full}, your email is ${email}, and ${number}. Did I get that right?`;
+    text = `Thanks! Let me read that back. ${full}, your email is ${email}, and ${number}. Did I get that right?`;
   } else if (email) {
-    text = `Thanks, ${first}. Let me read that back. ${full}, and your email is ${email}. Did I get that right?`;
+    text = `Thanks! Let me read that back. ${full}, and your email is ${email}. Did I get that right?`;
   } else if (number) {
-    text = `Thanks, ${first}. Just to confirm, that's ${full}, and ${number}. Did I get that right?`;
+    text = `Thanks! Just to confirm, that's ${full}, and ${number}. Did I get that right?`;
   } else {
-    text = `Thanks, ${first}. Just to confirm, that's ${full}. Did I get that right?`;
+    text = `Thanks! Just to confirm, that's ${full}. Did I get that right?`;
   }
   return isSpeakable(text) && text.length <= MAX_SPOKEN_CHARS ? text : CONTACT_READBACK_PLAIN;
 }
@@ -1165,8 +1186,8 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
     case "contact_retry":
       return contactRetry(d);
     case "contact_saved_new": {
-      const name = speakableName(d.first_name);
-      const thanks = name ? `Perfect, thanks ${name}.` : "Perfect, thanks.";
+      // The read-back just thanked them and said their full name, so this neither thanks them nor says
+      // the name again; the name comes once more, warmly, when the claim is taken (claim_intake_saved).
       // A start_claim already asked for these details first: the loss was told, so it is taken down now.
       // Otherwise taking it down on this call comes first; without an address there is nothing to email
       // the steps to, so the website stands in.
@@ -1175,14 +1196,11 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
         : d.has_email === false
         ? `I can take down what happened now, have someone from our claims team call you back, or you can find the steps to start a claim at ${CLAIMS_URL_SPOKEN}. Which would you like?`
         : "I can take down what happened now, email you the steps to start a claim, or have someone from our claims team call you back. Which would you like?";
-      return `${thanks} I've saved your details. ${offer}`;
+      return `Perfect, I've saved your details. ${offer}`;
     }
-    case "contact_saved_existing": {
-      const name = speakableName(d.first_name);
-      return `${
-        name ? `Thanks, ${name}.` : "Thanks."
-      } I've passed that email to our team to add to your account. Is there anything else I can help with?`;
-    }
+    case "contact_saved_existing":
+      // The read-back just thanked them and said their name, so this says neither again.
+      return "Got it. I've passed that email to our team to add to your account. Is there anything else I can help with?";
     case "claim_readback":
       return claimReadback(d);
     case "claim_needs_lookup":
@@ -1206,7 +1224,7 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
     case "claim_already_filed": {
       const last3 = claimLast3(d.claim_last3);
       return `Your claim is already filed${
-        last3 ? `, number ending in ${speakDigits(last3)}` : ""
+        last3 ? `, with a number ending in ${speakDigits(last3)}` : ""
       }. ${ANYTHING_ELSE_SHORT}`;
     }
     case "claim_not_pending":

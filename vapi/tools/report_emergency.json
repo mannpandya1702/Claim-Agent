@@ -25,7 +25,7 @@
     {
       "type": "request-start",
       "blocking": true,
-      "content": "If anyone is hurt or in immediate danger, please hang up and call 911 right now. If you are thinking about harming yourself, call or text 988."
+      "content": "If anyone is hurt or in immediate danger, please hang up and call 911 right now. If you're thinking about harming yourself, call or text 988."
     },
     {
       "type": "request-response-delayed",

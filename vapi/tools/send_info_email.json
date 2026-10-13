@@ -27,7 +27,7 @@
     {
       "type": "request-start",
       "blocking": false,
-      "content": "Sure, let me check on that."
+      "content": "One moment, let me check on that."
     },
     {
       "type": "request-response-delayed",
@@ -36,7 +36,7 @@
     },
     {
       "type": "request-failed",
-      "content": "I wasn't able to send that email just now. You can find the same information at observeinsurance dot com slash claims, or I can have a representative send it. Which would you prefer?"
+      "content": "Sorry, that email didn't go through just now. You can find the same information at observeinsurance dot com slash claims, or I can have a representative send it. Which would you prefer?"
     }
   ]
 }

@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertNotEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { CLAIM_DOCUMENTS, CLAIM_STATUSES, type Code, CODES, MAIN_LINE_SPOKEN } from "./enums.ts";
 import type { Claim } from "./types.ts";
+import { asksForSensitive } from "./redact.ts";
 import {
   assertSpeakable,
   byReadingPriority,
@@ -185,29 +186,32 @@ Deno.test("no sentence leaks markup, programming words or long digit runs", () =
 });
 
 Deno.test("exact fixed sentences", () => {
-  assertEquals(sentenceFor("bad_args"), "Sorry, I didn't catch that. Could you say it again?");
+  assertEquals(sentenceFor("bad_args"), "Sorry, I didn't quite catch that. Could you say it again?");
   assertEquals(
     sentenceFor("system_error"),
-    "I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?",
+    "Sorry, I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?",
   );
   assertEquals(sentenceFor("unknown_tool"), sentenceFor("system_error"));
   assertEquals(sentenceFor("dob_give_up"), sentenceFor("locked"));
   assertEquals(sentenceFor("not_verified", { level: "locked" }), sentenceFor("locked"));
   assertEquals(
     sentenceFor("locked"),
-    "I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?",
+    "I'm sorry, but I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?",
   );
-  assertEquals(sentenceFor("needs_dob"), "Thanks. For security, what's the date of birth on the account?");
-  assertEquals(sentenceFor("dob_unreadable"), "Could you give me the month, day and year?");
+  assertEquals(
+    sentenceFor("needs_dob"),
+    "Thanks! And just to keep your account safe, what's the date of birth on the account?",
+  );
+  assertEquals(sentenceFor("dob_unreadable"), "Just to be sure, could you give me the month, day and year?");
   assertEquals(
     sentenceFor("rep_unavailable"),
-    "I'm sorry, I couldn't record your request just now. Please call our main line at 1-800-555-0142, and someone will help you. Is there anything else I can help you with?",
+    "I'm sorry, I couldn't record your request just now. Please call our main line at 1-800-555-0142, and someone there will help you. Anything else I can help with?",
   );
   assertEquals(
     sentenceFor("no_email_on_file"),
-    "I don't see an email address on your account. If you'd like, you can spell one for me and I'll pass it to our team to add. Or you can find the same information at observeinsurance dot com slash claims. Which would you prefer?",
+    "I don't see an email address on your account. If you'd like, you can spell one for me, and I'll pass it to our team to add. Or you can find the same information at observeinsurance dot com slash claims. Which would you prefer?",
   );
-  assertEquals(sentenceFor("emergency_logged"), "Our team has been told. Are you safe right now?");
+  assertEquals(sentenceFor("emergency_logged"), "I've told our team. Are you safe right now?");
   assertEquals(
     sentenceFor("emergency_logged", { db_failed: true }),
     "Please stay on the line. Are you safe right now?",
@@ -221,29 +225,29 @@ Deno.test("dynamic sentences", () => {
   );
   assertEquals(
     sentenceFor("verified", { first_name: "Tobias" }),
-    "Thank you, Tobias, you're verified. What can I help you with today?",
+    "Thanks, Tobias. You're all verified. What can I help you with today?",
   );
-  assertEquals(sentenceFor("verified", { first_name: "In\u00e9s" }).includes("Thank you, Ines,"), true);
+  assertEquals(sentenceFor("verified", { first_name: "In\u00e9s" }).includes("Thanks, Ines."), true);
   assertEquals(sentenceFor("verified", { first_name: "{{name}}" }).includes("{"), false);
   assertEquals(
     sentenceFor("not_verified", { level: "phone_found" }),
-    "For security, I need the date of birth on the account before I can share that. What's the date of birth?",
+    "Happy to help with that once you're verified. What's the date of birth?",
   );
   assertEquals(
     sentenceFor("not_verified", { level: "none" }),
-    "I need to verify your identity before I can share that. What's the phone number on your account?",
+    "Happy to help with that once I've verified you. What's the phone number on your account?",
   );
   const queued = (at: string) =>
-    `I've sent your request and a summary to our claims team. A representative will call you back at ${at} within one business day. Is there anything else I can help you with?`;
+    `I've passed this to our claims team. Someone will call you back at ${at} within one business day. Anything else I can help with?`;
   assertEquals(sentenceFor("rep_queued", { target: "account" }), queued("the number on your account"));
   assertEquals(
     sentenceFor("rep_queued", { target: "given", digits: "+16025550101" }),
-    queued("the number you gave me, ending in zero one zero one"),
+    queued("the number you gave me, ending in zero one zero one,"),
   );
   assertEquals(sentenceFor("rep_queued", { target: "caller_id" }), queued("the number you're calling from"));
   assertEquals(
     sentenceFor("callback_updated", { digits: "6025550101" }),
-    "Got it, six zero two... five five five... zero one zero one. Is there anything else I can help you with?",
+    "Got it, six zero two... five five five... zero one zero one. Anything else I can help with?",
   );
   assertEquals(
     sentenceFor("ok", { claims: byNumber("CLM-240230"), refDate: TODAY }),
@@ -308,8 +312,8 @@ Deno.test("the claims summary for the demo seed: one short clause per claim, in 
 });
 
 Deno.test("the chained read fits one turn after the verified opening, with or without welcome back", () => {
-  const plain = "Thank you, Tobias, you're verified.";
-  const back = "Thank you, Tobias, you're verified. Welcome back.";
+  const plain = "Thanks, Tobias. You're all verified.";
+  const back = "Thanks, Tobias. You're all verified. Welcome back.";
   for (const opening of [plain, back]) {
     const s = verifiedStatusSentence(
       opening,
@@ -455,7 +459,7 @@ Deno.test("reading order: what needs the caller first, then money, then claims i
   assert(at("was approved") < at("was received"), s);
   // four clauses at most; the fifth claim is counted, not dropped
   assert(!s.includes("is closed"), s);
-  assertStringIncludes(s, "There is one more claim on file. Would you like me to go over what's needed");
+  assertStringIncludes(s, "There's one more claim on file. Would you like me to go over what's needed");
   // within a status the newest claim is read first
   const older = claim({
     status: "approved",
@@ -493,7 +497,7 @@ Deno.test("claims awaiting documents are read earliest due date first, a claim w
     three,
     "You have three claims. Your auto claim ending in one nine eight needs documents from you by October twenty-fourth. " +
       "Your auto claim ending in three zero five needs documents from you by October thirtieth. " +
-      "There is one more claim on file. Would you like me to go over what's needed, or email you the list?",
+      "There's one more claim on file. Would you like me to go over what's needed, or email you the list?",
   );
   assertEquals(claimsUnread([c306, c305, c198], TODAY), [c306]);
   assertEquals(claimsUnread(tobiasClaims(), TODAY), []);
@@ -548,7 +552,7 @@ const WORST: Partial<Claim> = {
 };
 
 Deno.test("every mix of up to four claims fits one turn, and so does the chained read of up to three", () => {
-  const opening = "Thank you, Mary Ann, you're verified. Welcome back.";
+  const opening = "Thanks, Mary Ann. You're all verified. Welcome back.";
   const mixes = (n: number): Claim["status"][][] =>
     n === 0 ? [[]] : mixes(n - 1).flatMap((m) => CLAIM_STATUSES.map((s) => [...m, s]));
   let checked = 0;
@@ -945,7 +949,7 @@ Deno.test("numberToWords", () => {
 
 Deno.test("assertSpeakable accepts plain speech and the main line only", () => {
   assertSpeakable("Your auto claim ending in one one five is closed.");
-  assertSpeakable(`Please call our main line at ${MAIN_LINE_SPOKEN}, and someone will help you.`);
+  assertSpeakable(`Please call our main line at ${MAIN_LINE_SPOKEN}, and someone there will help you.`);
   assertSpeakable("I'm not finding an account under six zero two... five five five... zero one nine nine.");
   assertSpeakable("A 30-day window, 1,000 options, 555 people.");
   const rejects = [
@@ -1007,7 +1011,7 @@ Deno.test("speakEmail: letter by letter, digits and symbols as words, known prov
 Deno.test("contact sentences: exact wording", () => {
   assertEquals(
     sentenceFor("contact_readback", { first_name: "John", last_name: "Smith", email: "john.smith42@gmail.com" }),
-    "Thanks, John. Let me read that back. John Smith, and your email is J, O, H, N, dot, S, M, I, T, H, four, two, at gmail dot com. Did I get that right?",
+    "Thanks! Let me read that back. John Smith, and your email is J, O, H, N, dot, S, M, I, T, H, four, two, at gmail dot com. Did I get that right?",
   );
   // a callback number the caller said is read back in three groups, the way a person reads one
   assertEquals(
@@ -1017,25 +1021,25 @@ Deno.test("contact sentences: exact wording", () => {
       email: "john.smith42@gmail.com",
       callback_phone: "+16025550177",
     }),
-    "Thanks, John. Let me read that back. John Smith, your email is J, O, H, N, dot, S, M, I, T, H, four, two, at gmail dot com, and the best number is six zero two... five five five... zero one seven seven. Did I get that right?",
+    "Thanks! Let me read that back. John Smith, your email is J, O, H, N, dot, S, M, I, T, H, four, two, at gmail dot com, and the best number is six zero two... five five five... zero one seven seven. Did I get that right?",
   );
   assertEquals(
     sentenceFor("contact_readback", { first_name: "Jane", last_name: "O'Brien", callback_phone: "6025550177" }),
-    "Thanks, Jane. Just to confirm, that's Jane O'Brien, and the best number is six zero two... five five five... zero one seven seven. Did I get that right?",
+    "Thanks! Just to confirm, that's Jane O'Brien, and the best number is six zero two... five five five... zero one seven seven. Did I get that right?",
   );
   // a number that is not ten digits is left out rather than read wrong
   assertEquals(
     sentenceFor("contact_readback", { first_name: "Jane", last_name: "O'Brien", callback_phone: "5550177" }),
-    "Thanks, Jane. Just to confirm, that's Jane O'Brien. Did I get that right?",
+    "Thanks! Just to confirm, that's Jane O'Brien. Did I get that right?",
   );
   assertEquals(
     sentenceFor("contact_readback", { first_name: "Jane", last_name: "O'Brien" }),
-    "Thanks, Jane. Just to confirm, that's Jane O'Brien. Did I get that right?",
+    "Thanks! Just to confirm, that's Jane O'Brien. Did I get that right?",
   );
   // accents are folded for speech
   assertEquals(
     sentenceFor("contact_readback", { first_name: "Jos\u00e9", last_name: "Pe\u00f1a" }),
-    "Thanks, Jose. Just to confirm, that's Jose Pena. Did I get that right?",
+    "Thanks! Just to confirm, that's Jose Pena. Did I get that right?",
   );
   // nothing speakable to read back: the plain question, never a broken sentence
   for (
@@ -1058,9 +1062,12 @@ Deno.test("contact sentences: exact wording", () => {
   );
   assertEquals(
     sentenceFor("email_on_file"),
-    "There's already an email on your account, so I can't change it on this call. I can have someone from our claims team call you back about it. Would you like that?",
+    "There's already an email on your account, so I can't change it on this call, but I can have someone from our claims team call you back about it. Would you like that?",
   );
-  assertEquals(sentenceFor("not_pending"), "Sorry, let me take your details again. What's your first and last name?");
+  assertEquals(
+    sentenceFor("not_pending"),
+    "Sorry about that, let me take your details again. What's your first and last name?",
+  );
   // a verified caller's name is the account's, so only the address is asked for again
   assertEquals(
     sentenceFor("not_pending", { verified: true }),
@@ -1088,38 +1095,38 @@ Deno.test("contact sentences: exact wording", () => {
   // taking the loss down now comes first: a new caller who called to report one is offered exactly that
   assertEquals(
     sentenceFor("contact_saved_new", { first_name: "Jane" }),
-    "Perfect, thanks Jane. I've saved your details. I can take down what happened now, email you the steps to start a claim, or have someone from our claims team call you back. Which would you like?",
+    "Perfect, I've saved your details. I can take down what happened now, email you the steps to start a claim, or have someone from our claims team call you back. Which would you like?",
   );
   assertEquals(
     sentenceFor("contact_saved_new", { first_name: "Jane", has_email: false }),
-    "Perfect, thanks Jane. I've saved your details. I can take down what happened now, have someone from our claims team call you back, or you can find the steps to start a claim at observeinsurance dot com slash claims. Which would you like?",
+    "Perfect, I've saved your details. I can take down what happened now, have someone from our claims team call you back, or you can find the steps to start a claim at observeinsurance dot com slash claims. Which would you like?",
   );
   // a start_claim already asked for these details: the loss was told, so the claim is taken down now
   for (const has_email of [true, false]) {
     assertEquals(
       sentenceFor("contact_saved_new", { first_name: "Jane", has_email, resume_claim: true }),
-      "Perfect, thanks Jane. I've saved your details. Shall I go ahead and take down that claim now?",
+      "Perfect, I've saved your details. Shall I go ahead and take down that claim now?",
     );
   }
-  assertStringIncludes(sentenceFor("contact_saved_new"), "Perfect, thanks. I've saved your details.");
+  assertStringIncludes(sentenceFor("contact_saved_new"), "Perfect, I've saved your details.");
   assertEquals(
     sentenceFor("contact_saved_existing", { first_name: "Teague" }),
-    "Thanks, Teague. I've passed that email to our team to add to your account. Is there anything else I can help with?",
+    "Got it. I've passed that email to our team to add to your account. Is there anything else I can help with?",
   );
   assertEquals(
     sentenceFor("contact_saved_existing"),
-    "Thanks. I've passed that email to our team to add to your account. Is there anything else I can help with?",
+    "Got it. I've passed that email to our team to add to your account. Is there anything else I can help with?",
   );
 });
 
 Deno.test("the new-caller sentences lead into the details, and an email to a given address says so", () => {
   assertEquals(
     sentenceFor("not_found_final"),
-    "I'm sorry, I still can't find an account for that number. If you're new with us, I can help you get started. Could I get your first and last name?",
+    "I'm sorry, I still can't find an account for that number. If you're new with us, I'd be glad to help you get started. Could I get your first and last name?",
   );
   assertEquals(
     sentenceFor("email_sent", { target: "given" }),
-    "Done, I've emailed that to the address you gave me. It should arrive within a few minutes. Is there anything else I can help you with?",
+    "There you go, I've emailed that to the address you gave me. It should arrive within a few minutes. Anything else I can help with?",
   );
   assertStringIncludes(sentenceFor("email_sent"), "the address on your account");
   // the verified caller with no email on file is offered the spelled-address route, never told it is impossible
@@ -1156,20 +1163,218 @@ Deno.test("no spoken string carries banned words or a double dash", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
+// The warmth pass: the words got warmer; the facts, the closing questions and the cues did not move.
+// ---------------------------------------------------------------------------------------------
+const OFFICE_WORDING = [
+  /for security purposes/i,
+  /please be advised/i,
+  /\bkindly\b/i,
+  /valued customer/i,
+  /apologi[sz]e for (any|the) inconvenience/i,
+  /\bat this time\b/i,
+  /\bassist you\b/i,
+];
+// Spelled-out forms a person on the phone would contract.
+const UNCONTRACTED =
+  /\b(I am|you are|we are|they are|it is|that is|there is|do not|does not|did not|cannot|can not|will not|would not|is not|are not|was not|I will|I have (sent|emailed|recorded|passed|saved|told))\b/i;
+
+Deno.test("spokenWords: a number in figures counts one word per digit, as it is said", () => {
+  assertEquals(spokenWords("Call 1-800-555-0142, please."), 13);
+  assertEquals(spokenWords("one eight hundred"), 3);
+  assertEquals(spokenWords("  "), 0);
+  // the main line in rep_unavailable is about eleven spoken words, not one
+  assertEquals(spokenWords(sentenceFor("rep_unavailable")), 38);
+  // a hyphenated word is still one word
+  assertEquals(spokenWords("a ten-digit number"), 3);
+});
+
+Deno.test("warm wording: no office phrases, contractions throughout, the caller's first name at most once", () => {
+  for (const [code, data] of VARIANTS) {
+    const s = sentenceFor(code, data);
+    for (const re of OFFICE_WORDING) assert(!re.test(s), `${code} says ${re}: ${s}`);
+    // a claim's details quote the claims system's own note ("is not covered by the policy") as written
+    if (code !== "claim_detail") assert(!UNCONTRACTED.test(s), `${code} has an uncontracted form: ${s}`);
+    const first = typeof data?.first_name === "string" ? spokenName(data.first_name).split(" ")[0] : "";
+    if (first) {
+      const times = s.split(/[^A-Za-z']+/).filter((w) => w === first).length;
+      assert(times <= 1, `${code} says the first name ${times} times: ${s}`);
+    }
+  }
+  // one sympathy per moment: a lock says sorry once, and the lock's claim refusal does not say it again
+  assert(/\bsorry\b/i.test(sentenceFor("locked")));
+  assert(!/\bsorry\b/i.test(sentenceFor("claim_locked")));
+  // nor do the turns before a lock (a wrong DOB, then the lock; an unreadable DOB twice, then the lock)
+  assert(!/\bsorry\b/i.test(sentenceFor("auth_failed")), sentenceFor("auth_failed"));
+  assert(!/\bsorry\b/i.test(sentenceFor("dob_unreadable")), sentenceFor("dob_unreadable"));
+  // a reported loss hears sorry once: in the sentence that starts the claim (or sends them to identify
+  // first), never again in the resume question, the read-back or the filed answer after it
+  const verified = sentenceFor("verified", { first_name: "Tobias" });
+  assert(/\bsorry\b/i.test(verifiedFileClaimSentence(verified)));
+  assert(!/\bsorry\b/i.test(verifiedFileClaimSentence(verified, true)));
+  for (const code of ["claim_needs_verification", "claim_needs_lookup", "claim_needs_contact"] as const) {
+    assert(/^I'm sorry to hear that\./.test(sentenceFor(code)), sentenceFor(code));
+  }
+  for (
+    const s of [
+      sentenceFor("contact_saved_new", { first_name: "Dana", resume_claim: true }),
+      sentenceFor("claim_readback", { claim_type: "home", loss_date: "2026-10-11", today: "2026-10-13" }),
+      sentenceFor("claim_filed", { claim_last3: "412", emailed: true }),
+      sentenceFor("claim_intake_saved", { first_name: "Dana" }),
+    ]
+  ) assert(!/\bsorry\b/i.test(s), s);
+  // "Perfect" never opens a verified sentence: a denial or a reported loss can follow it in one breath
+  assert(!/\bperfect\b/i.test(verified), verified);
+  // no "no documents" answer frames a claim's state as good news (it can follow a denial)
+  assert(!/good news/i.test(sentenceFor("no_documents_needed")));
+  // a callback queued and an email sent, often back to back, open differently
+  const opener = (t: string) => t.split(/[ ,.!]/)[0];
+  assertNotEquals(opener(sentenceFor("rep_queued", { target: "account" })), opener(sentenceFor("email_sent")));
+  // and never two apologies in one sentence
+  for (const [code, data] of VARIANTS) {
+    const s = sentenceFor(code, data);
+    assert((s.match(/\bsorry\b/gi) ?? []).length <= 1, `${code} apologises twice: ${s}`);
+  }
+});
+
+// Every sentence still ends on the one question it ended on before the warmth pass, so the prompt's
+// routing ("when a sentence asks ...") still holds. The one deliberate change is the shared closer,
+// "Is there anything else I can help you with?", now "Anything else I can help with?".
+const ANYTHING = "Anything else I can help with?";
+const IS_THERE = "Is there anything else I can help with?";
+const CLOSINGS: [Code, Record<string, unknown> | undefined, string][] = [
+  ["bad_args", undefined, "Could you say it again?"],
+  ["system_error", undefined, "Which would you prefer?"],
+  ["unknown_tool", undefined, "Which would you prefer?"],
+  ["invalid_phone", undefined, "Could you say it again?"],
+  ["not_found", { digits: "6025550199" }, "Is that the right number?"],
+  ["not_found", undefined, "Is that the right number?"],
+  ["not_found_final", undefined, "Could I get your first and last name?"],
+  ["needs_dob", undefined, "what's the date of birth on the account?"],
+  ["already_verified", undefined, "What can I help you with?"],
+  ["locked", undefined, "Which would you prefer?"],
+  ["dob_give_up", undefined, "Which would you prefer?"],
+  ["verified", { first_name: "Tobias" }, "What can I help you with today?"],
+  ["verified", undefined, "What can I help you with today?"],
+  ["auth_failed", undefined, "Could you give me your date of birth one more time?"],
+  ["no_lookup_yet", undefined, "What's the number?"],
+  ["dob_unreadable", undefined, "could you give me the month, day and year?"],
+  [
+    "ok",
+    { claims: SEED_CLAIMS.filter((c) => c.customer_id === TOBIAS), refDate: TODAY },
+    "Would you like me to go over what's needed, or email you the list?",
+  ],
+  ["no_claims", undefined, "Would you like me to explain how to start one?"],
+  ["claim_documents", { claims: SEED_CLAIMS, refDate: TODAY }, "Would you like me to email you this list too?"],
+  ["no_documents_needed", undefined, IS_THERE],
+  ["claim_detail", { claims: byNumber("CLM-240115"), refDate: TODAY }, IS_THERE],
+  ["claim_not_identified", undefined, "Which claim do you mean, your auto, home or property claim?"],
+  ["not_verified", { level: "none" }, "What's the phone number on your account?"],
+  ["not_verified", { level: "phone_found" }, "What's the date of birth?"],
+  ["not_verified", { level: "locked" }, "Which would you prefer?"],
+  ["rep_queued", { target: "account" }, ANYTHING],
+  ["rep_queued", { target: "given", digits: "6025550177" }, ANYTHING],
+  ["rep_queued_no_number", undefined, "What's the best number for a representative to reach you?"],
+  ["callback_updated", { digits: "6025550177" }, ANYTHING],
+  ["rep_recorded", undefined, ANYTHING],
+  ["rep_already_queued", undefined, ANYTHING],
+  ["rep_unavailable", undefined, ANYTHING],
+  ["emergency_logged", undefined, "Are you safe right now?"],
+  ["emergency_logged", { db_failed: true }, "Are you safe right now?"],
+  ["email_sent", undefined, ANYTHING],
+  ["email_sent", { target: "given" }, ANYTHING],
+  ["email_already_sent", undefined, ANYTHING],
+  ["no_email_on_file", undefined, "Which would you prefer?"],
+  ["email_failed", undefined, "Which would you prefer?"],
+  ["contact_readback", { first_name: "Jane", last_name: "Doe" }, "Did I get that right?"],
+  ["contact_readback", undefined, "did I get your details right?"],
+  ["contact_invalid_email", undefined, "Could you spell it for me, letter by letter?"],
+  ["contact_needs_name", undefined, "could I get your first and last name?"],
+  ["contact_needs_phone", undefined, "What's the best number to reach you?"],
+  ["email_on_file", undefined, "Would you like that?"],
+  ["not_pending", undefined, "What's your first and last name?"],
+  ["not_pending", { verified: true }, "could you spell that email for me one more time, letter by letter?"],
+  ["contact_retry", undefined, "What did I get wrong, your name or your email?"],
+  ["contact_saved_new", { first_name: "Jane" }, "Which would you like?"],
+  ["contact_saved_new", { first_name: "Jane", resume_claim: true }, "Shall I go ahead and take down that claim now?"],
+  ["contact_saved_existing", { first_name: "Teague" }, IS_THERE],
+  ["claim_readback", { claim_type: "auto", loss_date: "2026-10-10", today: TODAY }, "Is that correct?"],
+  ["claim_needs_lookup", undefined, "what's the phone number on your account?"],
+  ["claim_needs_contact", undefined, "can I get your first and last name?"],
+  ["claim_needs_verification", undefined, "What's the date of birth on the account?"],
+  ["claim_locked", undefined, "Would you like that?"],
+  ["claim_needs_description", undefined, "Can you tell me briefly what happened?"],
+  ["claim_bad_date", undefined, "What day did it happen?"],
+  ["claim_date_help", undefined, "Would you like a callback?"],
+  ["claim_needs_phone", undefined, "what's the best number for our claims team to reach you?"],
+  ["claim_too_old", undefined, "Would you like a callback?"],
+  ["claim_already_filed", { claim_last3: "472" }, IS_THERE],
+  ["claim_not_pending", undefined, "Can you tell me what happened?"],
+  ["claim_retry", undefined, "What should I change?"],
+  ["claim_filed", { claim_last3: "472", emailed: true }, IS_THERE],
+  ["claim_intake_saved", { first_name: "Jane", emailed: true }, IS_THERE],
+];
+
+Deno.test("every sentence ends on the one question it ended on before", () => {
+  for (const [code, data, closing] of CLOSINGS) {
+    const s = sentenceFor(code, data);
+    assertEquals((s.match(/\?/g) ?? []).length, 1, `${code}: one question: ${s}`);
+    // the closing sentence itself, from its own opening word (or after a short opener such as "Sorry,")
+    assert(s.toLowerCase().endsWith(closing.toLowerCase()), `${code} no longer ends on "${closing}": ${s}`);
+  }
+  for (const code of CODES) assert(CLOSINGS.some(([c]) => c === code), `${code} has no closing pinned`);
+  const verified = sentenceFor("verified", { first_name: "Tobias" });
+  assert(verifiedFileClaimSentence(verified).endsWith("Can you tell me a little more about what happened?"));
+  assert(verifiedFileClaimSentence(verified, true).endsWith("Shall I go ahead and take down that claim now?"));
+});
+
+Deno.test("every question for a date of birth, a phone number or an email is one the transcript masks", () => {
+  // post_call masks the caller's answer to these questions whole (redact.ts asksForSensitive), so the
+  // warmer wording must still carry the words it keys on.
+  const asks: [Code, Record<string, unknown> | undefined][] = [
+    ["needs_dob", undefined],
+    ["auth_failed", undefined],
+    ["dob_unreadable", undefined],
+    ["not_verified", { level: "phone_found" }],
+    ["claim_needs_verification", undefined],
+    ["invalid_phone", undefined],
+    ["not_found", { digits: "6025550199" }],
+    ["not_found", undefined],
+    ["no_lookup_yet", undefined],
+    ["not_verified", { level: "none" }],
+    ["rep_queued_no_number", undefined],
+    ["contact_needs_phone", undefined],
+    ["claim_needs_lookup", undefined],
+    ["claim_needs_phone", undefined],
+    ["contact_invalid_email", undefined],
+    ["not_pending", { verified: true }],
+    ["contact_retry", { part: "email" }],
+    ["no_email_on_file", undefined],
+    ["contact_readback", { first_name: "Jane", last_name: "Doe", email: "jane.doe@gmail.com" }],
+  ];
+  for (const [code, data] of asks) {
+    const s = sentenceFor(code, data);
+    assert(asksForSensitive(s), `${code} no longer reads as a question for a DOB, number or email: ${s}`);
+  }
+  // and an answer to "anything else" is not masked
+  assert(!asksForSensitive(sentenceFor("email_sent")));
+  assert(!asksForSensitive(sentenceFor("rep_recorded")));
+});
+
+// ---------------------------------------------------------------------------------------------
 // First notice of loss.
 // ---------------------------------------------------------------------------------------------
 Deno.test("claim sentences: exact wording", () => {
   assertEquals(
     sentenceFor("claim_needs_lookup"),
-    "I can help you start a claim. First, what's the phone number on your account?",
+    "I'm sorry to hear that. I can help you start a claim. First, what's the phone number on your account?",
   );
   assertEquals(
     sentenceFor("claim_needs_contact"),
-    "I can take down the details for our claims team. First, can I get your first and last name?",
+    "I'm sorry to hear that. I can take down the details for our claims team. First, can I get your first and last name?",
   );
   assertEquals(
     sentenceFor("claim_needs_verification"),
-    "I'll just need to verify you first. What's the date of birth on the account?",
+    "I'm sorry to hear that. I'll just need to verify you first. What's the date of birth on the account?",
   );
   assertEquals(
     sentenceFor("claim_locked"),
@@ -1191,7 +1396,7 @@ Deno.test("claim sentences: exact wording", () => {
   );
   assertEquals(
     sentenceFor("claim_already_filed", { claim_last3: "472" }),
-    "Your claim is already filed, number ending in four seven two. Is there anything else I can help with?",
+    "Your claim is already filed, with a number ending in four seven two. Is there anything else I can help with?",
   );
   assertEquals(
     sentenceFor("claim_already_filed"),
@@ -1343,7 +1548,7 @@ Deno.test("every spoken sentence fits one turn: sixty words at most, seventy-fiv
   // every code is covered, and the seeded account's answers fit with room to spare
   for (const code of CODES) assert(cases.some(([c]) => c === code), `${code} has no representative case`);
   assert(spokenWords(claimsSentence(tobiasClaims(), TODAY)) <= MAX_TURN_WORDS);
-  const opening = "Thank you, Tobias, you're verified. Welcome back.";
+  const opening = "Thanks, Tobias. You're all verified. Welcome back.";
   assert(
     spokenWords(`${opening} ${claimsSentence(tobiasClaims(), TODAY, MAX_TURN_WORDS - spokenWords(opening))}`) <=
       MAX_TURN_WORDS,
@@ -1362,41 +1567,41 @@ Deno.test("speakLossDate: the weekday and the date, the same in every zone", () 
 });
 
 Deno.test("verify intents: the verified opening without its question, then the shortcut", () => {
-  const plain = "Thank you, Tobias, you're verified. What can I help you with today?";
+  const plain = "Thanks, Tobias. You're all verified. What can I help you with today?";
   const welcome =
-    "Thank you, Tobias, you're verified. Welcome back. I see you called on October tenth. Is this about the same claim as last time, or something else?";
-  assertEquals(withoutTrailingQuestion(plain), "Thank you, Tobias, you're verified.");
+    "Thanks, Tobias. You're all verified. Welcome back. I see you called on October tenth. Is this about the same claim as last time, or something else?";
+  assertEquals(withoutTrailingQuestion(plain), "Thanks, Tobias. You're all verified.");
   assertEquals(
     withoutTrailingQuestion(welcome),
-    "Thank you, Tobias, you're verified. Welcome back. I see you called on October tenth.",
+    "Thanks, Tobias. You're all verified. Welcome back. I see you called on October tenth.",
   );
   assertEquals(withoutTrailingQuestion("No question here."), "No question here.");
   assertEquals(
     withoutTrailingQuestion(sentenceFor("verified", { first_name: "St. John" })),
-    "Thank you, St. John, you're verified.",
+    "Thanks, St. John. You're all verified.",
   );
   // the caller has usually described the loss already, so the question asks for more, not for it again
   assertEquals(
     verifiedFileClaimSentence(plain),
-    "Thank you, Tobias, you're verified. Let's get your claim started. Can you tell me a little more about what happened?",
+    "Thanks, Tobias. You're all verified. I'm sorry you're dealing with this. Let's get your claim started. Can you tell me a little more about what happened?",
   );
   assertEquals(
     verifiedFileClaimSentence(welcome),
-    "Thank you, Tobias, you're verified. Welcome back. I see you called on October tenth. Let's get your claim started. Can you tell me a little more about what happened?",
+    "Thanks, Tobias. You're all verified. Welcome back. I see you called on October tenth. I'm sorry you're dealing with this. Let's get your claim started. Can you tell me a little more about what happened?",
   );
   // the loss was told to a start_claim that asked for verification first: take it down now
   assertEquals(
     verifiedFileClaimSentence(plain, true),
-    "Thank you, Tobias, you're verified. Shall I go ahead and take down that claim now?",
+    "Thanks, Tobias. You're all verified. Shall I go ahead and take down that claim now?",
   );
   assertEquals(
     verifiedFileClaimSentence(welcome, true),
-    "Thank you, Tobias, you're verified. Welcome back. I see you called on October tenth. Shall I go ahead and take down that claim now?",
+    "Thanks, Tobias. You're all verified. Welcome back. I see you called on October tenth. Shall I go ahead and take down that claim now?",
   );
   const status = claimsSentence(byNumber("CLM-240115"), TODAY);
-  assertEquals(verifiedStatusSentence(plain, status), `Thank you, Tobias, you're verified. ${status}`);
+  assertEquals(verifiedStatusSentence(plain, status), `Thanks, Tobias. You're all verified. ${status}`);
   assertEquals(
     verifiedStatusSentence(plain, sentenceFor("no_claims")),
-    "Thank you, Tobias, you're verified. I don't see any claims on file for your account. Would you like me to explain how to start one?",
+    "Thanks, Tobias. You're all verified. I'm not seeing any claims on file for your account. Would you like me to explain how to start one?",
   );
 });

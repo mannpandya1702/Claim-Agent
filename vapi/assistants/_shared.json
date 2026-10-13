@@ -13,12 +13,13 @@
       "provider": "11labs",
       "voiceId": "bP6y87KyX5lwNEi7xOkX",
       "model": "eleven_turbo_v2_5",
-      "speed": 0.8,
-      "stability": 0.7,
-      "style": 0.3,
+      "speed": 1.0,
+      "stability": 0.45,
+      "style": 0.35,
       "similarityBoost": 0.75,
       "useSpeakerBoost": true,
-      "optimizeStreamingLatency": 3
+      "optimizeStreamingLatency": 3,
+      "chunkPlan": { "enabled": true, "minCharacters": 15 }
     },
     "transcriber": {
       "provider": "deepgram",
@@ -77,7 +78,7 @@
     "stopSpeakingPlan": {
       "numWords": 1,
       "voiceSeconds": 0.2,
-      "backoffSeconds": 1,
+      "backoffSeconds": 0.5,
       "interruptionPhrases": [
         "stop",
         "shut",
@@ -138,7 +139,7 @@
       {
         "on": "customer.speech.timeout",
         "options": { "timeoutSeconds": 10, "triggerMaxCount": 3, "triggerResetMode": "onUserSpeech" },
-        "do": [{ "type": "say", "exact": "Are you still there? Take your time." }]
+        "do": [{ "type": "say", "exact": "Are you still there? No rush, take your time." }]
       },
       {
         "on": "customer.speech.timeout",
@@ -151,14 +152,14 @@
         "do": [
           {
             "type": "say",
-            "exact": "If this is an emergency, please hang up and call 911. Otherwise, please call back any time. Goodbye."
+            "exact": "If this is an emergency, please hang up and call 911. Otherwise, call us back any time. Take care."
           },
           { "type": "tool", "tool": { "type": "endCall" } }
         ]
       },
       {
         "on": "assistant.transcriber.endpointedSpeechLowConfidence[confidence=0.1:0.3]",
-        "do": [{ "type": "say", "exact": "Sorry, I didn't catch that. Could you say it again?" }]
+        "do": [{ "type": "say", "exact": "Sorry, I missed that. Could you say it one more time?" }]
       }
     ],
     "silenceTimeoutSeconds": 45,

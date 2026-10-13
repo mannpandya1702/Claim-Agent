@@ -11,7 +11,7 @@
       "type": "number",
       "number": "<<REP_PHONE_E164>>",
       "description": "A claims representative, when the caller asks for a person.",
-      "message": "Please hold while I connect you to a claims representative.",
+      "message": "Sure thing. Please hold while I connect you to a claims representative.",
       "transferPlan": {
         "mode": "blind-transfer"
       }

@@ -243,9 +243,14 @@ async function runWithBackstop(
  *  (voice test 01a13421: "Sorry, wait" nine seconds into the claims summary was not even transcribed),
  *  while the model's own speech stops when the caller talks (01a13425: stopped 1.26 s after the caller
  *  started, with a user-interrupted event). Short sentences stay native: exact and fastest; long ones
- *  (summaries, read-backs, details) go through the model, which reads result.message word for word
- *  when the result says spoken: false (rules.md rule 2). */
-export const NATIVE_MAX_WORDS = 20;
+ *  go through the model, which reads result.message word for word when the result says spoken: false
+ *  (rules.md rule 2). Reading costs a model turn (about 1.2 to 1.8 s of silence after the filler), so
+ *  the line sits at 28 words: at voice speed 1.0 that is about nine seconds of speech the caller
+ *  cannot cut into, which covers most short answers (verified, an email sent, a callback queued to
+ *  the number on the account or the one they're calling from), while claim summaries, document lists,
+ *  spelled read-backs and claim details stay model-read so the caller can cut in. A number written in
+ *  figures counts one word per digit (spokenWords), so the main line keeps rep_unavailable model-read. */
+export const NATIVE_MAX_WORDS = 28;
 
 /** Whether VAPI speaks the sentence itself: native messages on, short enough to be spoken in full
  *  without needing to be interruptible, and under VAPI's length limit. */

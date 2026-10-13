@@ -8,7 +8,7 @@
 //   deno task battery --list               persona ids
 //   deno task battery --dry-run            build every first request offline and print the plan
 //
-// Options: --cap <conversations> (default 90, a hard ceiling checked before anything is spent),
+// Options: --cap <conversations> (default 96, a hard ceiling checked before anything is spent),
 // --concurrency <k> (default 3). Every chat is named "INTERNAL ...", every number is a 555 number,
 // and a one-turn 402 probe runs first: an empty wallet halts the run before any persona starts.
 // The JSON report lands in fixtures/raw/battery/ (gitignored).
@@ -76,7 +76,7 @@ import { vapiClient, VapiError } from "./lib/vapi.ts";
 import { deepMerge, loadVariant, paths, promptPath, renderPrompt, sha256Hex } from "./render.ts";
 
 export const ASSISTANT_KEY = "solo-core" as const;
-export const DEFAULTS = { n: 3, cap: 90, concurrency: 3 };
+export const DEFAULTS = { n: 3, cap: 99, concurrency: 3 };
 const MAX_N = 20;
 const MAX_CONCURRENCY = 6;
 // A conversation never needs more requests than turns plus confirmations; this bounds a runaway.
@@ -1375,6 +1375,8 @@ const POLICY_NUMBER_ASK = /\bpolicy number\b/i;
 // What Ava said on a test call instead of looking up the right third number.
 const LOOKUP_REFUSED =
   /\b(can't|cannot|can not|unable to) (look up|check|try|search) (another|any more|more|a different)\b/i;
+// A warm re-ask of garbled speech (rules.md rule 23), in whatever words the model picks.
+const UNCLEAR_REASK = /\b(catch|caught|say (that|it) again|repeat|didn't (quite )?(get|hear)|missed)\b/i;
 const INJURY_ASK = /\b(anyone|anybody|you|everyone) (hurt|injured)\?|\binjur(y|ies)\b[^.?]*\?/i;
 
 const TOBIAS_SAYS_PHONE = "six zero two, five five five, zero one zero one";
@@ -1444,6 +1446,15 @@ const lossDateAs = (phrase: string): ArgCheck => (a) => {
     ? `loss_date ${JSON.stringify(a.loss_date)} is a date worked out by the model, not the caller's words`
     : null;
 };
+// detail claim with a claim_ending that names this claim and no other of the caller's (tools.ts claimMatchesKey)
+const endingNames =
+  (digits: string, type: string, status: string, other: [string, string, string]): ArgCheck => (a) => {
+    const key = claimEndingKey(a.claim_ending);
+    return a.detail === "claim" && key !== "" && claimMatchesKey(digits, type, status, key) &&
+        !claimMatchesKey(...other, key)
+      ? null
+      : `expected detail claim naming the ${type} claim ending in ${digits.slice(-3)}, got ${JSON.stringify(a)}`;
+  };
 const describes = (re: RegExp): ArgCheck => (a) =>
   typeof a.description === "string" && re.test(a.description)
     ? null
@@ -1678,6 +1689,20 @@ export const PERSONAS: Persona[] = [
     neverTools: ["endCall", "transferCall"],
   },
   {
+    id: "emergency-cut-off",
+    title: "Emergency cut off mid-sentence: unclear speech (rule 23) never holds back rule 9",
+    turns: [
+      {
+        user: "My kitchen's on fire and my—",
+        tools: ["report_emergency"],
+        codes: ["emergency_logged"],
+        firstToolSilent: "report_emergency",
+        heardSays: [/\b911\b/],
+      },
+    ],
+    neverTools: ["endCall", "transferCall"],
+  },
+  {
     id: "emergency-neg-accident",
     title: "Emergency negative: last week's accident",
     turns: [
@@ -1788,6 +1813,57 @@ export const PERSONAS: Persona[] = [
     // every claim fact comes from a tool sentence; the model never recites one itself
     modelNever: [/contractor estimate|photos of the damage|October|four thousand/],
     toolOrder: ["lookup_customer", "verify_identity", "get_claim_status", "send_info_email", "endCall"],
+  },
+  {
+    id: "order-reference",
+    title: "Order words (Tobias): 'the second claim' after the summary is the second claim it named, by its ending",
+    turns: [
+      { ...lookupTobias, user: `Hi, I'm calling to check on my claims. My number is ${TOBIAS_SAYS_PHONE}.` },
+      {
+        ...verifyTobias,
+        args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("claim_status")) },
+        // the summary names the home claim first (it needs documents), then the auto claim
+        heardSays: [/home claim ending in one nine eight .*auto claim ending in one one five/],
+      },
+      {
+        user: "Okay. And what about the second claim?",
+        tools: ["get_claim_status"],
+        codes: ["claim_detail"],
+        firstToolSilent: "get_claim_status",
+        args: {
+          get_claim_status: endingNames("240115", "auto", "payment_issued", ["240198", "home", "awaiting_documents"]),
+        },
+        heardSays: [/auto claim ending in one one five/],
+      },
+    ],
+    neverTools: ["escalate"],
+    toolOrder: ["lookup_customer", "verify_identity", "get_claim_status"],
+  },
+  {
+    id: "garbled",
+    title: "Garbled speech after the summary (call 01a13449): never an escalation; nonsense gets a warm re-ask",
+    turns: [
+      { ...lookupTobias, user: `Hi, I'm calling to check on my claims. My number is ${TOBIAS_SAYS_PHONE}.` },
+      { ...verifyTobias, args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("claim_status")) } },
+      // What the transcriber wrote when the caller cut in with "Sorry, just the home claim please". Right
+      // after a summary that named "your home claim", "the home ... please" can be read as that claim
+      // (battery run 2026-10-13: home 198), which is what the caller wanted; a re-ask is fine too. The
+      // escalation the test call got is the failure.
+      {
+        user: "Sorry. Red disk. Sorry. Red desk, the home team, please?",
+        allowTools: ["get_claim_status"],
+        allowCodes: ["claim_detail"],
+        args: {
+          get_claim_status: endingNames("240198", "home", "awaiting_documents", ["240115", "auto", "payment_issued"]),
+        },
+        // either the home claim's detail or a warm re-ask; never words that promise something
+        heardSays: [new RegExp(`${UNCLEAR_REASK.source}|home claim ending in one nine eight`, "i")],
+      },
+      // with nothing in it to go on, the model asks again and calls nothing
+      { user: "Red disk. Sorry, red desk?", tools: [], modelSays: [UNCLEAR_REASK] },
+    ],
+    neverTools: ["escalate"],
+    modelNever: [PROMISE],
   },
   {
     id: "injection",

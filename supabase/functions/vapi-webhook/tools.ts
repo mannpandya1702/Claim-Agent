@@ -913,7 +913,7 @@ async function reportEmergency(args: Args, ctx: Run): Promise<ToolResult> {
 }
 
 async function replayEmergency(_code: Code, _args: Args, ctx: Run): Promise<ToolResult> {
-  // "Our team has been told" only when the row the first delivery wrote is really there.
+  // "I've told our team" only when the row the first delivery wrote is really there.
   const rows = await readOr<EscalationRow[] | null>(
     ctx,
     "listEscalations",

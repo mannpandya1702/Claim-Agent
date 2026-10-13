@@ -61,7 +61,7 @@ export function verifiedSentence(firstName: string, rows: PriorInteraction[], en
     "Is this about the same claim as last time, or something else?";
 }
 
-/** The opening of verify_identity's chained claims read: "Thank you, Tobias, you're verified.", plus
+/** The opening of verify_identity's chained claims read: "Thanks, Tobias. You're all verified.", plus
  *  "Welcome back." when the welcome-back clause would be said. The date of the last call is left out,
  *  so the summary that follows has the rest of one short turn. */
 export function statusOpening(firstName: string, rows: PriorInteraction[], enabled: boolean): string {

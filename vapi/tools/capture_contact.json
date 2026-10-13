@@ -37,7 +37,7 @@
     {
       "type": "request-start",
       "blocking": false,
-      "content": "Okay, one second."
+      "content": "Got it, one second."
     },
     {
       "type": "request-response-delayed",

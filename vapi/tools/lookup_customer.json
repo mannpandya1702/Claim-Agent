@@ -28,7 +28,7 @@
     {
       "type": "request-start",
       "blocking": false,
-      "content": "Sure, one moment."
+      "content": "Sure, let me look that up."
     },
     {
       "type": "request-response-delayed",
@@ -37,7 +37,7 @@
     },
     {
       "type": "request-failed",
-      "content": "I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?"
+      "content": "Sorry, I'm having trouble reaching our claims system right now. I can have a representative call you back, or you can try again in a few minutes. Which would you prefer?"
     }
   ]
 }

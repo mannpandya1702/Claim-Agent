@@ -4,9 +4,9 @@ import { sentenceFor } from "./speak.ts";
 import type { PriorInteraction } from "./types.ts";
 
 const NOW = new Date("2026-10-12T15:00:00Z");
-const PLAIN = "Thank you, Tobias, you're verified. What can I help you with today?";
+const PLAIN = "Thanks, Tobias. You're all verified. What can I help you with today?";
 const welcome = (date: string) =>
-  `Thank you, Tobias, you're verified. Welcome back. I see you called on ${date}. Is this about the same claim as last time, or something else?`;
+  `Thanks, Tobias. You're all verified. Welcome back. I see you called on ${date}. Is this about the same claim as last time, or something else?`;
 
 function row(
   started_at: string,
@@ -107,9 +107,12 @@ Deno.test("verifiedSentence: unusable timestamps are skipped; none usable gives 
 Deno.test("verifiedSentence: spoken text is printable ASCII; names are folded and trimmed", () => {
   assertEquals(
     verifiedSentence("  Jos\u00e9 ", [], true, NOW),
-    "Thank you, Jose, you're verified. What can I help you with today?",
+    "Thanks, Jose. You're all verified. What can I help you with today?",
   );
-  assertEquals(verifiedSentence("", [], true, NOW), "Thank you, you're verified. What can I help you with today?");
+  assertEquals(
+    verifiedSentence("", [], true, NOW),
+    "Thanks. You're all verified. What can I help you with today?",
+  );
   const s = verifiedSentence("Sloane", [row("2026-10-11T02:30:00Z")], true, NOW);
   assert(/^[\x20-\x7e]+$/.test(s));
 });
@@ -127,10 +130,13 @@ Deno.test("verifiedSentence: the plain sentence is speak.ts's verified sentence,
 
 Deno.test("statusOpening: the chained claims read opens with the thanks, plus welcome back without the date", () => {
   const history = [row("2026-10-11T02:30:00Z")];
-  assertEquals(statusOpening("Tobias", history, true), "Thank you, Tobias, you're verified. Welcome back.");
+  assertEquals(statusOpening("Tobias", history, true), "Thanks, Tobias. You're all verified. Welcome back.");
   // exactly when verifiedSentence would welcome the caller back
-  assertEquals(statusOpening("Tobias", history, false), "Thank you, Tobias, you're verified.");
-  assertEquals(statusOpening("Tobias", [], true), "Thank you, Tobias, you're verified.");
-  assertEquals(statusOpening("Tobias", [row("not a timestamp")], true), "Thank you, Tobias, you're verified.");
-  assertEquals(statusOpening("", history, true), "Thank you, you're verified. Welcome back.");
+  assertEquals(statusOpening("Tobias", history, false), "Thanks, Tobias. You're all verified.");
+  assertEquals(statusOpening("Tobias", [], true), "Thanks, Tobias. You're all verified.");
+  assertEquals(
+    statusOpening("Tobias", [row("not a timestamp")], true),
+    "Thanks, Tobias. You're all verified.",
+  );
+  assertEquals(statusOpening("", history, true), "Thanks. You're all verified. Welcome back.");
 });

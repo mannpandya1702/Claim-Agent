@@ -263,8 +263,10 @@ const SPELLED_EMAIL_RE =
 // then "at", then a domain said with "dot" ("acmecorp dot com", "i cloud dot com") or written
 // ("yahoo.com"). Our own published domain is not caller PII (claims docs at observeinsurance dot com).
 const SPOKEN_SEP = String.raw`(?:dot|period|underscore|dash|hyphen|plus)`;
-const SPOKEN_LOCAL_UNIT = String.raw`(?:(?!(?:${SPOKEN_SEP}|at)\b)[a-z0-9][a-z0-9._+-]{0,62}[a-z0-9]|[a-z0-9]\b(?:,? [a-z0-9]\b){0,63})`;
-const SPOKEN_LABEL = String.raw`(?!(?:dot|observeinsurance)\b)[a-z0-9][a-z0-9-]{0,62}(?: (?!dot\b)[a-z0-9][a-z0-9-]{0,62})?`;
+const SPOKEN_LOCAL_UNIT = String
+  .raw`(?:(?!(?:${SPOKEN_SEP}|at)\b)[a-z0-9][a-z0-9._+-]{0,62}[a-z0-9]|[a-z0-9]\b(?:,? [a-z0-9]\b){0,63})`;
+const SPOKEN_LABEL = String
+  .raw`(?!(?:dot|observeinsurance)\b)[a-z0-9][a-z0-9-]{0,62}(?: (?!dot\b)[a-z0-9][a-z0-9-]{0,62})?`;
 const SPOKEN_DOMAIN = String.raw`(?:(?:${SPOKEN_LABEL}) dot ){1,6}[a-z]{2,24}\b` +
   String.raw`|(?!observeinsurance\b)[a-z0-9][a-z0-9-]{0,62}(?:\.[a-z0-9-]{1,63}){0,5}\.[a-z]{2,24}\b`;
 const SPOKEN_EMAIL_RE = new RegExp(
@@ -341,7 +343,10 @@ function redactDates(text: string, refYear: number): string {
 }
 
 function redactEmails(text: string): string {
-  return text.replace(EMAIL_RE, EMAIL_TOKEN).replace(SPELLED_EMAIL_RE, EMAIL_TOKEN).replace(SPOKEN_EMAIL_RE, EMAIL_TOKEN);
+  return text.replace(EMAIL_RE, EMAIL_TOKEN).replace(SPELLED_EMAIL_RE, EMAIL_TOKEN).replace(
+    SPOKEN_EMAIL_RE,
+    EMAIL_TOKEN,
+  );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -378,6 +383,11 @@ export function redactPII(text: string | null | undefined): string | null {
 // The window to the question mark is bounded, so a long line costs linear time.
 const SENSITIVE_ASK_RE =
   /(date of birth|birth ?date|birthday|\bborn\b|\bDOB\b|(month|day|year) of birth|(what|which) year|phone number|number on (the|your) account|ten-digit|ten digit|month, day,? and (the )?year|(best|right) number|reach you|email address|\bspell|your email is|what(?:'s| is) (?:the best |your )?email|\b(?:your|an|which|what) email\b[^.?!]{0,80}\?)/i;
+
+/** A short re-ask of whatever the caller just said ("Sorry, I didn't quite catch that. Could you say that
+ *  again?", rules.md rule 23, the low-confidence hook, bad_args). Right after a sensitive question it
+ *  asks for the same answer again, so the masking that question started carries on through it. */
+export const REASK_RE = /\b(catch|caught|missed that|say (that|it) again|one more time|repeat that)\b/i;
 
 /** True when an assistant line asks for a date of birth, a phone number or an email address. */
 export function asksForSensitive(assistantText: string | null | undefined): boolean {
