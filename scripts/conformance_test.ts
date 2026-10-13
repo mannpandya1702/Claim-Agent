@@ -1197,7 +1197,7 @@ function waitMs(fn: string): (x: number) => number {
   return new Function("x", `return ${fn.replace(/sqrt/g, "Math.sqrt").replace(/\^/g, "**")};`) as (x: number) => number;
 }
 
-Deno.test("endpointing: a short base wait, smart endpointing, then five ordered rules that only wait when needed", () => {
+Deno.test("endpointing: a short base wait, smart endpointing, then six ordered rules that only wait when needed", () => {
   for (const key of ASSISTANT_KEYS) {
     const plan = withRep.assistants[key].payload.startSpeakingPlan;
     assertEquals(plan.waitSeconds, 0.4, key);
@@ -1209,7 +1209,7 @@ Deno.test("endpointing: a short base wait, smart endpointing, then five ordered 
     for (let x = 0.05; x <= 1; x += 0.05) assert(wait(x) > wait(x - 0.05), `${key}: the wait rises with x`);
     assertEquals(
       plan.customEndpointingRules.map((r: any) => [r.type, r.timeoutSeconds]),
-      [["both", 2.5], ["both", 1.6], ["both", 1.6], ["assistant", 1.2], ["customer", 0.5]],
+      [["both", 2.5], ["both", 0.5], ["both", 1.6], ["both", 1.6], ["assistant", 1.2], ["customer", 0.5]],
       key,
     );
     for (const r of plan.customEndpointingRules) {
@@ -1244,10 +1244,20 @@ const ENDPOINTING_CASES: [string, string, string, number | null][] = [
   ["phone, digit by digit in full", PHONE_ASK, "It's 6 0 2 5 5 5 0 1 0 1.", null],
   ["phone, a whole number with a 960 area code", PHONE_ASK, "9 6 0 1 5 5 0 1 2 3", null],
   ["phone, nine of ten digits", PHONE_ASK, "9 6 0 1 5 5 0 1 2", 1.6],
-  // only digits are counted (RE2, which VAPI validates rules with, has no lookahead to count "double 6"
-  // as two), so a full number said with one "double" has nine digits and still waits: a short pause
+  // "double 6" and "triple 5" are written with one numeral each, so the digit count alone would take a
+  // whole number said with them for a partial one and wait 1.6 s (01a13635: "6 0 2 triple 5 0 1 0 1").
+  // A rule ahead of the digit count answers in 0.5 s once the numerals reach ten digits with one
+  // "triple" (eight numerals) or one "double" (nine); RE2 has no lookahead, so it spells out where the
+  // word falls. Two doubles in a full number still take the digit count's 1.6 s: slower, never early.
   ["phone, double in progress", PHONE_ASK, "9 6 0 1 double 5", 1.6],
-  ["phone, double in full", PHONE_ASK, "9 6 0 1 double 5 0 1 2 3", 1.6],
+  ["phone, double in full", PHONE_ASK, "9 6 0 1 double 5 0 1 2 3", 0.5],
+  ["phone, double, one digit short", PHONE_ASK, "6 0 2 double 5 5 0 1 0", 1.6],
+  ["phone, triple in full (01a13635)", PHONE_ASK, "So the phone number on my account is 6 0 2 triple 5 0 1 0 1.", 0.5],
+  ["phone, triple in progress", PHONE_ASK, "6 0 2 triple 5", 1.6],
+  ["phone, triple, one digit short", PHONE_ASK, "6 0 2 triple 5 0 1 0", 1.6],
+  ["phone, triple at the start, in full", PHONE_ASK, "Triple 6 0 2 5 5 0 1 0 1", 0.5],
+  ["phone, double between groups, in full", PHONE_ASK, "it's 6 0 2, double 5, 5 0 1 0 1", 0.5],
+  ["phone, two doubles in full", PHONE_ASK, "6 0 2 double 5 5 0 1 double 1", 1.6],
   ["phone, double at the start", PHONE_ASK, "Double 6 0 2", 1.6],
   ["phone, a double still to come", PHONE_ASK, "6 0 2 double", 1.6],
   ["phone, no digits yet", PHONE_ASK, "Sure, give me a second", null],
