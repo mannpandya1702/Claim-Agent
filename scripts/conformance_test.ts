@@ -44,13 +44,13 @@ const FINAL_TRANSCRIPT = 'transcript[transcriptType="final"]';
 const REP_PHONE = "+16025550188";
 const ENDCALL_GOODBYE = "Thanks for calling Observe Insurance. Take care.";
 const FIRST_MESSAGE =
-  "Hi, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. What's the phone number on your account?";
+  "Hi, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. How can I help you today?";
 // The ElevenLabs voice every assistant speaks with (field names per the VAPI ElevenLabsVoice schema).
 const VOICE = {
   provider: "11labs",
   voiceId: "bP6y87KyX5lwNEi7xOkX",
   model: "eleven_turbo_v2_5",
-  speed: 0.88,
+  speed: 0.8,
   stability: 0.7,
   style: 0.3,
   similarityBoost: 0.75,
@@ -615,7 +615,8 @@ Deno.test("endpointing waits longer after every sentence that asks for a number,
       timeoutSeconds: r.timeoutSeconds,
     }));
   const asks: [string, string][] = [
-    ["firstMessage", FIRST_MESSAGE],
+    // the greeting asks how Ava can help; the phone number is asked once the caller says what they need
+    ["phone ask after intent", "I'd be happy to help with that. What's the phone number on your account?"],
     ["needs_dob", sentenceFor("needs_dob")],
     ["rep_queued_no_number", sentenceFor("rep_queued_no_number")],
     ["not_found_final", sentenceFor("not_found_final")],
