@@ -3,6 +3,10 @@ import type {
   AlertStatus,
   CallbackSource,
   CallerType,
+  CallReason,
+  CallReasonSource,
+  ClaimIntakeKind,
+  ClaimType,
   ContactKind,
   EmailKind,
   EmailStatus,
@@ -192,6 +196,19 @@ export function formatDayKey(day: string): string {
   return new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "short", day: "numeric" }).format(d);
 }
 
+/**
+ * A calendar date column ("2026-10-10", a loss date) -> "Sat, Oct 10, 2026". It names a day, not
+ * an instant, so it is formatted as written with no timezone shift. Anything else is returned as given.
+ */
+export function formatCalendarDate(day: string | null | undefined): string {
+  if (!day) return DASH;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day.slice(0, 10));
+  if (!m) return day;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12));
+  if (Number.isNaN(d.getTime())) return day;
+  return new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(d);
+}
+
 /** "5 minutes ago". `now` is injectable so tests and SLA badges share one clock. */
 export function formatRelative(value: string | number | Date | null | undefined, now: Date = new Date()): string {
   const d = toDate(value);
@@ -300,6 +317,10 @@ export const FLAG_META: Record<Flag, FlagMeta> = {
     label: "Email promised, not sent",
     explanation: "Ava said an email was on its way, but no email was sent for this call.",
   },
+  claim_promised_without_filing: {
+    label: "Claim promised, not filed",
+    explanation: "Ava said a claim was filed or submitted, but the caller never confirmed a claim on this call.",
+  },
 };
 
 export function flagMeta(flag: string): FlagMeta {
@@ -345,6 +366,52 @@ export function callerTypeMeta(type: string | null | undefined): CallerTypeMeta 
   return { type: t, ...CALLER_TYPE_META[t] };
 }
 
+export interface CallReasonMeta {
+  label: string;
+  description: string;
+}
+
+/** Why the caller called, in staff words (the analysis schema's one-line meaning in the tooltip). */
+export const CALL_REASON_META: Record<CallReason, CallReasonMeta> = {
+  claim_status: { label: "Claim status", description: "Checking on an existing claim" },
+  file_claim: { label: "File a claim", description: "Reporting a new loss or starting a claim" },
+  documents: { label: "Documents", description: "Which documents are needed, or how to send them" },
+  general_question: { label: "General question", description: "Claims process or policy questions answered from the FAQ" },
+  speak_to_agent: { label: "Speak to an agent", description: "Wanted a person" },
+  update_details: { label: "Update details", description: "Changing contact details or the email on file" },
+  emergency: { label: "Emergency", description: "Danger happening at the time of the call" },
+  other: { label: "Other", description: "None of the reasons above" },
+};
+
+/**
+ * The reason's words, or null when the call has none yet (it is never guessed). A value the
+ * server adds later shows as its own words rather than disappearing.
+ */
+export function callReasonMeta(reason: string | null | undefined): (CallReasonMeta & { reason: string }) | null {
+  if (!reason) return null;
+  if (reason in CALL_REASON_META) return { reason, ...CALL_REASON_META[reason as CallReason] };
+  const words = reason.replace(/_/g, " ");
+  return { reason, label: words.charAt(0).toUpperCase() + words.slice(1), description: "Why the caller called" };
+}
+
+/** Where a call reason came from, strongest first (a later, weaker source never replaces it). */
+export const CALL_REASON_SOURCE_LABELS: Record<CallReasonSource, string> = {
+  server: "Server facts",
+  structured_output: "Call analysis",
+  derived: "Tool results",
+};
+
+export const CLAIM_TYPE_LABELS: Record<ClaimType, string> = {
+  auto: "Auto",
+  home: "Home",
+  property: "Property",
+};
+
+export const CLAIM_INTAKE_KIND_LABELS: Record<ClaimIntakeKind, string> = {
+  claim: "Claim by a verified customer",
+  lead_intake: "Claim details from a new caller",
+};
+
 export const CONTACT_KIND_LABELS: Record<ContactKind, string> = {
   new_customer: "New customer",
   email_update: "Email update request",
@@ -386,6 +453,8 @@ export const EMAIL_KIND_LABELS: Record<EmailKind, string> = {
   document_checklist: "Document checklist",
   claim_summary: "Claim summary",
   how_to_start_claim: "How to start a claim",
+  claim_received: "Claim confirmation",
+  claim_intake: "New claim notice (team)",
 };
 
 export const EMAIL_STATUS_LABELS: Record<EmailStatus, string> = {

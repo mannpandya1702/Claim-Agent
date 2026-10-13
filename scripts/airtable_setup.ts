@@ -6,6 +6,7 @@
 import { loadEnv, need } from "./lib/env.ts";
 import {
   ANALYSIS_STATUSES,
+  CALL_REASONS,
   CALLER_TYPES,
   FLAGS,
   OUTCOMES,
@@ -22,7 +23,11 @@ export const FIELDS: { name: string; type: string; options?: unknown; descriptio
   { name: MERGE_FIELD, type: "singleLineText", description: "VAPI call id; the upsert merge key" },
   { name: "Started At", type: "dateTime", options: dateTime },
   { name: "Ended At", type: "dateTime", options: dateTime },
-  { name: "Caller Name", type: "singleLineText", description: "Verified name, else the name the caller confirmed, else the name given, else Unknown caller" },
+  {
+    name: "Caller Name",
+    type: "singleLineText",
+    description: "Verified name, else the name the caller confirmed, else the name given, else Unknown caller",
+  },
   { name: "Caller Phone", type: "singleLineText", description: "Last four digits only" },
   {
     name: "Caller Type",
@@ -30,7 +35,11 @@ export const FIELDS: { name: string; type: string; options?: unknown; descriptio
     options: choices(CALLER_TYPES),
     description: "existing: matched an account; new: gave their details as a new customer; else unknown",
   },
-  { name: "Email", type: "email", description: "The address a caller spelled and confirmed (caller-provided, unverified)" },
+  {
+    name: "Email",
+    type: "email",
+    description: "The address a caller spelled and confirmed (caller-provided, unverified)",
+  },
   { name: "Channel", type: "singleSelect", options: choices(["webCall", "inboundPhoneCall", "outboundPhoneCall"]) },
   { name: "Outcome", type: "singleSelect", options: choices(OUTCOMES) },
   { name: "Sentiment", type: "singleSelect", options: choices(SENTIMENTS) },
@@ -41,6 +50,18 @@ export const FIELDS: { name: string; type: string; options?: unknown; descriptio
   { name: "Duration (s)", type: "number", options: { precision: 0 } },
   { name: "Cost (USD)", type: "number", options: { precision: 4 } },
   { name: "Analysis Status", type: "singleSelect", options: choices(ANALYSIS_STATUSES) },
+  {
+    name: "Call Reason",
+    type: "singleSelect",
+    options: choices(CALL_REASONS),
+    description:
+      "Why the caller called (one main reason): server facts first, then the call analysis, then the tools used",
+  },
+  {
+    name: "Claim Number",
+    type: "singleLineText",
+    description: "The claim this call filed (a verified customer's phone claim)",
+  },
   { name: "Dashboard", type: "url" },
   { name: "Synced At", type: "dateTime", options: dateTime },
 ];
@@ -76,7 +97,9 @@ async function main(): Promise<number> {
   }
   const have = new Set(table.fields.map((f: any) => f.name));
   if (table.fields[0]?.name !== MERGE_FIELD) {
-    console.error(`table "${tableName}" exists but its primary field is "${table.fields[0]?.name}", not "${MERGE_FIELD}"`);
+    console.error(
+      `table "${tableName}" exists but its primary field is "${table.fields[0]?.name}", not "${MERGE_FIELD}"`,
+    );
     return 1;
   }
   for (const f of FIELDS.slice(1)) {

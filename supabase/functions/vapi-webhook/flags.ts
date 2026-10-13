@@ -1,16 +1,17 @@
 // Evidence-first call flags, computed once at end of call. Each flag needs both halves of the
 // evidence: what the agent actually said (artifact.messages) and the server fact that should
-// stand behind it (attempts, escalations, emails). Words alone never flag a call, and neither
+// stand behind it (attempts, escalations, emails, the call's claim intake). Words alone never flag a call, and neither
 // does a missing fact the agent never claimed. Pure, so twin fixtures pin every rule.
 
 import { type Flag, INFO_EMAIL_TOPICS, SERVER_TOOLS } from "./enums.ts";
-import type { AttemptRow, EmailRow, EscalationRow } from "./types.ts";
+import type { AttemptRow, ClaimIntake, EmailRow, EscalationRow } from "./types.ts";
 
 export interface FlagInput {
   messages: unknown[]; // artifact.messages (role user|bot|assistant|system|tool_calls|tool_call_result)
   attempts: AttemptRow[];
   escalations: EscalationRow[];
   emails: EmailRow[];
+  intake?: ClaimIntake | null; // claim_intakes row of the call; absent means none
 }
 
 const CALLBACK_PROMISE_RE = /representative (will|is going to) (call|reach)|call you back|someone will call/i;
@@ -27,9 +28,15 @@ const BACKED_ALERT_STATUSES: ReadonlySet<string> = new Set(["sent", "skipped"]);
 const STATUS_WORDS_RE = /claim ending in|was approved|payment of|under review|was denied|was received on/i;
 
 const EMAIL_PROMISE_RE = /(I've|I have) (emailed|sent (that|it|the))/i;
-// What the caller is told was emailed is a send_info_email topic; the team's own callback and
-// emergency emails go to staff, so they never back "I've emailed that to you".
-const CALLER_EMAIL_KINDS: ReadonlySet<string> = new Set(INFO_EMAIL_TOPICS);
+// What the caller is told was emailed is a send_info_email topic or the confirmation of a claim taken
+// on the call; the team's own callback, emergency and claim-intake emails go to staff, so they never
+// back "I've emailed that to you".
+const CALLER_EMAIL_KINDS: ReadonlySet<string> = new Set([...INFO_EMAIL_TOPICS, "claim_received"]);
+
+// "I've filed your claim", "your claim has been submitted": a claim spoken of as done. Only a filed
+// intake (confirm_claim's yes) backs it; "I'll file that" or "can I file a claim" is not a claim made.
+const CLAIM_FILED_RE =
+  /\b(?:I've|I have|we've|we have) (?:now |just )?(?:filed|submitted|opened|created|started|lodged) (?:your|the|a|that) (?:new )?claim\b|\b(?:your|the) claim (?:has been|is|was) (?:now |already |been )?(?:filed|submitted|opened|created|lodged)\b/i;
 
 // VAPI-native tool names are markup too when spoken.
 const NATIVE_TOOLS = ["transferCall", "endCall", "faq_search", "handoff_"];
@@ -80,6 +87,11 @@ function assistantLines(messages: unknown): string[] {
   return lines;
 }
 
+/** A clause that speaks of a claim as filed; a question ("Has your claim been filed?") is not one. */
+function claimSpokenOfAsFiled(line: string): boolean {
+  return line.split(/(?<=[.?!;])\s+/).some((clause) => !clause.trimEnd().endsWith("?") && CLAIM_FILED_RE.test(clause));
+}
+
 function promisesCallback(line: string): boolean {
   for (const clause of line.split(/(?<=[.?!;])\s+/)) {
     const at = clause.search(CALLBACK_PROMISE_RE);
@@ -92,7 +104,7 @@ function promisesCallback(line: string): boolean {
 }
 
 /** Evidence-first flags (pure): promised_callback_without_escalation, status_read_without_verified_identity,
- *  tool_markup_spoken, email_promised_without_send. Sorted, unique. */
+ *  tool_markup_spoken, email_promised_without_send, claim_promised_without_filing. Sorted, unique. */
 export function computeFlags(input: FlagInput): Flag[] {
   const lines = assistantLines(input.messages);
   const attempts = input.attempts ?? [];
@@ -118,6 +130,9 @@ export function computeFlags(input: FlagInput): Flag[] {
   const emailBacked = emails.some((e) => CALLER_EMAIL_KINDS.has(e.kind) && e.status === "sent");
   if (lines.some((l) => EMAIL_PROMISE_RE.test(l)) && !emailBacked) {
     flags.add("email_promised_without_send");
+  }
+  if (input.intake?.confirmed !== true && lines.some((l) => claimSpokenOfAsFiled(l))) {
+    flags.add("claim_promised_without_filing");
   }
   return [...flags].sort();
 }

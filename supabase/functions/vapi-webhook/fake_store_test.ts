@@ -3,7 +3,7 @@
 
 import { assert, assertEquals, assertFalse, assertRejects } from "@std/assert";
 import { createFakeStore, demoSeed } from "./fake_store.ts";
-import { OUTBOX_LEASE_MS } from "./store_rules.ts";
+import { OUTBOX_LEASE_MS, outboxClaimable, outboxDue } from "./store_rules.ts";
 import type { InteractionRow, OutboxRef } from "./types.ts";
 
 const TOBIAS = "6b0d6f0e-1c11-4c7a-9a01-000000000101";
@@ -626,7 +626,9 @@ Deno.test("demoSeed mirrors 0002_seed.sql row for row", () => {
     for (const s of [k.status_detail, k.adjuster_name, k.filed_on, k.updated_on, k.documents_due]) {
       if (s !== null) assert(sql.includes(`'${s}'`), `claim ${k.claim_number}: ${s} not in the SQL seed`);
     }
-    for (const d of k.documents_required) assert(sql.includes(`"${d}"`), `claim ${k.claim_number}: ${d}`);
+    for (const d of k.documents_required) {
+      assert(sql.includes(`"${d}"`), `claim ${k.claim_number}: ${d}`);
+    }
     if (k.amount_approved !== null) assert(sql.includes(k.amount_approved.toFixed(2)));
   }
   // Ines has no claims (no_claims branch) and nobody owns the not-found number
@@ -723,7 +725,14 @@ Deno.test("outbox lease: a fresh row is claimable at once; any write (claim, fai
   assertEquals(again.attempts, 2, "a delivery that never finished is retried once the lease is over");
 
   // a failed delivery backs off for the lease
-  assert(await store.finishOutbox(again.id, { delivered: false, error: "airtable 503", attempt: 2, claimedAt: again.updated_at }));
+  assert(
+    await store.finishOutbox(again.id, {
+      delivered: false,
+      error: "airtable 503",
+      attempt: 2,
+      claimedAt: again.updated_at,
+    }),
+  );
   assertEquals(await store.claimOutbox(1), []);
   advance(OUTBOX_LEASE_MS + 1000);
   const [third] = await store.claimOutbox(1);
@@ -810,6 +819,133 @@ Deno.test("outbox: finishing records delivery, or a masked capped error; dead sp
   await assertRejects(() => store.finishOutbox("not-a-uuid", { delivered: true }), Error, "22P02");
 });
 
+Deno.test("outbox (0008): a delay sets next_attempt_at and a claim waits for it; a re-arm moves it and keeps progress", async () => {
+  const { store, advance } = clockedStore();
+  await store.enqueueOutbox("interaction.completed", "c1", "ghl", 90);
+  const row = store.tables.outbox_events[0];
+  assertEquals([row.destination, row.progress, row.next_attempt_at], ["ghl", {}, "2026-10-12T15:01:30.000Z"]);
+  assertEquals(await store.claimOutbox(5), [], "not before next_attempt_at");
+  advance(89_000);
+  assertEquals(await store.claimOutbox(5), []);
+  advance(1000);
+  const [claimed] = await store.claimOutbox(5);
+  assertEquals(
+    [claimed.ref_id, claimed.attempts, claimed.next_attempt_at, claimed.progress],
+    ["c1", 1, "2026-10-12T15:01:30.000Z", {}],
+  );
+  // a step's result lands in progress, then the delivery finishes under the save's write time
+  const guard = { attempt: 1, claimedAt: claimed.updated_at };
+  const saved = await store.saveOutboxProgress(claimed.id, { contact_id: "ct1", note_id: "n1" }, guard);
+  assert(saved?.held);
+  assertFalse(await store.finishOutbox(claimed.id, { delivered: true, ...guard }), "the claim's own time is stale now");
+  assert(
+    await store.finishOutbox(claimed.id, { delivered: true, externalId: "ct1", attempt: 1, claimedAt: saved.savedAt }),
+  );
+  // a re-arm resets the delivery and moves the wait, and keeps what the steps did
+  await store.enqueueOutbox("interaction.completed", "c1", "ghl", 90);
+  assertEquals(
+    [row.delivered_at, row.attempts, row.external_id, row.progress],
+    [null, 0, "ct1", { contact_id: "ct1", note_id: "n1" }],
+  );
+  assertEquals(Date.parse(row.next_attempt_at) - Date.parse(row.updated_at), 90_000);
+  advance(OUTBOX_LEASE_MS + 1000);
+  assertEquals(await store.claimOutbox(5), [], "the lease is over but the wait is not");
+  advance(60_000);
+  assertEquals((await store.claimOutbox(5)).map((r) => r.progress), [{ contact_id: "ct1", note_id: "n1" }]);
+  await assertRejects(() => store.enqueueOutbox("interaction.completed", "c2", "ghl", 1.5), Error, "22P02");
+  await assertRejects(() => store.enqueueOutbox("interaction.completed", "c2", "sheets" as never), Error, "23514");
+});
+
+Deno.test("outbox (0008): a claim takes only its destination's rows (a ref names its own); without one, any", async () => {
+  const { store, advance } = clockedStore();
+  await store.enqueueOutbox("interaction.completed", "c1", "airtable");
+  advance(1000);
+  await store.enqueueOutbox("interaction.completed", "c1", "ghl");
+  advance(1000);
+  await store.enqueueOutbox("interaction.completed", "c2", "ghl");
+  assertEquals(
+    (await store.claimOutbox(5, undefined, "ghl")).map((r) => [r.ref_id, r.destination]),
+    [["c1", "ghl"], ["c2", "ghl"]],
+  );
+  assertEquals(await store.claimOutbox(5, undefined, "ghl"), []);
+  const ref: OutboxRef = { kind: "interaction.completed", refId: "c1", destination: "airtable" };
+  assertEquals((await store.claimOutbox(5, ref, "ghl")).map((r) => r.destination), ["airtable"], "the ref decides");
+  advance(OUTBOX_LEASE_MS + 1000);
+  assertEquals((await store.claimOutbox(5)).map((r) => r.destination), ["airtable", "ghl", "ghl"]);
+});
+
+Deno.test("outbox (0008): saveOutboxProgress always merges; held says whether the claim still holds", async () => {
+  const { store } = clockedStore();
+  await store.enqueueOutbox("interaction.completed", "c1", "ghl");
+  const row = store.tables.outbox_events[0];
+  const [claimed] = await store.claimOutbox(1);
+  const claim = { attempt: 1, claimedAt: claimed.updated_at };
+  const first = await store.saveOutboxProgress(claimed.id, { contact_id: "ct1", tags_done: true }, claim);
+  assert(first?.held);
+  assert(first.savedAt > claimed.updated_at, "a save is a write: its time is the next guard");
+  // the claim's own time no longer holds, yet what the step did is still recorded
+  const stale = await store.saveOutboxProgress(claimed.id, { x: 1 }, claim);
+  assertEquals([stale?.held, row.progress.x], [false, 1]);
+  // a shallow merge: null clears a value, other keys stay
+  const third = await store.saveOutboxProgress(claimed.id, { contact_id: null, note_id: "n1" }, {
+    attempt: 1,
+    claimedAt: stale!.savedAt,
+  });
+  assert(third?.held);
+  assertEquals(row.progress, { contact_id: null, tags_done: true, x: 1, note_id: "n1" });
+  // a re-arm mid-delivery: the merge lands (the note exists whoever holds the row), the claim is gone
+  await store.enqueueOutbox("interaction.completed", "c1", "ghl");
+  const after = await store.saveOutboxProgress(claimed.id, {
+    task_claim_id: "t1",
+  }, { attempt: 1, claimedAt: third.savedAt });
+  assertEquals([after?.held, row.progress.task_claim_id], [false, "t1"]);
+  assertEquals(await store.saveOutboxProgress(crypto.randomUUID(), {}, claim), null);
+  await assertRejects(() => store.saveOutboxProgress("not-a-uuid", {}, claim), Error, "22P02");
+  await assertRejects(() => store.saveOutboxProgress(claimed.id, [] as never, claim), Error, "23514");
+  await assertRejects(
+    () => store.saveOutboxProgress(claimed.id, {}, { attempt: 1, claimedAt: "soon" }),
+    Error,
+    "22007",
+  );
+});
+
+Deno.test("outbox (0008): retryAfterS keeps a failed row unclaimed until then; a dead row ignores it", async () => {
+  const { store, advance } = clockedStore();
+  await store.enqueueOutbox("interaction.completed", "c1", "ghl");
+  const row = store.tables.outbox_events[0];
+  let [claimed] = await store.claimOutbox(1);
+  assert(
+    await store.finishOutbox(claimed.id, {
+      delivered: false,
+      error: "ghl 429 POST /contacts/search: Too many requests",
+      retryAfterS: 120,
+      attempt: 1,
+      claimedAt: claimed.updated_at,
+    }),
+  );
+  assertEquals(row.next_attempt_at, "2026-10-12T15:02:00.000Z");
+  advance(OUTBOX_LEASE_MS + 1000);
+  assertEquals(await store.claimOutbox(1), [], "past the lease, before the retry-after");
+  advance(120_000);
+  [claimed] = await store.claimOutbox(1);
+  assertEquals(claimed.attempts, 2);
+  const before = row.next_attempt_at;
+  await store.finishOutbox(claimed.id, { delivered: false, error: "ghl 422", dead: true, retryAfterS: 60 });
+  assertEquals([row.next_attempt_at, row.attempts], [before, 5]);
+});
+
+Deno.test("outboxDue: a row inserted with no delay is due whatever the clock; otherwise next_attempt_at decides", () => {
+  const at = "2026-10-12T15:00:00.000Z";
+  const base = { delivered_at: null, attempts: 0, created_at: at, updated_at: at };
+  const t = Date.parse(at);
+  assert(outboxDue({ ...base, next_attempt_at: at }, t - 5000), "the caller's clock behind the database's");
+  assertFalse(outboxDue({ ...base, next_attempt_at: "2026-10-12T15:01:30.000Z" }, t + 89_999));
+  assert(outboxDue({ ...base, next_attempt_at: "2026-10-12T15:01:30.000Z" }, t + 90_000));
+  assert(outboxDue(base, t), "a row read without the column (before 0008) is due");
+  assertFalse(outboxClaimable({ ...base, next_attempt_at: "2026-10-12T15:01:30.000Z" }, t), "fresh, but not due");
+  assert(outboxClaimable({ ...base, next_attempt_at: at }, t));
+});
+
 Deno.test("getInteractionForMirror: exactly the mirror columns, or null", async () => {
   const store = createFakeStore();
   assertEquals(await store.getInteractionForMirror("c1"), null);
@@ -826,11 +962,13 @@ Deno.test("getInteractionForMirror: exactly the mirror columns, or null", async 
   assert(row);
   assertEquals(Object.keys(row).sort(), [
     "analysis_status",
+    "call_reason",
     "caller_email",
     "caller_name",
     "caller_phone",
     "caller_type",
     "channel",
+    "claim_number",
     "cost",
     "duration_seconds",
     "emergency",
@@ -871,6 +1009,11 @@ Deno.test("listOutboxGaps: ended in [from, to), with no outbox row or one delive
   queued("current").delivered_at = "2026-10-11T08:30:00.000Z";
   assertEquals(await store.listOutboxGaps(from, to), ["changed-after", "never-queued"], "oldest end first");
   await assertRejects(() => store.listOutboxGaps("yesterday", to), Error, "22007");
+  // GoHighLevel: only a call with no ghl row at all (a delivered one is never posted again)
+  for (const k of ["changed-after", "current"]) await store.enqueueOutbox("interaction.completed", k, "ghl", 90);
+  const ghl = (k: string) => store.tables.outbox_events.find((o) => o.ref_id === k && o.destination === "ghl")!;
+  ghl("changed-after").delivered_at = "2026-10-11T10:30:00.000Z";
+  assertEquals(await store.listOutboxGaps(from, to, "ghl"), ["pending", "never-queued"]);
 });
 
 Deno.test("interactionEnded: true only for a row with ended_at", async () => {
@@ -1051,7 +1194,9 @@ Deno.test("reapInteraction: closes only a row that never ended; keeps an ended_r
     outcome: "resolved",
     analysis_status: "ok",
   });
-  for (const r of store.tables.call_interactions) r.created_at = isoAgo(3 * 60 * 60_000);
+  for (const r of store.tables.call_interactions) {
+    r.created_at = isoAgo(3 * 60 * 60_000);
+  }
   assertEquals(
     (await store.listStuckInteractions(isoAgo(2 * 60 * 60_000))).map((r) => r.vapi_call_id),
     ["stub", "errored"],
@@ -1156,13 +1301,22 @@ Deno.test("caller_contacts: inserted unconfirmed; confirm keeps its first time; 
   t += 60_000;
   assertEquals((await store.setContactConfirmed("cc1", true))?.confirmed_at, "2026-10-12T15:00:00.000Z");
 
-  // the same read-back again (a retried delivery, or the model capturing it twice) stays confirmed,
-  // even with a different callback number, which is not part of the read-back
-  const again = await store.upsertContact({ ...CONTACT, callbackPhone: null, callbackSource: "none" });
-  assertEquals([again.confirmed, again.confirmed_at, again.callback_phone], [true, "2026-10-12T15:00:00.000Z", null]);
+  // the same read-back again (a retried delivery, or the model capturing it twice) stays confirmed
+  const again = await store.upsertContact(CONTACT);
+  assertEquals([again.confirmed, again.confirmed_at], [true, "2026-10-12T15:00:00.000Z"]);
 
-  // anything read back that changed needs a new yes
-  for (const change of [{ email: "jane.doe2@example.com" }, { lastName: "Dough" }, { email: null }]) {
+  // anything read back that changed needs a new yes, the number said and where it came from included
+  // (0009): GoHighLevel and the claim intake key on a confirmed row's number
+  for (
+    const change of [
+      { email: "jane.doe2@example.com" },
+      { lastName: "Dough" },
+      { email: null },
+      { callbackPhone: "+16025550222" },
+      { callbackPhone: null, callbackSource: "none" as const },
+      { callbackSource: "caller_id" as const },
+    ]
+  ) {
     await store.upsertContact(CONTACT);
     await store.setContactConfirmed("cc1", true);
     const changed = await store.upsertContact({ ...CONTACT, ...change });
@@ -1223,4 +1377,123 @@ Deno.test("upsert_interaction: caller_type replaces unknown and is never downgra
   // a fresh row with no type is unknown, as the column default and the coalesce make it
   await store.upsertInteraction({ vapi_call_id: "ct2" });
   assertEquals(store.tables.call_interactions.find((r) => r.vapi_call_id === "ct2")?.caller_type, "unknown");
+});
+
+// ---------------------------------------------------------------------------------------------
+// claim_intakes (0007_fnol_reasons.sql): the same sequences the DB suite runs live.
+// ---------------------------------------------------------------------------------------------
+const intakeArgs = (callKey: string, over: Record<string, unknown> = {}) => ({
+  callKey,
+  kind: "claim" as const,
+  claimType: "auto" as const,
+  lossDate: "2026-10-10",
+  summary: "rear-ended",
+  description: "Someone rear-ended me at a light.",
+  customerId: TOBIAS,
+  ...over,
+});
+
+Deno.test("claim_intakes: upserted unconfirmed and replaced until filed; filed once; never rewritten or un-filed", async () => {
+  const now = new Date("2026-10-13T03:30:00Z"); // still October 12 in New York
+  const store = createFakeStore(undefined, { now: () => now, random: () => 0.0700005 });
+  assertEquals(await store.getClaimIntake("c1"), null);
+  assertEquals(await store.fileClaimIntake("c1"), null);
+  assertEquals(await store.rejectClaimIntake("c1"), null);
+
+  const first = await store.upsertClaimIntake(intakeArgs("c1"));
+  assertEquals([first.confirmed, first.claim_number, first.kind], [false, null, "claim"]);
+  const replaced = await store.upsertClaimIntake(intakeArgs("c1", { claimType: "home", lossDate: "2026-10-09" }));
+  assertEquals([replaced.claim_type, replaced.loss_date], ["home", "2026-10-09"]);
+  assertEquals(store.tables.claim_intakes.length, 1);
+  assertEquals((await store.rejectClaimIntake("c1"))?.confirmed, false);
+
+  const once = await store.fileClaimIntake("c1");
+  assertEquals(once?.filedNow, true, "this call filed it");
+  const filed = once?.intake;
+  assertEquals([filed?.confirmed, filed?.claim_number, filed?.confirmed_at], [true, "CLM-070000", now.toISOString()]);
+  const claim = store.claims.find((c) => c.claim_number === "CLM-070000") as unknown as Record<string, unknown>;
+  assertEquals(
+    [claim.customer_id, claim.claim_type, claim.status, claim.filed_on, claim.updated_on, claim.reported_call_key],
+    [TOBIAS, "home", "received", "2026-10-12", "2026-10-12", "c1"],
+  );
+  assertEquals(claim.documents_required, [
+    "photos of the damage",
+    "a contractor estimate",
+    "proof of ownership for the damaged items",
+  ]);
+  assertEquals(filed?.claim_id, claim.id);
+
+  // a second file, a new upsert and a reject all leave the filed intake exactly as it is; the second
+  // file says it did not file (file_claim_intake_once's filed_now)
+  assertEquals(await store.fileClaimIntake("c1"), { intake: filed!, filedNow: false });
+  assertEquals(await store.upsertClaimIntake(intakeArgs("c1", { claimType: "auto" })), filed);
+  assertEquals(await store.rejectClaimIntake("c1"), filed);
+  assertEquals(store.claims.filter((c) => c.customer_id === TOBIAS).length, 3);
+  // the customer's claims read like any other claim (reported_call_key stays behind)
+  const read = (await store.getClaims(TOBIAS)).find((c) => c.claim_number === "CLM-070000");
+  assertFalse(read !== undefined && "reported_call_key" in read);
+});
+
+Deno.test("claim_intakes: the claim number is drawn again when taken, and unique across calls", async () => {
+  // the first draw repeats a seeded number's digits (CLM-240115 exists), the second is free
+  const draws = [0.2401155, 0.2401155, 0.9999995, 0.5000005];
+  const store = createFakeStore(undefined, { random: () => draws.shift() ?? 0.123 });
+  store.claims.push({ ...store.claims[0], id: crypto.randomUUID(), claim_number: "CLM-240115" });
+  await store.upsertClaimIntake(intakeArgs("c1"));
+  await store.upsertClaimIntake(intakeArgs("c2"));
+  assertEquals((await store.fileClaimIntake("c1"))?.intake.claim_number, "CLM-999999");
+  assertEquals((await store.fileClaimIntake("c2"))?.intake.claim_number, "CLM-500000");
+
+  // when every draw is taken it gives up with an error rather than reuse a number
+  const stuck = createFakeStore(undefined, { random: () => 0.2401155 });
+  await stuck.upsertClaimIntake(intakeArgs("c3"));
+  await assertRejects(() => stuck.fileClaimIntake("c3"), Error, "no unused claim number");
+  assertEquals((await stuck.getClaimIntake("c3"))?.confirmed, false);
+});
+
+Deno.test("claim_intakes: a lead intake is filed without a claims row; a claim needs its customer", async () => {
+  const store = createFakeStore();
+  const before = store.claims.length;
+  await store.upsertClaimIntake(intakeArgs("lead", { kind: "lead_intake", customerId: null }));
+  const lead = (await store.fileClaimIntake("lead"))?.intake;
+  assertEquals([lead?.confirmed, lead?.claim_id, lead?.claim_number], [true, null, null]);
+  assertEquals(store.claims.length, before);
+
+  await store.upsertClaimIntake(intakeArgs("orphan", { customerId: null }));
+  await assertRejects(() => store.fileClaimIntake("orphan"), Error, "23502");
+  assertEquals((await store.getClaimIntake("orphan"))?.confirmed, false);
+});
+
+Deno.test("claim_intakes rejects what Postgres would reject", async () => {
+  const store = createFakeStore();
+  const bad: Record<string, unknown>[] = [
+    { kind: "lead" },
+    { claimType: "boat" },
+    { lossDate: "10/10/2026" },
+    { lossDate: null },
+    { summary: "" },
+    { summary: "x".repeat(81) },
+    { description: "" },
+    { description: "x".repeat(501) },
+    { customerId: "not-a-uuid" },
+    { customerId: "6b0d6f0e-1c11-4c7a-9a01-000000000999" },
+  ];
+  for (const over of bad) {
+    await assertRejects(
+      () => store.upsertClaimIntake(intakeArgs("bad", over) as never),
+      Error,
+      undefined,
+      JSON.stringify(over),
+    );
+  }
+  assertEquals(store.tables.claim_intakes.length, 0);
+  // the limits themselves are accepted
+  await store.upsertClaimIntake(intakeArgs("ok", { summary: "x".repeat(80), description: "y".repeat(500) }));
+});
+
+Deno.test("emails: the two claim kinds are accepted by the ledger", async () => {
+  const store = createFakeStore();
+  assertEquals(await store.claimEmail("c1", "claim_received", "o***@example.com"), { claimed: true });
+  assertEquals(await store.claimEmail("c1", "claim_intake", "t***@example.com"), { claimed: true });
+  await assertRejects(() => store.claimEmail("c1", "claim_update" as never, "x"), Error, "23514");
 });

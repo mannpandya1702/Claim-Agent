@@ -6,7 +6,7 @@
 //   deno task render   write vapi/prompts/<assistant>.md and vapi/kb/observe_insurance_faq.txt, then
 //                      build every payload with stand-in ids as a smoke check
 
-import { ANALYSIS_OUTCOMES, SENTIMENTS } from "../supabase/functions/vapi-webhook/enums.ts";
+import { ANALYSIS_OUTCOMES, CALL_REASONS, SENTIMENTS } from "../supabase/functions/vapi-webhook/enums.ts";
 
 const ROOT = new URL("../", import.meta.url);
 
@@ -24,6 +24,9 @@ export const ACCOUNT_TOOLS = ["lookup_customer", "verify_identity", "get_claim_s
 // assistant carries both; Knowledge never takes contact details, so it hands such a caller back.
 export const CONTACT_TOOLS = ["capture_contact", "confirm_contact"] as const;
 export const CONTACT_ASSISTANTS: readonly AssistantKey[] = ["solo-core", "solo-web", "solo-phone", "concierge"];
+// Reporting a loss (start_claim, confirm_claim): on every assistant that carries the contact tools,
+// since a new caller's loss is taken once their details are confirmed. Knowledge hands such a caller back.
+export const CLAIM_TOOLS = ["start_claim", "confirm_claim"] as const;
 // The persona's name, as callers hear it in the greeting and the prompts.
 export const PERSONA_NAME = "Ava";
 
@@ -180,7 +183,9 @@ export function loadVariant(key: AssistantKey): VariantSpec {
       if (!/^[A-Z][A-Z_]*$/.test(name) || RESERVED_PLACEHOLDERS.has(name)) {
         throw new Error(`assistants/${key}.json: bad slot name ${JSON.stringify(name)}`);
       }
-      if (typeof partial !== "string" || !partial) throw new Error(`assistants/${key}.json: slot ${name} needs a partial`);
+      if (typeof partial !== "string" || !partial) {
+        throw new Error(`assistants/${key}.json: slot ${name} needs a partial`);
+      }
       slots[name] = partial;
     }
   }
@@ -312,8 +317,14 @@ export function analysisSchema() {
       },
       escalated: { type: "boolean", description: "A representative callback or transfer was requested." },
       emergency: { type: "boolean", description: "The caller reported danger happening now." },
+      call_reason: {
+        type: "string",
+        enum: [...CALL_REASONS],
+        description:
+          "Why the caller called: the main reason, not everything the call touched. claim_status: checking an existing claim; file_claim: reporting a new loss or starting a claim; documents: what documents are needed or how to send them; general_question: claims process or policy questions answered from the FAQ; speak_to_agent: wanted a person; update_details: changing contact details or an email; emergency: danger happening now; other: anything else.",
+      },
     },
-    required: ["caller_name", "sentiment", "outcome"],
+    required: ["caller_name", "sentiment", "outcome", "call_reason"],
   };
 }
 

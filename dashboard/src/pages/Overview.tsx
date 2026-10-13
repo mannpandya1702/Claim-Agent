@@ -1,11 +1,12 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { CalendarRange, ChartColumn, ChartPie, Loader2, RotateCw, Smile } from "lucide-react";
+import { CalendarRange, ChartBarBig, ChartColumn, ChartPie, Loader2, RotateCw, Smile } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { DateRangeSelect } from "@/components/DateRangeSelect";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorState, errorMessage } from "@/components/ErrorState";
 import { PageHeader } from "@/components/PageHeader";
+import { CallReasonBars, CallReasonTable } from "@/components/overview/CallReasonsChart";
 import { CallsPerDayChart, CallsPerDayTable } from "@/components/overview/CallsPerDayChart";
 import { ChartCard } from "@/components/overview/ChartCard";
 import { OutcomeDonut, OutcomeTable } from "@/components/overview/OutcomeDonut";
@@ -15,6 +16,7 @@ import {
   buildDailySeries,
   buildOutcomeRows,
   buildOutcomeSlices,
+  buildReasonMix,
   buildSentimentMix,
   normalizeMetrics,
   rangeCaption,
@@ -25,13 +27,13 @@ import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { customRange, DEFAULT_RANGE, parseCustomDays, presetRange, RANGE_PRESETS, type CustomDays, type RangePreset } from "@/lib/dates";
 import { formatCount, formatTime } from "@/lib/format";
-import { fetchCallsByDay, fetchMetrics, qk } from "@/lib/queries";
+import { fetchCallReasonCounts, fetchCallsByDay, fetchMetrics, qk } from "@/lib/queries";
 import { useRealtimeRows } from "@/lib/realtime";
 import { useEasternToday } from "@/lib/useEasternToday";
 
 // Realtime events re-read the aggregates (prefix keys, debounced in realtime.ts). A call row
-// moves every tile and the daily chart; an escalation moves the open and SLA tiles.
-const CALL_KEYS = [["metrics"], ["calls-by-day"]] as const;
+// moves every tile, the daily chart and the reasons; an escalation moves the open and SLA tiles.
+const CALL_KEYS = [["metrics"], ["calls-by-day"], ["call-reasons"]] as const;
 const ESCALATION_KEYS = [["metrics"]] as const;
 
 // SLA breaches become true with time alone (open longer than 30 minutes, no row change), so the
@@ -112,6 +114,11 @@ export default function Overview() {
     queryFn: () => fetchCallsByDay(range),
     placeholderData: keepPreviousData,
   });
+  const reasonsQ = useQuery({
+    queryKey: qk.callReasons(range),
+    queryFn: () => fetchCallReasonCounts(range),
+    placeholderData: keepPreviousData,
+  });
 
   useRealtimeRows("call_interactions", null, CALL_KEYS);
   useRealtimeRows("escalations", null, ESCALATION_KEYS);
@@ -124,8 +131,14 @@ export default function Overview() {
 
   const metricsStale = metricsQ.isPlaceholderData;
   const daysStale = daysQ.isPlaceholderData;
-  const refreshing = metricsQ.isFetching || daysQ.isFetching;
-  const updatedAt = Math.max(metricsQ.dataUpdatedAt, daysQ.dataUpdatedAt);
+  const reasonsStale = reasonsQ.isPlaceholderData;
+  // The untagged count needs both reads for the same range; a placeholder of either leaves it out.
+  const reasons = useMemo(
+    () => (reasonsQ.data ? buildReasonMix(reasonsQ.data, metrics && !metricsStale && !reasonsStale ? metrics.calls : null) : null),
+    [reasonsQ.data, metrics, metricsStale, reasonsStale],
+  );
+  const refreshing = metricsQ.isFetching || daysQ.isFetching || reasonsQ.isFetching;
+  const updatedAt = Math.max(metricsQ.dataUpdatedAt, daysQ.dataUpdatedAt, reasonsQ.dataUpdatedAt);
   const noCalls = metrics !== undefined && !metricsStale && metrics.calls === 0;
   const singleDay = rangeDays(range) <= 1;
 
@@ -175,6 +188,20 @@ export default function Overview() {
   else if (!sentimentState && sentiment && sentiment.rated === 0 && !metricsStale) {
     sentimentState = (
       <EmptyState compact icon={Smile} title="No sentiment yet" description="Sentiment arrives with each call's post-call analysis." />
+    );
+  }
+
+  // --- Top call reasons --------------------------------------------------------------------------
+  let reasonsState: ReactNode = null;
+  if (reasonsQ.isError && !reasonsQ.data) {
+    reasonsState = <ErrorState compact title="Could not load call reasons" error={reasonsQ.error} onRetry={() => void reasonsQ.refetch()} />;
+  } else if (!reasons) {
+    reasonsState = <ChartSkeleton height={176} />;
+  } else if (noCalls) {
+    reasonsState = <EmptyState compact icon={ChartBarBig} title="No calls in this range" />;
+  } else if (reasons.tagged === 0 && !reasonsStale) {
+    reasonsState = (
+      <EmptyState compact icon={ChartBarBig} title="No call reasons yet" description="Each call is tagged with why the caller called once it ends." />
     );
   }
 
@@ -244,6 +271,19 @@ export default function Overview() {
           table={metrics ? <OutcomeTable rows={outcomeRows} total={metrics.calls} /> : null}
         />
         <ChartCard
+          title="Top call reasons"
+          description={
+            reasons && reasons.tagged > 0
+              ? `Main reason for ${formatCount(reasons.tagged)} tagged ${reasons.tagged === 1 ? "call" : "calls"}`
+              : "Main reason for each call in range"
+          }
+          state={reasonsState}
+          stale={reasonsStale}
+          chart={reasons ? <CallReasonBars mix={reasons} /> : null}
+          table={reasons ? <CallReasonTable mix={reasons} /> : null}
+        />
+        <ChartCard
+          className="lg:col-span-2"
           title="Sentiment mix"
           description={sentiment ? `Share of ${formatCount(sentiment.rated)} rated ${sentiment.rated === 1 ? "call" : "calls"}` : "Share of rated calls"}
           state={sentimentState}

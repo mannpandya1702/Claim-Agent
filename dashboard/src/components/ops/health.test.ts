@@ -4,6 +4,8 @@ import {
   channelHealth,
   countHealth,
   deliveryChannels,
+  ghlChannel,
+  hasGhl,
   JOB_SPECS,
   jobHealth,
   normaliseHealth,
@@ -158,6 +160,28 @@ describe("the Airtable call log channel", () => {
       tone: "warning",
       status: "2 not delivered yet",
     });
+  });
+
+  it("adds GoHighLevel after Airtable once ops_health carries its counts (0008_ghl.sql)", () => {
+    expect(ghlChannel(base)).toBeNull();
+    expect(hasGhl(base)).toBe(false);
+    expect(normaliseHealth(base)).not.toHaveProperty("ghl_pending");
+
+    const h = normaliseHealth({
+      ...base,
+      outbox_pending: 0,
+      outbox_dead: 0,
+      outbox_delivered_24h: 4,
+      ghl_pending: "2",
+      ghl_dead: "1",
+      ghl_delivered_24h: "3",
+    } as unknown as OpsHealth);
+    expect(hasGhl(h)).toBe(true);
+    expect(h.ghl_pending).toBe(2);
+    expect(ghlChannel(h)).toMatchObject({ channel: "ghl", label: "GoHighLevel CRM", owed: 6, delivered: 3, failed: 1, pending: 2, tone: "critical" });
+    expect(deliveryChannels([], h).map((x) => x.channel)).toEqual(["telegram", "email", "airtable", "ghl"]);
+    // a GoHighLevel outage never reads as Airtable's
+    expect(deliveryChannels([], h).find((x) => x.channel === "airtable")).toMatchObject({ tone: "good", status: "All delivered" });
   });
 
   it("rates the every-minute outbox job on its own window", () => {

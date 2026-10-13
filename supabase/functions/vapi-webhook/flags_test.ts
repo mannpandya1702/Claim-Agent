@@ -1,7 +1,8 @@
 import { assertEquals } from "@std/assert";
 import { computeFlags, type FlagInput } from "./flags.ts";
 import { FLAGS } from "./enums.ts";
-import type { AttemptRow, EmailRow, EscalationRow } from "./types.ts";
+import { sentenceFor } from "./speak.ts";
+import type { AttemptRow, ClaimIntake, EmailRow, EscalationRow } from "./types.ts";
 
 const KEY = "call-flags-1";
 
@@ -331,10 +332,19 @@ Deno.test("computeFlags: system prompts and tool_calls entries are ignored", () 
 
 Deno.test("computeFlags: every flag at once comes back sorted and unique", () => {
   const out = flags({
-    messages: [bot(PROMISE), bot(PROMISE), bot(STATUS), bot("calling lookup_customer"), bot(EMAILED), bot(EMAILED)],
+    messages: [
+      bot(PROMISE),
+      bot(PROMISE),
+      bot(STATUS),
+      bot("calling lookup_customer"),
+      bot(EMAILED),
+      bot(EMAILED),
+      bot(FILED),
+    ],
   });
   assertEquals(out, [...FLAGS].sort());
   assertEquals(out, [
+    "claim_promised_without_filing",
     "email_promised_without_send",
     "promised_callback_without_escalation",
     "status_read_without_verified_identity",
@@ -378,7 +388,11 @@ Deno.test("promised_callback: an offer split around a tool call on a voice call 
   // around the tool-call entry. Judged alone, the second fragment would read as a promise.
   const messages = [
     { role: "user", message: "Yes. That's right." },
-    { role: "bot", message: "1 moment while I look that up. I'm sorry, I can't find an account for that number. I can explain how to" },
+    {
+      role: "bot",
+      message:
+        "1 moment while I look that up. I'm sorry, I can't find an account for that number. I can explain how to",
+    },
     { role: "tool_calls", toolCalls: [{ function: { name: "lookup_customer" } }] },
     { role: "bot", message: "start a new claim or have a representative call you back. Which would you like?" },
     { role: "user", message: "Okay. No. Thanks. Goodbye." },
@@ -397,4 +411,115 @@ Deno.test("promised_callback: a real promise split across fragments of one turn 
   assertEquals(computeFlags({ messages, attempts: [], escalations: [], emails: [] }), [
     "promised_callback_without_escalation",
   ]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// claim_promised_without_filing
+// ---------------------------------------------------------------------------------------------
+const FILED = "Okay, I've filed your claim. An adjuster will reach out soon.";
+
+function intake(confirmed: boolean, kind: ClaimIntake["kind"] = "claim"): ClaimIntake {
+  return {
+    call_key: KEY,
+    kind,
+    claim_type: "auto",
+    loss_date: "2026-10-10",
+    summary: "rear-ended at a light",
+    description: "Someone rear-ended me at a red light.",
+    customer_id: kind === "claim" ? "6b0d6f0e-1c11-4c7a-9a01-000000000101" : null,
+    claim_id: confirmed && kind === "claim" ? "6b0d6f0e-1c11-4c7a-9a02-000000000299" : null,
+    claim_number: confirmed && kind === "claim" ? "CLM-482472" : null,
+    confirmed,
+    confirmed_at: confirmed ? "2026-10-12T15:00:00Z" : null,
+  };
+}
+
+Deno.test("claim_promised: fires when the agent says a claim is filed and no intake was filed", () => {
+  assertEquals(flags({ messages: [user("My car was hit."), bot(FILED)] }), ["claim_promised_without_filing"]);
+  // an intake read back but never confirmed is not a filed claim
+  assertEquals(flags({ messages: [bot(FILED)], intake: intake(false) }), ["claim_promised_without_filing"]);
+  assertEquals(flags({ messages: [bot(FILED)], intake: null }), ["claim_promised_without_filing"]);
+});
+
+Deno.test("claim_promised: a filed intake of either kind backs it", () => {
+  assertEquals(flags({ messages: [bot(FILED)], intake: intake(true) }), []);
+  assertEquals(flags({ messages: [bot(FILED)], intake: intake(true, "lead_intake") }), []);
+});
+
+Deno.test("claim_promised: each phrasing fires; offers, plans and questions do not", () => {
+  for (
+    const said of [
+      "I have submitted your claim.",
+      "I\u2019ve filed your claim for you.",
+      "We've opened a new claim for the damage.",
+      "Your claim has been filed.",
+      "Your claim is now submitted, and you'll hear from us.",
+      "Great, the claim was created.",
+      "Your claim is already filed.",
+    ]
+  ) {
+    assertEquals(flags({ messages: [bot(said)] }), ["claim_promised_without_filing"], said);
+    assertEquals(flags({ messages: [bot(said)], intake: intake(true) }), [], said);
+  }
+  for (
+    const said of [
+      "I can file a claim for you. Can you tell me what happened?",
+      "Let me write that down.",
+      "Okay, filing that now.",
+      "I'll file that as soon as you confirm.",
+      "Would you like me to start a claim?",
+      "Has your claim been filed already?",
+      "You can file a claim online at observeinsurance dot com slash claims.",
+    ]
+  ) {
+    assertEquals(flags({ messages: [bot(said)] }), [], said);
+  }
+});
+
+Deno.test("claim_promised: the server's own claim sentences never fire with the facts behind them", () => {
+  const spoken = [
+    sentenceFor("claim_readback", { claim_type: "auto", loss_date: "2026-10-10", summary: "a cracked windshield" }),
+    sentenceFor("claim_filed", { claim_last3: "472", emailed: true }),
+    sentenceFor("claim_intake_saved", { first_name: "Jane", emailed: true }),
+    sentenceFor("claim_retry"),
+  ];
+  // before the yes, the read-back and the retry promise nothing, nor do the questions that lead to them
+  assertEquals(flags({ messages: [bot(spoken[0]), bot(spoken[3])] }), []);
+  for (
+    const asked of [
+      sentenceFor("contact_saved_new", { first_name: "Jane", resume_claim: true }),
+      sentenceFor("contact_saved_new", { first_name: "Jane" }),
+      sentenceFor("claim_date_help"),
+      sentenceFor("claim_needs_phone"),
+      "Alright, one moment.",
+    ]
+  ) {
+    assertEquals(flags({ messages: [bot(asked)] }), [], asked);
+  }
+  // after it, the filed sentences stand on the intake, and "emailed" on the confirmation email
+  assertEquals(
+    flags({ messages: spoken.map((t) => bot(t)), intake: intake(true), emails: [email("sent", "claim_received")] }),
+    [],
+  );
+  // the already-filed sentence is a filed claim spoken of: true only with a filed intake
+  const already = sentenceFor("claim_already_filed", { claim_last3: "472" });
+  assertEquals(flags({ messages: [bot(already)], intake: intake(true) }), []);
+  assertEquals(flags({ messages: [bot(already)] }), ["claim_promised_without_filing"]);
+});
+
+Deno.test("email_promised: the customer's claim confirmation backs 'I've emailed'; the team's claim email does not", () => {
+  const filed = sentenceFor("claim_filed", { claim_last3: "472", emailed: true });
+  assertEquals(flags({ messages: [bot(filed)], intake: intake(true), emails: [email("sent", "claim_received")] }), []);
+  assertEquals(
+    flags({ messages: [bot(filed)], intake: intake(true), emails: [email("sent", "claim_intake")] }),
+    ["email_promised_without_send"],
+  );
+  assertEquals(
+    flags({ messages: [bot(filed)], intake: intake(true), emails: [email("failed", "claim_received")] }),
+    ["email_promised_without_send"],
+  );
+});
+
+Deno.test("claim_promised: the caller saying it never counts", () => {
+  assertEquals(flags({ messages: [user("I already filed my claim online."), bot("Okay, thanks.")] }), []);
 });

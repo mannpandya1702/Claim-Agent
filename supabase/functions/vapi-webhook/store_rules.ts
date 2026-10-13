@@ -1,9 +1,10 @@
 // Pure rules both stores share, so the in-memory store and the supabase-js store cannot drift:
-// what an outbox error looks like once stored, when an outbox row may be claimed and when a call is
-// missing from the call log, how the digest counts its rows, and the caps on the scheduled jobs'
-// work lists. No I/O and no supabase-js here (fake_store.ts imports it).
+// what an outbox error looks like once stored, when an outbox row may be claimed (its lease and its
+// next_attempt_at) and when a call is missing from the call log, how the digest counts its rows,
+// and the caps on the scheduled jobs' work lists. No I/O and no supabase-js here (fake_store.ts
+// imports it).
 
-import { ESCALATION_STATUSES, OUTCOMES, SENTIMENTS } from "./enums.ts";
+import { ESCALATION_STATUSES, type OutboxDestination, OUTCOMES, SENTIMENTS } from "./enums.ts";
 import { redactPII } from "./redact.ts";
 import type { DigestStats } from "./types.ts";
 
@@ -17,28 +18,51 @@ export const JOB_LIST_LIMIT = 50;
  *  re-armed version is read. */
 export const OUTBOX_LEASE_MS = 30_000;
 
-/** The outbox_events columns the lease reads. */
+/** How far past the caller's clock store.ts reads candidate rows by next_attempt_at. The Edge
+ *  Function's clock and the database's can differ by a little; the exact check is outboxDue. */
+export const OUTBOX_DUE_SLACK_MS = 5000;
+
+/** The outbox_events columns the lease and the due time read. */
 export interface OutboxLeaseRow {
   delivered_at: string | null;
   attempts: number;
   created_at: string;
   updated_at: string; // touch_updated_at: now() of the last write
+  next_attempt_at?: string | null; // 0008_ghl.sql; absent reads as due
 }
 
-/** Whether a claim may take the row at `nowMs`: undelivered, attempts left, and either never written
- *  since its insert (both timestamps are the insert's now()) or not written for the whole lease. */
+/** Whether the row's next_attempt_at has come at `nowMs`. A row inserted with no delay holds
+ *  next_attempt_at = created_at (one now()), so it is due at once whatever the caller's clock says,
+ *  like the fresh-insert rule of the lease. */
+export function outboxDue(row: OutboxLeaseRow, nowMs: number): boolean {
+  if (typeof row.next_attempt_at !== "string") return true;
+  const next = Date.parse(row.next_attempt_at);
+  if (!Number.isFinite(next)) return true;
+  return next <= Date.parse(row.created_at) || next <= nowMs;
+}
+
+/** Whether a claim may take the row at `nowMs`: undelivered, attempts left, due (next_attempt_at),
+ *  and either never written since its insert (both timestamps are the insert's now()) or not written
+ *  for the whole lease. */
 export function outboxClaimable(row: OutboxLeaseRow, nowMs: number): boolean {
   if (row.delivered_at !== null || row.attempts >= OUTBOX_MAX_ATTEMPTS) return false;
+  if (!outboxDue(row, nowMs)) return false;
   if (row.updated_at === row.created_at) return true;
   const touched = Date.parse(row.updated_at);
   return Number.isFinite(touched) && touched < nowMs - OUTBOX_LEASE_MS;
 }
 
-/** Whether an ended call is missing from the call log: no outbox row at all (its enqueue failed),
- *  or a row delivered before the record last changed (the re-arm after a backfill failed). A staff
- *  note also moves updated_at; the upsert on Call ID makes that extra delivery a no-op. */
-export function outboxGap(recordUpdatedAt: string, outbox: { delivered_at: string | null } | undefined): boolean {
+/** Whether an ended call is missing from a destination: no outbox row at all (its enqueue failed),
+ *  or, for the call log, a row delivered before the record last changed (the re-arm after a backfill
+ *  failed). A staff note also moves updated_at; the upsert on Call ID makes that extra delivery a
+ *  no-op. GoHighLevel never posts a delivered call again, so only its missing row is a gap. */
+export function outboxGap(
+  recordUpdatedAt: string,
+  outbox: { delivered_at: string | null } | undefined,
+  destination: OutboxDestination = "airtable",
+): boolean {
   if (!outbox) return true;
+  if (destination === "ghl") return false;
   if (outbox.delivered_at === null) return false;
   return Date.parse(recordUpdatedAt) > Date.parse(outbox.delivered_at);
 }

@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   HUED_OUTCOMES,
+  CALL_REASON_META,
   CALLER_TYPE_META,
   callerLabel,
   callerTypeMeta,
+  callReasonMeta,
   channelLabel,
   etDayKey,
   flagMeta,
   FLAG_META,
+  formatCalendarDate,
   formatCount,
   formatDate,
   formatDateTime,
@@ -28,7 +31,7 @@ import {
   outcomeMeta,
   sentimentMeta,
 } from "./format";
-import { CALLER_TYPES, FLAGS, OUTCOMES } from "./types";
+import { CALL_REASONS, CALLER_TYPES, FLAGS, OUTCOMES } from "./types";
 
 describe("durations and stamps", () => {
   it.each([
@@ -113,6 +116,14 @@ describe("dates are Eastern", () => {
   it("prints a calls_by_day key without shifting the day", () => {
     expect(formatDayKey("2026-10-12")).toBe("Oct 12");
   });
+  it("prints a calendar date column (a loss date) as written, with its weekday", () => {
+    expect(formatCalendarDate("2026-10-10")).toBe("Sat, Oct 10, 2026");
+    // year boundary and the DST change day keep their own day
+    expect(formatCalendarDate("2026-01-01")).toBe("Thu, Jan 1, 2026");
+    expect(formatCalendarDate("2026-11-01")).toBe("Sun, Nov 1, 2026");
+    expect(formatCalendarDate(null)).toBe("—");
+    expect(formatCalendarDate("last Tuesday")).toBe("last Tuesday");
+  });
   it("relative time and minutes use an injectable clock", () => {
     const now = new Date("2026-10-12T19:40:00Z");
     expect(formatRelative("2026-10-12T19:39:40Z", now)).toBe("just now");
@@ -141,6 +152,24 @@ describe("badge maps", () => {
   it("explains every flag in plain English and humanizes unknown ones", () => {
     for (const f of FLAGS) expect(FLAG_META[f].explanation.length).toBeGreaterThan(20);
     expect(flagMeta("new_flag_kind").label).toBe("New flag kind");
+  });
+  it("words every call reason and never invents one for a call without", () => {
+    expect(CALL_REASONS.map((r) => CALL_REASON_META[r].label)).toEqual([
+      "Claim status",
+      "File a claim",
+      "Documents",
+      "General question",
+      "Speak to an agent",
+      "Update details",
+      "Emergency",
+      "Other",
+    ]);
+    for (const r of CALL_REASONS) expect(CALL_REASON_META[r].description.length).toBeGreaterThan(5);
+    expect(callReasonMeta("speak_to_agent")).toMatchObject({ reason: "speak_to_agent", label: "Speak to an agent" });
+    expect(callReasonMeta(null)).toBeNull();
+    expect(callReasonMeta("")).toBeNull();
+    expect(callReasonMeta("billing_dispute")?.label).toBe("Billing dispute");
+    expect(FLAG_META.claim_promised_without_filing.label).toBe("Claim promised, not filed");
   });
   it("words every caller type and reads anything else as unknown, never a guess", () => {
     for (const t of CALLER_TYPES) expect(CALLER_TYPE_META[t].description.length).toBeGreaterThan(10);

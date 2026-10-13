@@ -8,12 +8,18 @@
 // call_sessions row lock makes it atomic in Postgres.
 
 import { type InteractionForMirror, MIRROR_COLUMNS } from "./airtable.ts";
+import { GHL_COLUMNS, type InteractionForGhl } from "./ghl.ts";
 import {
   ALERT_STATUSES,
   ANALYSIS_STATUSES,
   ATTEMPT_KINDS,
+  CALL_REASON_SOURCES,
+  CALL_REASONS,
   CALLBACK_SOURCES,
   CALLER_TYPES,
+  CLAIM_DOCUMENTS,
+  CLAIM_INTAKE_KINDS,
+  CLAIM_TYPES,
   CONTACT_CALLBACK_SOURCES,
   CONTACT_KINDS,
   EMAIL_KINDS,
@@ -26,6 +32,7 @@ import {
   OUTCOMES,
   SENTIMENT_SOURCES,
   SENTIMENTS,
+  TIMEZONE,
 } from "./enums.ts";
 import type { AttemptKind, Code } from "./enums.ts";
 import { step } from "./identity.ts";
@@ -35,6 +42,7 @@ import {
   type DigestCallRow,
   digestFromRows,
   JOB_LIST_LIMIT,
+  OUTBOX_DUE_SLACK_MS,
   OUTBOX_MAX_ATTEMPTS,
   outboxClaimable,
   outboxErrorText,
@@ -44,6 +52,7 @@ import type {
   AttemptRow,
   CallerContact,
   Claim,
+  ClaimIntake,
   Customer,
   EmailRow,
   EscalationRow,
@@ -106,6 +115,9 @@ const INTERACTION_COLUMNS = [
   "analysis_status",
   "caller_type",
   "caller_email",
+  "call_reason",
+  "call_reason_source",
+  "claim_number",
 ] as const;
 
 // Text columns where the SQL merge treats '' like null (coalesce(nullif(excluded.x, ''), ci.x)).
@@ -120,6 +132,7 @@ const TEXT_KEEP_ON_EMPTY = new Set([
   "success_evaluation",
   "assistant_name",
   "caller_email",
+  "claim_number",
 ]);
 // Columns the SQL merge keeps when the new value is null (coalesce(excluded.x, ci.x)).
 const KEEP_ON_NULL = new Set([
@@ -151,6 +164,28 @@ const CONTACT_COLUMNS = [
   "confirmed",
   "confirmed_at",
 ] as const;
+
+// claim_intakes (0007_fnol_reasons.sql).
+const INTAKE_COLUMNS = [
+  "call_key",
+  "kind",
+  "claim_type",
+  "loss_date",
+  "summary",
+  "description",
+  "customer_id",
+  "claim_id",
+  "claim_number",
+  "confirmed",
+  "confirmed_at",
+] as const;
+const CLAIM_NUMBER_RE = /^CLM-[0-9]{6}$/;
+const ISO_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+// file_claim_intake's status detail and number draws.
+const PHONE_CLAIM_DETAIL = "Reported by phone. An adjuster will be assigned within one business day.";
+const CLAIM_NUMBER_DRAWS = 20;
+// upsert_interaction's rank of a call_reason_source (an absent source ranks 0).
+const REASON_RANK: Readonly<Record<string, number>> = { server: 3, structured_output: 2, derived: 1 };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // store.ts CAPTURE_RETENTION_MS; a value import would load supabase-js into every unit test.
@@ -240,6 +275,19 @@ function maskedCallerEmail(email: unknown): string | null {
   return at < 0 ? "***" : `${email.slice(0, Math.min(1, at))}***${email.slice(at)}`;
 }
 
+/** The calendar day in New York as YYYY-MM-DD: file_claim_intake's (now() at time zone ...)::date. */
+function newYorkDay(at: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  })
+    .formatToParts(at);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
 function withGenerated(r: Row): void {
   r.status = interactionStatus(r);
   r.caller_email_masked = maskedCallerEmail(r.caller_email);
@@ -247,9 +295,11 @@ function withGenerated(r: Row): void {
 
 export function createFakeStore(
   seed?: { customers?: (Customer & { date_of_birth: string })[]; claims?: Claim[] },
-  options: { now?: () => Date } = {},
+  options: { now?: () => Date; random?: () => number } = {},
 ): FakeStore {
   const clock = options.now ?? (() => new Date());
+  // file_claim_intake's random(): tests pass a sequence to force a number collision.
+  const random = options.random ?? Math.random;
   const nowIso = () => clock().toISOString();
   // touch_updated_at: every write moves updated_at, and two writes in Postgres never share a
   // timestamp; the outbox lease and the claim's compare-and-set rely on both.
@@ -269,6 +319,7 @@ export function createFakeStore(
     emails: [],
     call_interactions: [],
     caller_contacts: [],
+    claim_intakes: [],
     transcript_lines: [],
     webhook_captures: [],
     outbox_events: [],
@@ -375,6 +426,8 @@ export function createFakeStore(
     checkIn("call_interactions", "analysis_status", r.analysis_status, ANALYSIS_STATUSES);
     notNull("call_interactions", "caller_type", r.caller_type);
     checkIn("call_interactions", "caller_type", r.caller_type, CALLER_TYPES);
+    checkIn("call_interactions", "call_reason", r.call_reason, CALL_REASONS);
+    checkIn("call_interactions", "call_reason_source", r.call_reason_source, CALL_REASON_SOURCES);
     integerOrNull("duration_seconds", r.duration_seconds);
     integerOrNull("latency_avg_ms", r.latency_avg_ms);
     timestampOrNull("started_at", r.started_at);
@@ -403,7 +456,8 @@ export function createFakeStore(
     }
     checkIn("caller_contacts", "kind", r.kind, CONTACT_KINDS);
     checkIn("caller_contacts", "callback_source", r.callback_source, CONTACT_CALLBACK_SOURCES);
-    const violates = (column: string) => dbError("23514", `new row for relation "caller_contacts" violates check constraint on ${column}`);
+    const violates = (column: string) =>
+      dbError("23514", `new row for relation "caller_contacts" violates check constraint on ${column}`);
     for (const c of ["first_name", "last_name"]) {
       if (typeof r[c] !== "string" || [...r[c]].length < 1 || [...r[c]].length > 40) throw violates(c);
     }
@@ -422,6 +476,75 @@ export function createFakeStore(
     }
   }
 
+  function intakeOf(row: Row): ClaimIntake {
+    const out: Row = {};
+    for (const c of INTAKE_COLUMNS) out[c] = clone(row[c]);
+    return out as ClaimIntake;
+  }
+
+  // The claim_intakes CHECKs, NOT NULLs and foreign keys, as Postgres applies them.
+  function validateIntake(r: Row): void {
+    for (const c of ["call_key", "kind", "claim_type", "loss_date", "summary", "description", "confirmed"]) {
+      notNull("claim_intakes", c, r[c]);
+    }
+    checkIn("claim_intakes", "kind", r.kind, CLAIM_INTAKE_KINDS);
+    checkIn("claim_intakes", "claim_type", r.claim_type, CLAIM_TYPES);
+    const violates = (column: string) =>
+      dbError("23514", `new row for relation "claim_intakes" violates check constraint on ${column}`);
+    if (typeof r.loss_date !== "string" || !ISO_DAY_RE.test(r.loss_date) || !Number.isFinite(Date.parse(r.loss_date))) {
+      throw dbError("22007", `invalid input syntax for type date: "${String(r.loss_date)}"`);
+    }
+    if (typeof r.summary !== "string" || [...r.summary].length < 1 || [...r.summary].length > 80) {
+      throw violates("summary");
+    }
+    if (typeof r.description !== "string" || [...r.description].length < 1 || [...r.description].length > 500) {
+      throw violates("description");
+    }
+    if (r.claim_number !== null && (typeof r.claim_number !== "string" || !CLAIM_NUMBER_RE.test(r.claim_number))) {
+      throw violates("claim_number");
+    }
+    if (r.confirmed !== (r.confirmed_at !== null)) throw violates("confirmed");
+    if (r.customer_id !== null) {
+      uuidArg(r.customer_id);
+      if (!customers.some((c) => c.id === r.customer_id)) {
+        throw dbError("23503", 'insert or update on table "claim_intakes" violates foreign key constraint');
+      }
+    }
+  }
+
+  // file_claim_intake's claims insert: a number drawn until unused, the per-type documents, today in
+  // New York, and the call that filed it (claims_reported_call_key_idx: one claim per call).
+  function insertPhoneClaim(intake: Row): { id: string; number: string } {
+    if (intake.customer_id === null) throw dbError("23502", `claim intake ${intake.call_key} has no customer`);
+    if (claims.some((c) => (c as Row).reported_call_key === intake.call_key)) {
+      throw dbError("23505", 'duplicate key value violates unique constraint "claims_reported_call_key_idx"');
+    }
+    for (let i = 0; i < CLAIM_NUMBER_DRAWS; i++) {
+      const number = `CLM-${String(Math.floor(random() * 1_000_000)).padStart(6, "0")}`;
+      if (claims.some((c) => c.claim_number === number)) continue;
+      const today = newYorkDay(clock());
+      const id = crypto.randomUUID();
+      const row: Claim & { reported_call_key: string } = {
+        id,
+        customer_id: intake.customer_id,
+        claim_number: number,
+        claim_type: intake.claim_type,
+        status: "received",
+        status_detail: PHONE_CLAIM_DETAIL,
+        documents_required: [...CLAIM_DOCUMENTS[intake.claim_type as keyof typeof CLAIM_DOCUMENTS]],
+        documents_due: null,
+        adjuster_name: null,
+        filed_on: today,
+        updated_on: today,
+        amount_approved: null,
+        reported_call_key: intake.call_key,
+      };
+      claims.push(row);
+      return { id, number };
+    }
+    throw dbError("23505", `no unused claim number after ${CLAIM_NUMBER_DRAWS} draws`);
+  }
+
   function outboxRow(o: Row): OutboxRow {
     return {
       id: o.id,
@@ -432,6 +555,8 @@ export function createFakeStore(
       delivered_at: o.delivered_at,
       last_error: o.last_error,
       external_id: o.external_id,
+      progress: clone(o.progress),
+      next_attempt_at: o.next_attempt_at,
       created_at: o.created_at,
       updated_at: o.updated_at,
     };
@@ -537,9 +662,11 @@ export function createFakeStore(
 
     getClaims(customerId): Claim[] {
       uuidArg(customerId);
+      // store.ts selects the Claim columns only; reported_call_key stays behind
       return clone(
         claims
           .filter((c) => c.customer_id === customerId)
+          .map(({ reported_call_key: _call, ...c }: Claim & { reported_call_key?: string }) => c)
           .sort((a, b) =>
             a.filed_on < b.filed_on
               ? -1
@@ -715,8 +842,10 @@ export function createFakeStore(
       };
       const existing = tables.caller_contacts.find((c) => c.call_key === p.callKey);
       if (existing) {
+        // 0009: the number said (and where it came from) is part of what the caller confirmed
         const same = existing.kind === next.kind && existing.first_name === next.first_name &&
-          existing.last_name === next.last_name && existing.email === next.email;
+          existing.last_name === next.last_name && existing.email === next.email &&
+          existing.callback_phone === next.callback_phone && existing.callback_source === next.callback_source;
         next.confirmed = same && existing.confirmed;
         next.confirmed_at = same ? existing.confirmed_at : null;
       }
@@ -745,6 +874,64 @@ export function createFakeStore(
       row.confirmed_at = on ? row.confirmed_at ?? nowIso() : null;
       row.updated_at = touched(row.updated_at);
       return contactOf(row);
+    },
+
+    // upsert_claim_intake: insert or replace the unconfirmed intake; a filed one comes back unchanged.
+    upsertClaimIntake(p): ClaimIntake {
+      const existing = tables.claim_intakes.find((r) => r.call_key === p.callKey);
+      if (existing?.confirmed) return intakeOf(existing);
+      const next: Row = {
+        call_key: p.callKey,
+        kind: p.kind,
+        claim_type: p.claimType,
+        loss_date: p.lossDate,
+        summary: p.summary,
+        description: p.description,
+        customer_id: p.customerId ?? null,
+        claim_id: existing?.claim_id ?? null,
+        claim_number: existing?.claim_number ?? null,
+        confirmed: false,
+        confirmed_at: null,
+      };
+      validateIntake(next);
+      if (existing) {
+        Object.assign(existing, next, { updated_at: touched(existing.updated_at) });
+        return intakeOf(existing);
+      }
+      const at = nowIso();
+      const row = { ...next, created_at: at, updated_at: at };
+      tables.claim_intakes.push(row);
+      return intakeOf(row);
+    },
+
+    // file_claim_intake: once; a claim gets its claims row, a lead intake none; a filed row as it is.
+    fileClaimIntake(callKey): { intake: ClaimIntake; filedNow: boolean } | null {
+      const row = tables.claim_intakes.find((r) => r.call_key === callKey);
+      if (!row) return null;
+      // filed already (by an earlier or a parallel delivery): the same row, and not this call's filing
+      if (row.confirmed) return { intake: intakeOf(row), filedNow: false };
+      const filed = row.kind === "claim" ? insertPhoneClaim(row) : null;
+      Object.assign(row, {
+        claim_id: filed?.id ?? null,
+        claim_number: filed?.number ?? null,
+        confirmed: true,
+        confirmed_at: nowIso(),
+        updated_at: touched(row.updated_at),
+      });
+      return { intake: intakeOf(row), filedNow: true };
+    },
+
+    // reject_claim_intake: unconfirmed stays unconfirmed; a filed intake is never un-filed.
+    rejectClaimIntake(callKey): ClaimIntake | null {
+      const row = tables.claim_intakes.find((r) => r.call_key === callKey);
+      if (!row) return null;
+      if (!row.confirmed) row.updated_at = touched(row.updated_at);
+      return intakeOf(row);
+    },
+
+    getClaimIntake(callKey): ClaimIntake | null {
+      const row = tables.claim_intakes.find((r) => r.call_key === callKey);
+      return row ? intakeOf(row) : null;
     },
 
     priorInteractions(customerId, excludeCallKey, limit): PriorInteraction[] {
@@ -803,6 +990,9 @@ export function createFakeStore(
         analysis_status: r.analysis_status ?? "pending",
         caller_type: r.caller_type ?? "unknown",
         caller_email: r.caller_email === "" ? null : r.caller_email,
+        // a reason's source is stored only with a reason
+        call_reason_source: r.call_reason === null ? null : r.call_reason_source,
+        claim_number: r.claim_number === "" ? null : r.claim_number,
       };
       validateInteraction(values);
 
@@ -829,6 +1019,11 @@ export function createFakeStore(
       next.analysis_status = values.analysis_status === "pending" ? ci.analysis_status : values.analysis_status;
       // existing/new replace unknown; nothing is ever downgraded to unknown
       next.caller_type = values.caller_type === "unknown" ? ci.caller_type : values.caller_type;
+      // a reason from a source ranked at least as high replaces the stored one, its source with it
+      const outranks = values.call_reason !== null &&
+        (REASON_RANK[values.call_reason_source] ?? 0) >= (REASON_RANK[ci.call_reason_source] ?? 0);
+      next.call_reason = outranks ? values.call_reason : ci.call_reason;
+      next.call_reason_source = outranks ? values.call_reason_source : ci.call_reason_source;
       if (next.customer_id !== ci.customer_id) checkCustomerFk(next.customer_id);
       next.updated_at = nowIso();
       withGenerated(next);
@@ -894,22 +1089,27 @@ export function createFakeStore(
       tables.webhook_captures.splice(0, tables.webhook_captures.length, ...kept);
     },
 
-    // enqueue_outbox: insert, or re-arm the existing (kind, ref_id, destination) row with a fresh budget.
-    enqueueOutbox(kind, refId, destination = "airtable") {
+    // enqueue_outbox: insert, or re-arm the existing (kind, ref_id, destination) row with a fresh budget;
+    // either way next_attempt_at = now() + the delay, and a re-arm keeps progress and external_id.
+    enqueueOutbox(kind, refId, destination = "airtable", delayS = 0) {
       notNull("outbox_events", "kind", kind);
       notNull("outbox_events", "ref_id", refId);
       notNull("outbox_events", "destination", destination);
       checkIn("outbox_events", "kind", kind, OUTBOX_KINDS);
       checkIn("outbox_events", "destination", destination, OUTBOX_DESTINATIONS);
-      const at = nowIso();
+      integerOrNull("p_delay_s", delayS);
+      const delayMs = Math.max(delayS ?? 0, 0) * 1000;
       const existing = tables.outbox_events.find((o) =>
         o.kind === kind && o.ref_id === refId && o.destination === destination
       );
       if (existing) {
+        // the update's now() is its write time, as one statement shares one now() in Postgres
         const updated_at = touched(existing.updated_at);
-        Object.assign(existing, { delivered_at: null, attempts: 0, last_error: null, updated_at });
+        const next_attempt_at = new Date(Date.parse(updated_at) + delayMs).toISOString();
+        Object.assign(existing, { delivered_at: null, attempts: 0, last_error: null, next_attempt_at, updated_at });
         return;
       }
+      const at = nowIso();
       tables.outbox_events.push({
         id: crypto.randomUUID(),
         kind,
@@ -919,20 +1119,25 @@ export function createFakeStore(
         attempts: 0,
         last_error: null,
         external_id: null,
+        progress: {},
+        next_attempt_at: new Date(Date.parse(at) + delayMs).toISOString(),
         created_at: at,
         updated_at: at,
       });
     },
 
-    // store.ts claimOutbox: the head of the queue (or the ref's row), the rows outside a lease, each
-    // bumped once. One synchronous body, so the compare-and-set always holds here.
-    claimOutbox(limit, ref): OutboxRow[] {
+    // store.ts claimOutbox: the head of the queue (or the ref's row, else the destination's rows), the
+    // due rows outside a lease, each bumped once. One synchronous body, so the compare-and-set always
+    // holds here.
+    claimOutbox(limit, ref, destination): OutboxRow[] {
       integerOrNull("p_limit", limit);
       notNull("claim_outbox", "p_limit", limit);
       const nowMs = clock().getTime();
       const due = tables.outbox_events
         .filter((o) => o.delivered_at === null && o.attempts < OUTBOX_MAX_ATTEMPTS)
+        .filter((o) => !o.next_attempt_at || Date.parse(o.next_attempt_at) <= nowMs + OUTBOX_DUE_SLACK_MS)
         .filter((o) => !ref || (o.kind === ref.kind && o.ref_id === ref.refId && o.destination === ref.destination))
+        .filter((o) => ref || !destination || o.destination === destination)
         // insertion order breaks a tie, as distinct transactions never share created_at in Postgres
         .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
         .slice(0, 50)
@@ -961,9 +1166,30 @@ export function createFakeStore(
         row.last_error = outboxErrorText(result.error);
         if (result.dead) row.attempts = OUTBOX_MAX_ATTEMPTS;
         else if (result.refund && typeof result.attempt === "number") row.attempts = Math.max(result.attempt - 1, 0);
+        const wait = result.retryAfterS;
+        if (!result.dead && typeof wait === "number" && Number.isFinite(wait) && wait > 0) {
+          row.next_attempt_at = new Date(clock().getTime() + Math.ceil(wait) * 1000).toISOString();
+        }
       }
       row.updated_at = touched(row.updated_at);
       return true;
+    },
+
+    // save_outbox_progress: the merge always lands; held reports whether the guard's claim still holds.
+    saveOutboxProgress(id, patch, guard): { savedAt: string; held: boolean } | null {
+      uuidArg(id);
+      integerOrNull("p_attempts", guard.attempt);
+      timestampArg("p_claimed_at", guard.claimedAt);
+      if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
+        throw dbError("23514", 'new row for relation "outbox_events" violates check constraint on progress');
+      }
+      const row = tables.outbox_events.find((o) => o.id === id);
+      if (!row) return null;
+      const held = row.attempts === guard.attempt && Date.parse(row.updated_at) === Date.parse(guard.claimedAt) &&
+        row.delivered_at === null;
+      row.progress = { ...(row.progress ?? {}), ...clone(patch) };
+      row.updated_at = touched(row.updated_at);
+      return { savedAt: row.updated_at, held };
     },
 
     getInteractionForMirror(vapiCallId): InteractionForMirror | null {
@@ -974,7 +1200,15 @@ export function createFakeStore(
       return out as InteractionForMirror;
     },
 
-    listOutboxGaps(fromIso, toIso): string[] {
+    getInteractionForGhl(vapiCallId): InteractionForGhl | null {
+      const r = tables.call_interactions.find((x) => x.vapi_call_id === vapiCallId);
+      if (!r) return null;
+      const out: Row = {};
+      for (const c of GHL_COLUMNS) out[c] = clone(r[c] ?? null);
+      return out as InteractionForGhl;
+    },
+
+    listOutboxGaps(fromIso, toIso, destination = "airtable"): string[] {
       const from = timestampArg("from", fromIso);
       const to = timestampArg("to", toIso);
       return tables.call_interactions
@@ -984,8 +1218,9 @@ export function createFakeStore(
           outboxGap(
             r.updated_at,
             tables.outbox_events.find((o) =>
-              o.kind === "interaction.completed" && o.destination === "airtable" && o.ref_id === r.vapi_call_id
+              o.kind === "interaction.completed" && o.destination === destination && o.ref_id === r.vapi_call_id
             ),
+            destination,
           )
         )
         .slice(0, JOB_LIST_LIMIT)

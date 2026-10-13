@@ -24,6 +24,7 @@ import {
   ACCOUNT_TOOLS,
   ASSISTANT_KEYS,
   type AssistantKey,
+  CLAIM_TOOLS,
   FLOOR_TOOLS,
   KB_FILE_NAME,
   PHONE_ASSISTANTS,
@@ -162,7 +163,10 @@ export function invariantProblems(v: LiveView): string[] {
       problems.push(`assistant ${key}: a web assistant carries transferCall`);
     }
     if (key === "knowledge") {
-      for (const n of ACCOUNT_TOOLS) if (names.includes(n)) problems.push(`assistant knowledge: carries ${n}`);
+      // A policy question can never read an account or file a claim.
+      for (const n of [...ACCOUNT_TOOLS, ...CLAIM_TOOLS]) {
+        if (names.includes(n)) problems.push(`assistant knowledge: carries ${n}`);
+      }
     }
     const rendered = v.renderedHashes[key];
     const recorded = v.recordedHashes[key];

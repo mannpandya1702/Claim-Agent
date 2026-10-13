@@ -54,11 +54,13 @@ jobs:
           VITE_ASSISTANT_SOLO_ID: ${{ vars.VITE_ASSISTANT_SOLO_ID }}
           VITE_SQUAD_ID: ${{ vars.VITE_SQUAD_ID }}
           VITE_PHONE_NUMBER: ${{ vars.VITE_PHONE_NUMBER }}
+          # The "Open in GoHighLevel" link on the call page; it hides while this is empty.
+          VITE_GHL_LOCATION_ID: ${{ vars.VITE_GHL_LOCATION_ID }}
         run: |
           # An unset repository variable arrives as an empty string, and Vite lets the process
           # environment win over .env files, so drop empties to keep the committed values.
           for v in VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY VITE_VAPI_PUBLIC_KEY VITE_ASSISTANT_CORE_ID \
-                   VITE_ASSISTANT_SOLO_ID VITE_SQUAD_ID VITE_PHONE_NUMBER; do
+                   VITE_ASSISTANT_SOLO_ID VITE_SQUAD_ID VITE_PHONE_NUMBER VITE_GHL_LOCATION_ID; do
             if [ -z "${!v}" ]; then unset "$v"; fi
           done
           npm run build

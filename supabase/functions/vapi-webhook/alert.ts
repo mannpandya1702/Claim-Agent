@@ -1,6 +1,7 @@
-// Escalation alerts for the team's phone. The card is built from a closed type that can only
-// express ids and enums, so a name, a phone number, a claim number or the caller's own words
-// cannot reach Telegram even by mistake; the details stay behind the dashboard link (staff-only,
+// Escalation and claim-intake alerts for the team's phone. The card is built from a closed type that
+// can only express ids and enums (and, for a filed claim, the last three digits of its number), so a
+// name, a phone number, a full claim number or the caller's own words cannot reach Telegram even by
+// mistake; the details stay behind the dashboard link (staff-only,
 // already redacted). Every field is re-checked at runtime because a cast or a bad row can still
 // hand this module a string the type never allowed.
 
@@ -9,6 +10,10 @@ import {
   type AlertSink,
   type Channel,
   CHANNELS,
+  CLAIM_INTAKE_KINDS,
+  CLAIM_TYPES,
+  type ClaimIntakeKind,
+  type ClaimType,
   ESCALATION_KINDS,
   ESCALATION_REASONS,
   type EscalationKind,
@@ -26,6 +31,20 @@ export interface EscalationAlert {
   verified: boolean;
   event?: "created" | "sla_realert"; // default created
 }
+
+/** Closed claim-intake alert (confirm_claim filed it): ids, enums and at most the claim number's last
+ *  three digits. A lead intake (a new caller) has no claim number. */
+export interface ClaimIntakeAlert {
+  kind: "claim_intake";
+  intakeKind: ClaimIntakeKind;
+  claimType: ClaimType;
+  callKey: string;
+  channel: Channel;
+  verified: boolean;
+  claimLast3?: string | null; // exactly three digits, else left out
+}
+
+export type TeamAlert = EscalationAlert | ClaimIntakeAlert;
 
 const PREFIX = "[Observe Claims]";
 const UNVERIFIED_HEADER = "UNVERIFIED: do not disclose claim details";
@@ -76,10 +95,38 @@ export function alertSinks(env: Pick<Env, "ALERT_SINKS">): AlertSink[] {
   return ALERT_SINKS.filter((sink) => names.includes(sink));
 }
 
+const CLAIM_INTAKE_HEADER = "NEW CLAIM REPORTED BY PHONE";
+const LEAD_INTAKE_HEADER = "NEW CALLER: call back to set up the claim";
+
+/** "[Observe Claims] claim_intake | <claim|lead_intake> | <auto|home|property> | normal | call <id short> |
+ *  <channel> | claim ending <ddd> | <dashboard link>"; the claim number part only for three digits. */
+function renderClaimIntake(alert: ClaimIntakeAlert, dashboardUrl?: string): string {
+  const intakeKind = oneOf(CLAIM_INTAKE_KINDS, alert?.intakeKind);
+  const claimType = oneOf(CLAIM_TYPES, alert?.claimType);
+  const channel = oneOf(CHANNELS, alert?.channel);
+  const headers = [intakeKind === "lead_intake" ? LEAD_INTAKE_HEADER : CLAIM_INTAKE_HEADER];
+  if (alert?.verified !== true) headers.push(UNVERIFIED_HEADER);
+  const parts = [
+    `${PREFIX} claim_intake`,
+    intakeKind,
+    claimType,
+    "normal",
+    `call ${shortCallId(alert?.callKey)}`,
+    channel,
+  ];
+  const last3 = typeof alert?.claimLast3 === "string" && /^\d{3}$/.test(alert.claimLast3) ? alert.claimLast3 : null;
+  if (last3) parts.push(`claim ending ${last3}`);
+  const link = dashboardLink(dashboardUrl, alert?.callKey);
+  if (link) parts.push(link);
+  return [...headers, parts.join(" | ")].join("\n");
+}
+
 /** "[Observe Claims] <kind> | <reason> | <severity> | call <id short> | <channel> | <dashboard link>",
  *  severity high for emergency else normal; unverified adds header line "UNVERIFIED: do not disclose claim details";
- *  emergency adds "POSSIBLE EMERGENCY REPORTED" header. Link = DASHBOARD_URL + "#/calls/" + callKey (omitted if unset). */
-export function renderAlert(alert: EscalationAlert, dashboardUrl?: string): string {
+ *  emergency adds "POSSIBLE EMERGENCY REPORTED" header. Link = DASHBOARD_URL + "#/calls/" + callKey (omitted if unset).
+ *  A claim_intake alert renders its own card (renderClaimIntake). */
+export function renderAlert(alert: TeamAlert, dashboardUrl?: string): string {
+  if (alert?.kind === "claim_intake") return renderClaimIntake(alert, dashboardUrl);
   const kind = oneOf(ESCALATION_KINDS, alert?.kind);
   const reason = oneOf(ESCALATION_REASONS, alert?.reason);
   const channel = oneOf(CHANNELS, alert?.channel);
@@ -96,7 +143,7 @@ export function renderAlert(alert: EscalationAlert, dashboardUrl?: string): stri
 }
 
 /** Telegram fan-out per ALERT_SINKS (telegram only here; email is sent by the tools). Never throws. */
-export async function sendAlert(deps: Deps, alert: EscalationAlert): Promise<{ ok: boolean; error?: string }> {
+export async function sendAlert(deps: Deps, alert: TeamAlert): Promise<{ ok: boolean; error?: string }> {
   let result: { ok: boolean; error?: string };
   try {
     // A sink switched off by configuration is not a delivery failure worth a log line, but it is

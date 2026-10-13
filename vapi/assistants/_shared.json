@@ -28,7 +28,17 @@
       "smartFormat": false,
       "confidenceThreshold": 0.3,
       "endpointing": 300,
-      "keyterm": ["Observe Insurance", "claim number", "policy number", "date of birth", "Ava", "Gmail", "Outlook", "Hotmail", "iCloud"]
+      "keyterm": [
+        "Observe Insurance",
+        "claim number",
+        "policy number",
+        "date of birth",
+        "Ava",
+        "Gmail",
+        "Outlook",
+        "Hotmail",
+        "iCloud"
+      ]
     },
     "startSpeakingPlan": {
       "waitSeconds": 0.6,
@@ -42,7 +52,7 @@
         },
         {
           "type": "assistant",
-          "regex": "(phone number|date of birth|best number|reach you|first and last name|get that right|get wrong)",
+          "regex": "(phone number|date of birth|best number|reach you|first and last name|get that right|get wrong|what happened|when did|what day|should I change)",
           "regexOptions": [{ "type": "ignore-case", "enabled": true }],
           "timeoutSeconds": 2
         }
@@ -107,7 +117,7 @@
         "messages": [
           {
             "role": "system",
-            "content": "Extract the fields from the transcript of an insurance claims support call. caller_name is the name the caller gave on the call, else \"unknown\". Never include a date of birth, a phone number, an email address or a policy number in any field."
+            "content": "Extract the fields from the transcript of an insurance claims support call. caller_name is the name the caller gave on the call, else \"unknown\". call_reason is the main reason they called, even when the call touched other things. Never include a date of birth, a phone number, an email address or a policy number in any field."
           },
           { "role": "user", "content": "{{transcript}}" }
         ]
@@ -121,7 +131,7 @@
         {
           "name": "claims_call",
           "type": "ai",
-          "description": "Caller name, sentiment, outcome",
+          "description": "Caller name, sentiment, outcome, call reason",
           "schema": "<<ANALYSIS_SCHEMA>>"
         }
       ]

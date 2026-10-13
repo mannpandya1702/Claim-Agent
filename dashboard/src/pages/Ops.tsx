@@ -25,6 +25,7 @@ import { ChannelDownBanner, ChannelRow, DeliveryGapSkeleton } from "@/components
 import {
   countHealth,
   deliveryChannels,
+  hasGhl,
   hasOutbox,
   JOB_SPECS,
   jobHealth,
@@ -222,6 +223,24 @@ export default function Ops({ now: fixedNow }: { now?: Date } = {}) {
                   />
                 </>
               )}
+              {hasGhl(health) && (
+                <>
+                  <KpiTile
+                    label="GoHighLevel backlog"
+                    icon={Inbox}
+                    value={formatCount(health.ghl_pending)}
+                    hint="Completed calls waiting for the CRM (queued 90 s after hangup)"
+                    status={countHealth(health.ghl_pending, "warning", "Delivering, retried every minute", "Nothing waiting")}
+                  />
+                  <KpiTile
+                    label="GoHighLevel failures"
+                    icon={OctagonX}
+                    value={formatCount(health.ghl_dead)}
+                    hint="Gave up after 5 attempts; each call shows the last error"
+                    status={countHealth(health.ghl_dead, "critical", "Not in GoHighLevel")}
+                  />
+                </>
+              )}
             </div>
           )}
         </Section>
@@ -229,7 +248,7 @@ export default function Ops({ now: fixedNow }: { now?: Date } = {}) {
         <Section
           id="ops-delivery"
           title="Delivery by channel"
-          description="Last 24 hours. Alert rows are written before the send, so owed minus delivered is what never arrived; the Airtable call log also counts calls still queued."
+          description="Last 24 hours. Alert rows are written before the send, so owed minus delivered is what never arrived; the Airtable call log and GoHighLevel also count calls still queued."
         >
           <Card>
             <CardContent className="pt-4 sm:pt-5">

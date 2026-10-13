@@ -1,6 +1,8 @@
 import { assert, assertEquals, assertFalse, assertInstanceOf, assertMatch, assertStringIncludes } from "@std/assert";
 import {
   callbackRequestEmail,
+  claimIntakeEmail,
+  claimReceivedEmail,
   claimSummaryEmail,
   digestEmail,
   documentChecklistEmail,
@@ -909,4 +911,162 @@ Deno.test("loadEscalationContact: the caller and the escalation's own callback n
   store.failNext("listEscalations");
   const failed = await loadEscalationContact(store, CALL_KEY, "representative");
   assertEquals([failed.callbackPhone, failed.caller.name], [null, "Jane Doe"]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// First notice of loss: the customer's confirmation and the team's notice.
+// ---------------------------------------------------------------------------------------------
+const AUTO_DOCS = ["photos of the damage", "the police report, if one was filed", "a repair estimate"];
+
+Deno.test("claimReceivedEmail: a filed claim's number, type, date of loss, documents and how to send them", () => {
+  const t = claimReceivedEmail({
+    customer: { first_name: "Tobias" },
+    intakeKind: "claim",
+    claimType: "auto",
+    lossDate: "2026-10-10",
+    claimNumber: "CLM-482472",
+    documents: AUTO_DOCS,
+  });
+  assertAsciiTemplate(t);
+  assertEquals(t.subject, "We received your claim CLM-482472");
+  for (
+    const part of [
+      "Hello Tobias,",
+      "We&#39;ve received your auto claim",
+      "CLM-482472",
+      "October 10, 2026",
+      "An adjuster will reach out within one business day.",
+      "Photos of the damage",
+      "The police report, if one was filed",
+      "A repair estimate",
+      "observeinsurance.com/claims",
+      "claimsdocs@observeinsurance.com",
+      "your claim number, CLM-482472,",
+    ]
+  ) assertStringIncludes(t.html, part);
+});
+
+Deno.test("claimReceivedEmail: a new caller's has no claim number and says a specialist will call", () => {
+  const t = claimReceivedEmail({
+    customer: { first_name: "Jane" },
+    intakeKind: "lead_intake",
+    claimType: "property",
+    lossDate: "2026-10-10",
+    claimNumber: "CLM-482472", // ignored: a lead intake has no claim yet
+    documents: ["photos of the damage"],
+  });
+  assertAsciiTemplate(t);
+  assertEquals(t.subject, "We received the details of your property claim");
+  assertFalse(t.html.includes("CLM-"));
+  assertStringIncludes(t.html, "A claims specialist will call you within one business day");
+  assertStringIncludes(t.html, "It helps to have these ready");
+});
+
+Deno.test("claimReceivedEmail: escaped, ASCII, and an unknown type or date never breaks it", () => {
+  const t = claimReceivedEmail({
+    customer: { first_name: "<b>Renée</b>" },
+    intakeKind: "claim",
+    claimType: "boat",
+    lossDate: "not a date",
+    claimNumber: null,
+    documents: ["<script>x</script>", "", "  "],
+  });
+  assertAsciiTemplate(t);
+  assertFalse(t.html.includes("<script>"));
+  assertFalse(t.html.includes("<b>"));
+  assertStringIncludes(t.html, "insurance claim");
+  assertFalse(t.html.includes("Date of loss"));
+});
+
+Deno.test("claimIntakeEmail: who to call, the number, what happened (redacted), the claim number and the link", () => {
+  const t = claimIntakeEmail({
+    callKey: CALL_KEY,
+    intakeKind: "claim",
+    claimType: "auto",
+    lossDate: "2026-10-10",
+    description: "Backed into in a lot. My other number is 602 555 0188.",
+    claimNumber: "CLM-482472",
+    verified: true,
+    callbackPhone: "+16025550101",
+    channel: "webCall",
+    dashboardUrl: DASHBOARD,
+    caller: { name: "Tobias Halvorsen", nameSource: "account", email: null },
+  });
+  assertAsciiTemplate(t);
+  assertEquals(t.subject, "New claim filed by phone: CLM-482472 (auto)");
+  for (
+    const part of [
+      "Claim filed for a verified customer",
+      "CLM-482472",
+      "Auto",
+      "October 10, 2026",
+      "Tobias Halvorsen",
+      "(602) 555-0101 (+16025550101)",
+      "Backed into in a lot. My other number is [phone ending 0188].",
+      `${DASHBOARD}#/calls/${CALL_KEY}`,
+    ]
+  ) assertStringIncludes(t.html, part);
+  assertFalse(t.html.includes("UNVERIFIED"));
+  assertFalse(t.html.includes("602 555 0188"));
+});
+
+Deno.test("claimIntakeEmail: a new caller's lead intake, labelled unverified, with the number they gave", () => {
+  const t = claimIntakeEmail({
+    callKey: CALL_KEY,
+    intakeKind: "lead_intake",
+    claimType: "home",
+    lossDate: "2026-10-09",
+    description: "A pipe burst in the kitchen.",
+    claimNumber: null,
+    verified: false,
+    callbackPhone: "+16025550177",
+    channel: "inboundPhoneCall",
+    caller: { name: "Jane Doe", nameSource: "caller", email: "jane.doe@example.com" },
+  });
+  assertAsciiTemplate(t);
+  assertEquals(t.subject, "New claim intake from a new caller: call 1a2b3c4d");
+  for (
+    const part of [
+      "NEW CALLER: no account on file",
+      "None yet (set up on the callback)",
+      "Jane Doe (caller-provided, unverified)",
+      "jane.doe@example.com",
+      "(602) 555-0177",
+      "A pipe burst in the kitchen.",
+      "a specialist will call within one business day",
+      "Dashboard link not configured.",
+    ]
+  ) assertStringIncludes(t.html, part);
+});
+
+Deno.test("claimIntakeEmail: an unverified claim is flagged, an empty description says so, markup is escaped", () => {
+  const t = claimIntakeEmail({
+    callKey: CALL_KEY,
+    intakeKind: "claim",
+    claimType: "home",
+    lossDate: "2026-10-09",
+    description: "<img src=x onerror=alert(1)>",
+    claimNumber: null,
+    verified: false,
+    callbackPhone: null,
+    channel: "",
+  });
+  assertAsciiTemplate(t);
+  assertStringIncludes(t.html, "UNVERIFIED: do not disclose claim details.");
+  assertFalse(t.html.includes("<img"));
+  assertStringIncludes(t.html, "Not assigned");
+  assertStringIncludes(t.html, "None known (check the dashboard)");
+  assertStringIncludes(t.html, "Unknown caller");
+  const empty = claimIntakeEmail({
+    callKey: CALL_KEY,
+    intakeKind: "claim",
+    claimType: "auto",
+    lossDate: "2026-10-09",
+    description: "  ",
+    claimNumber: "CLM-482472",
+    verified: true,
+    callbackPhone: null,
+    channel: "webCall",
+  });
+  assertStringIncludes(empty.html, "Not given");
 });

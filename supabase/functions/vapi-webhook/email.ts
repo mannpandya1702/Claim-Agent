@@ -5,7 +5,7 @@
 // HTML-escaped and the output is pure ASCII (anything else becomes a numeric character reference).
 
 import { dashboardLink, shortCallId } from "./alert.ts";
-import { CLAIM_TYPES, ESCALATION_REASONS, MAIN_LINE_SPOKEN } from "./enums.ts";
+import { CLAIM_TYPES, type ClaimIntakeKind, ESCALATION_REASONS, MAIN_LINE_SPOKEN } from "./enums.ts";
 import { redactPII } from "./redact.ts";
 import type { CallerContact, Claim, Customer, Deps, Session, Store } from "./types.ts";
 
@@ -329,7 +329,9 @@ export function teamCallerOf(
 ): TeamCaller {
   const confirmed = contact?.confirmed === true ? contact : null;
   const email = typeof confirmed?.email === "string" && confirmed.email.trim() ? confirmed.email.trim() : null;
-  const accountName = verified ? `${verified.first_name ?? ""} ${verified.last_name ?? ""}`.replace(/\s+/g, " ").trim() : "";
+  const accountName = verified
+    ? `${verified.first_name ?? ""} ${verified.last_name ?? ""}`.replace(/\s+/g, " ").trim()
+    : "";
   if (accountName) return { name: accountName, nameSource: "account", email };
   const given = confirmed ? `${confirmed.first_name} ${confirmed.last_name}`.replace(/\s+/g, " ").trim() : "";
   return given ? { name: given, nameSource: "caller", email } : { name: null, nameSource: null, email };
@@ -460,6 +462,70 @@ export function emergencyEmail(p: {
   return {
     subject: asciiLine(`POSSIBLE EMERGENCY REPORTED: call ${shortCallId(p.callKey)}`),
     html: page("Possible emergency reported", content, TEAM_FOOTER),
+  };
+}
+
+/** The team's notice of a claim taken by phone (confirm_claim). A verified customer's claim is filed
+ *  and has a number; a new caller's is a lead intake for a specialist to call back and set up. Staff
+ *  need who to call and what happened, so it carries the name, the number and the caller's words
+ *  (redacted, capped at 500 characters), like the callback email. */
+export function claimIntakeEmail(p: {
+  callKey: string;
+  intakeKind: ClaimIntakeKind;
+  claimType: string;
+  lossDate: string;
+  description: string | null; // already redacted at capture; redacted again here
+  claimNumber: string | null;
+  verified: boolean;
+  callbackPhone: string | null;
+  channel: string;
+  dashboardUrl?: string;
+  caller?: TeamCaller; // absent: shown as an unknown caller
+}): { subject: string; html: string } {
+  const lead = p.intakeKind === "lead_intake";
+  const verified = p.verified === true;
+  const description = typeof p.description === "string" && p.description.trim()
+    ? redactPII(p.description).slice(0, 500)
+    : null;
+  const number = typeof p.claimNumber === "string" && p.claimNumber.trim() ? p.claimNumber.trim() : null;
+  const phone = typeof p.callbackPhone === "string" && p.callbackPhone.trim() ? p.callbackPhone : null;
+  const type = claimTypeWord(p.claimType);
+  const content: string[] = [];
+  if (lead) {
+    content.push(
+      `<p style="${STYLE_WARN}">${
+        escapeHtml("NEW CALLER: no account on file. Please call back within one business day to set up the claim.")
+      }</p>`,
+    );
+  } else if (!verified) {
+    content.push(`<p style="${STYLE_WARN}">UNVERIFIED: do not disclose claim details.</p>`);
+  }
+  content.push(
+    table([
+      ["Call id", escapeHtml(p.callKey)],
+      ["Intake", lead ? "Details taken from a new caller (no claim filed yet)" : "Claim filed for a verified customer"],
+      ["Claim number", number ? escapeHtml(number) : lead ? "None yet (set up on the callback)" : "Not assigned"],
+      ["Claim type", escapeHtml(sentenceCase(type))],
+      ["Date of loss", escapeHtml(writtenDate(p.lossDate) ?? "Not given")],
+      ["Identity verified", verified ? "Yes" : "No"],
+      ...callerRows(p.caller ?? UNKNOWN_TEAM_CALLER),
+      ["Phone number", phone ? escapeHtml(writtenPhone(phone)) : "None known (check the dashboard)"],
+      ["Channel", escapeHtml(p.channel || "unknown")],
+      ["What happened (redacted)", description ? textBlock(description) : "Not given"],
+    ]),
+    para(escapeHtml(
+      lead
+        ? "The caller was told a specialist will call within one business day to finish setting up the claim."
+        : "The customer was told an adjuster will reach out within one business day.",
+    )),
+    linkLine(dashboardLink(p.dashboardUrl, p.callKey)),
+  );
+  const subject = lead
+    ? `New claim intake from a new caller: call ${shortCallId(p.callKey)}`
+    : `New claim filed by phone: ${number ?? "claim"} (${type})`;
+  return {
+    subject: asciiLine(subject),
+    html: page(lead ? "New claim intake from a new caller" : "New claim filed by phone", content, TEAM_FOOTER),
   };
 }
 
@@ -645,6 +711,55 @@ export function claimSummaryEmail(p: { customer: Customer; claims: Claim[] }): {
   };
 }
 
+/** The customer's confirmation of a claim taken by phone (confirm_claim), from database facts only:
+ *  the claim number (a verified customer's filed claim), the type, the date of loss and the
+ *  documents to gather, plus how to send them. A new caller's (lead intake) has no number yet: a
+ *  specialist calls to set the claim up. The caller's own description is never included. */
+export function claimReceivedEmail(p: {
+  customer: { first_name?: string | null };
+  intakeKind: ClaimIntakeKind;
+  claimType: string;
+  lossDate: string;
+  claimNumber: string | null;
+  documents: readonly string[];
+}): { subject: string; html: string } {
+  const lead = p.intakeKind === "lead_intake";
+  const type = claimTypeWord(p.claimType);
+  const number = !lead && typeof p.claimNumber === "string" && p.claimNumber.trim() ? p.claimNumber.trim() : null;
+  const loss = writtenDate(p.lossDate);
+  const docs = (Array.isArray(p.documents) ? p.documents : [])
+    .filter((d): d is string => typeof d === "string" && d.trim() !== "")
+    .map((d) => escapeHtml(sentenceCase(d.trim())));
+  const rows: [string, string][] = [];
+  if (number) rows.push(["Claim number", escapeHtml(number)]);
+  rows.push(["Claim type", escapeHtml(sentenceCase(type))]);
+  if (loss) rows.push(["Date of loss", escapeHtml(loss)]);
+  const content = [
+    greeting(p.customer),
+    para(escapeHtml(
+      lead
+        ? `Thanks for calling Observe Insurance. We've passed the details of your ${type} claim to our claims team.`
+        : `We've received your ${type} claim, reported on your call with Observe Insurance.`,
+    )),
+    table(rows),
+    h2("What happens next"),
+    para(escapeHtml(
+      lead
+        ? "A claims specialist will call you within one business day to finish setting up your claim and give you a claim number."
+        : "An adjuster will reach out within one business day.",
+    )),
+  ];
+  if (docs.length > 0) {
+    content.push(
+      h2(lead ? "It helps to have these ready" : "Documents to gather"),
+      list("ul", docs),
+    );
+  }
+  content.push(...howToSendBlock(number ? [number] : []));
+  const subject = number ? `We received your claim ${number}` : `We received the details of your ${type} claim`;
+  return { subject: asciiLine(subject), html: page("Your claim", content, CUSTOMER_FOOTER) };
+}
+
 /** The steps to start a claim. A verified customer's copy names their policy number; a new caller's
  *  (newCustomer: greeted by the first name they gave, sent to the address they spelled) is generic and
  *  carries nothing from any account. */
@@ -670,7 +785,11 @@ export function howToStartEmail(p: {
     h2("Have this ready"),
     list("ul", [
       escapeHtml(
-        policy ? `Your policy number: ${policy}` : newCustomer ? "Your policy number, if you have one" : "Your policy number",
+        policy
+          ? `Your policy number: ${policy}`
+          : newCustomer
+          ? "Your policy number, if you have one"
+          : "Your policy number",
       ),
       escapeHtml("The date of the loss"),
       escapeHtml("A short description of what happened"),

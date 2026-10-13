@@ -19,6 +19,7 @@ import {
 import type { CallListRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { CallerTypeBadge } from "./CallerTypeBadge";
+import { CallReasonBadge } from "./CallReasonBadge";
 import { useMediaQuery, useNow } from "./hooks";
 
 interface CallTableProps {
@@ -55,6 +56,7 @@ export function elapsedSeconds(row: Pick<CallListRow, "started_at" | "created_at
  * pulsing dot and a running clock. Phones and emails arrive already masked from search_calls;
  * only the detail page reads them whole. The caller type is decided at hangup, so a live row
  * shows a dash, and a list from before 0006_contacts.sql (no caller_type at all) shows nothing.
+ * The call reason follows the same rule (decided at hangup, absent before 0007_fnol_reasons.sql).
  */
 export function CallTable({ rows, loading = false, fetching = false, now: fixedNow, className }: CallTableProps) {
   const compact = useMediaQuery("(max-width: 767px)");
@@ -75,6 +77,7 @@ export function CallTable({ rows, loading = false, fetching = false, now: fixedN
             <TableHead scope="col">Type</TableHead>
             <TableHead scope="col">Channel</TableHead>
             <TableHead scope="col">Outcome</TableHead>
+            <TableHead scope="col">Reason</TableHead>
             <TableHead scope="col">Sentiment</TableHead>
             <TableHead scope="col" className="text-right">Duration</TableHead>
             <TableHead scope="col" className="text-right">Cost</TableHead>
@@ -132,6 +135,9 @@ function CallRow({ row, now }: { row: CallListRow; now: Date }) {
       <TableCell>
         <OutcomeBadge outcome={row.outcome} live={live} />
       </TableCell>
+      <TableCell className="whitespace-nowrap">
+        <CallReasonCell row={row} live={live} />
+      </TableCell>
       <TableCell>{live ? <span className="text-ink-3">{DASH}</span> : <SentimentBadge sentiment={row.sentiment} />}</TableCell>
       <TableCell className="whitespace-nowrap text-right tabular">
         {live ? (
@@ -163,6 +169,7 @@ function SkeletonRow() {
       <TableCell><Skeleton className="h-5 w-16" /></TableCell>
       <TableCell><Skeleton className="h-4 w-14" /></TableCell>
       <TableCell><Skeleton className="h-5 w-20" /></TableCell>
+      <TableCell><Skeleton className="h-5 w-24" /></TableCell>
       <TableCell><Skeleton className="h-5 w-16" /></TableCell>
       <TableCell><Skeleton className="ml-auto h-4 w-10" /></TableCell>
       <TableCell><Skeleton className="ml-auto h-4 w-12" /></TableCell>
@@ -196,6 +203,18 @@ function CallerTypeCell({ row, live }: { row: CallListRow; live: boolean }) {
     );
   }
   return <CallerTypeBadge type={row.caller_type} />;
+}
+
+function CallReasonCell({ row, live }: { row: CallListRow; live: boolean }) {
+  if (row.call_reason === undefined) return <span className="sr-only">Not recorded</span>;
+  if (!row.call_reason) {
+    return (
+      <span className="text-ink-3" title={live ? "Tagged when the call ends" : "No reason recorded yet"}>
+        {DASH}
+      </span>
+    );
+  }
+  return <CallReasonBadge reason={row.call_reason} />;
 }
 
 function FlagList({ flags }: { flags: string[] | null | undefined }) {
@@ -277,8 +296,9 @@ function CallList({ rows, loading, fetching, now, className }: Required<Omit<Cal
               </span>
             </div>
             {row.summary && !live && <p className="mt-1.5 line-clamp-2 text-xs text-ink-2">{row.summary}</p>}
-            {(row.flags.length > 0 || row.escalated || row.emergency || row.emailed || (!live && (row.sentiment || row.caller_type))) && (
+            {(row.flags.length > 0 || row.escalated || row.emergency || row.emailed || row.call_reason || (!live && (row.sentiment || row.caller_type))) && (
               <div className="relative z-10 mt-2 flex w-fit flex-wrap items-center gap-1.5">
+                <CallReasonBadge reason={row.call_reason} />
                 {!live && row.caller_type && <CallerTypeBadge type={row.caller_type} />}
                 {!live && row.sentiment && <SentimentBadge sentiment={row.sentiment} />}
                 <FlagList flags={row.flags} />

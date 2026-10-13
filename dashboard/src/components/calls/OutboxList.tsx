@@ -5,7 +5,7 @@ import { OUTBOX_MAX_ATTEMPTS, type OutboxEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const KIND_LABELS: Record<string, string> = { "interaction.completed": "Call record" };
-const DESTINATION_LABELS: Record<string, string> = { airtable: "Airtable call log" };
+const DESTINATION_LABELS: Record<string, string> = { airtable: "Airtable call log", ghl: "GoHighLevel CRM" };
 
 export type OutboxState = "delivered" | "pending" | "dead";
 
@@ -42,9 +42,9 @@ function StateBadge({ event }: { event: OutboxEvent }) {
 }
 
 /**
- * Post-call deliveries for one call (outbox_events keyed by the call id): where it goes, whether
- * it arrived, how many attempts it took and the last error. The payload is never stored here;
- * the job reads the current call record at delivery time.
+ * Post-call deliveries for one call (outbox_events keyed by the call id): where it goes (the
+ * Airtable call log, GoHighLevel), whether it arrived, how many attempts it took and the last
+ * error. The payload is never stored here; the job reads the current call record at delivery time.
  */
 export function OutboxList({ events, className }: { events: readonly OutboxEvent[]; className?: string }) {
   return (

@@ -757,7 +757,11 @@ Deno.test("reaper: a call VAPI still cannot answer for once its row is a day old
   assert(!out.skipped);
   assertEquals([out.result.reaped, out.result.waiting], [2, 1]);
   const row = (key: string) => h.store.tables.call_interactions.find((r) => r.vapi_call_id === key)!;
-  assertEquals([row(CALL_A).outcome, row(CALL_B).outcome, row(CALL_C).outcome], ["abandoned", "abandoned", "in_progress"]);
+  assertEquals([row(CALL_A).outcome, row(CALL_B).outcome, row(CALL_C).outcome], [
+    "abandoned",
+    "abandoned",
+    "in_progress",
+  ]);
 });
 
 Deno.test("reaper: a row starts only with room for the whole GET /call; the rest wait for the next pass", async () => {
@@ -768,7 +772,9 @@ Deno.test("reaper: a row starts only with room for the whole GET /call; the rest
       return json({ message: "Not Found" }, 404);
     },
   });
-  for (const [i, key] of [CALL_A, CALL_B, CALL_C].entries()) await interaction(h.store, key, { createdAgo: (5 - i) * HOUR });
+  for (const [i, key] of [CALL_A, CALL_B, CALL_C].entries()) {
+    await interaction(h.store, key, { createdAgo: (5 - i) * HOUR });
+  }
   const out = await runJob("reaper", h.deps);
   assert(!out.skipped);
   assertEquals([out.result.reaped, out.result.deferred], [1, 2]);
@@ -914,7 +920,11 @@ Deno.test("reaper: ended calls missing from the call log are queued again; recen
   await ended(CALL_E, 3 * DAY); // outside the 48-hour window
   await ended(CHAT_F, 3 * HOUR); // queued and still pending
   for (const key of [CALL_B, CALL_C, CHAT_F]) await h.store.enqueueOutbox("interaction.completed", key);
-  Object.assign(outbox(h.store, CALL_B)!, { delivered_at: ago(2 * HOUR + 50 * MINUTE), attempts: 1, external_id: "recB" });
+  Object.assign(outbox(h.store, CALL_B)!, {
+    delivered_at: ago(2 * HOUR + 50 * MINUTE),
+    attempts: 1,
+    external_id: "recB",
+  });
   Object.assign(outbox(h.store, CALL_C)!, { delivered_at: ago(30 * MINUTE), attempts: 1, external_id: "recC" });
   Object.assign(outbox(h.store, CHAT_F)!, { attempts: 2, last_error: "airtable 503: x" });
   const untouched = structuredClone([outbox(h.store, CALL_C), outbox(h.store, CHAT_F)]);
@@ -935,6 +945,40 @@ Deno.test("reaper: ended calls missing from the call log are queued again; recen
   assert(!delivered.skipped);
   const sent = h.calls.map((c) => JSON.parse(String(c.init.body)).records[0].fields["Call ID"]);
   assert(sent.includes(CALL_A) && sent.includes(CALL_B), sent.join(","));
+});
+
+Deno.test("reaper: a call GoHighLevel has no row for is queued for it alone, 90 s out; only when it is configured", async () => {
+  for (const configured of [true, false]) {
+    const env = configured ? { ...FULL_ENV, GHL_TOKEN: "pit-jobs", GHL_LOCATION_ID: "locJobs" } : FULL_ENV;
+    const h = harness({ env });
+    for (const key of [CALL_A, CALL_B]) {
+      const row = await interaction(h.store, key, { createdAgo: 3 * HOUR, ended: true });
+      Object.assign(row, { ended_at: ago(3 * HOUR), updated_at: ago(3 * HOUR) });
+      // the call log has both, delivered after the last change
+      await h.store.enqueueOutbox("interaction.completed", key, "airtable");
+    }
+    for (const o of h.store.tables.outbox_events) Object.assign(o, { delivered_at: ago(2 * HOUR), attempts: 1 });
+    // CALL_A's GoHighLevel enqueue failed; CALL_B's row was delivered long ago (never posted again)
+    await h.store.enqueueOutbox("interaction.completed", CALL_B, "ghl", 90);
+    const b = h.store.tables.outbox_events.find((o) => o.ref_id === CALL_B && o.destination === "ghl")!;
+    Object.assign(b, { delivered_at: ago(2 * HOUR), attempts: 1 });
+    const out = await runJob("reaper", h.deps);
+    assert(!out.skipped);
+    const ghl = h.store.tables.outbox_events.filter((o) => o.destination === "ghl");
+    if (!configured) {
+      assertEquals([out.result.requeued, ghl.length], [0, 1], "unconfigured: no GoHighLevel sweep");
+      continue;
+    }
+    assertEquals([out.result.requeued, out.result.errors], [1, 0]);
+    const a = ghl.find((o) => o.ref_id === CALL_A);
+    assert(a, "CALL_A queued for GoHighLevel");
+    assertEquals(Date.parse(a.next_attempt_at) - NOW.getTime(), 90_000, "with GoHighLevel's delay");
+    // the call log rows were left alone, and the delivered GoHighLevel row too
+    for (const o of h.store.tables.outbox_events.filter((o) => o.destination === "airtable")) {
+      assertEquals(o.delivered_at, ago(2 * HOUR));
+    }
+    assertEquals(b.delivered_at, ago(2 * HOUR));
+  }
 });
 
 Deno.test("reaper: a failed call-log sweep or enqueue is counted and the pruning still runs", async () => {
@@ -1057,7 +1101,10 @@ Deno.test("outbox: 401/403/404 pause delivery: nothing is spent, the run stops, 
     const h = harness({
       airtable: () =>
         refused
-          ? json({ error: { type: "AUTHENTICATION_REQUIRED", message: "Invalid token for account 98765432101" } }, status)
+          ? json(
+            { error: { type: "AUTHENTICATION_REQUIRED", message: "Invalid token for account 98765432101" } },
+            status,
+          )
           : json({ records: [{ id: "recOK" }] }),
     });
     await queued(h.store, CALL_A, CALL_B);
@@ -1257,7 +1304,8 @@ Deno.test("outbox: a claim that fails after a delivery keeps that delivery's cou
   await queued(h.store, CALL_A, CALL_B);
   const claim = h.store.claimOutbox;
   let claims = 0;
-  h.store.claimOutbox = (limit) => ++claims === 2 ? Promise.reject(new Error("store.claimOutbox: 57014")) : claim(limit);
+  h.store.claimOutbox = (limit, ref, destination) =>
+    ++claims === 2 ? Promise.reject(new Error("store.claimOutbox: 57014")) : claim(limit, ref, destination);
   const out = await runJob("outbox", h.deps);
   assert(!out.skipped);
   assertEquals(out.result, { delivered: 1, retried: 0, dead: 0, errors: 1 });

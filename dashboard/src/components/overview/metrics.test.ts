@@ -4,6 +4,7 @@ import {
   buildDailySeries,
   buildOutcomeRows,
   buildOutcomeSlices,
+  buildReasonMix,
   buildSentimentMix,
   normalizeMetrics,
   outcomeKey,
@@ -205,5 +206,46 @@ describe("range helpers", () => {
     // US clocks fall back on Nov 1, 2026; the range still spans exactly seven Eastern days.
     expect(rangeDays(customRange("2026-10-29", "2026-11-04"))).toBe(7);
     expect(rangeDays(presetRange("today", new Date("2026-10-12T15:00:00Z")))).toBe(1);
+  });
+});
+
+describe("buildReasonMix", () => {
+  it("ranks reasons by calls with human labels and shares of tagged calls", () => {
+    const mix = buildReasonMix(
+      [
+        { call_reason: "file_claim", calls: 3 },
+        { call_reason: "claim_status", calls: "12" as unknown as number },
+        { call_reason: "documents", calls: 5 },
+      ],
+      25,
+    );
+    expect(mix.rows.map((r) => [r.key, r.label, r.value])).toEqual([
+      ["claim_status", "Claim status", 12],
+      ["documents", "Documents", 5],
+      ["file_claim", "File a claim", 3],
+    ]);
+    expect(mix.tagged).toBe(20);
+    expect(mix.rows[0]!.share).toBeCloseTo(0.6);
+    expect(mix.untagged).toBe(5);
+  });
+
+  it("breaks ties in the reasons' own order, drops zero rows and merges repeats", () => {
+    const mix = buildReasonMix([
+      { call_reason: "other", calls: 2 },
+      { call_reason: "emergency", calls: 2 },
+      { call_reason: "speak_to_agent", calls: 0 },
+      { call_reason: "emergency", calls: 1 },
+    ]);
+    expect(mix.rows.map((r) => [r.key, r.value])).toEqual([
+      ["emergency", 3],
+      ["other", 2],
+    ]);
+    expect(mix.untagged).toBeNull();
+  });
+
+  it("is empty, not NaN, when nothing is tagged, and never counts negative untagged calls", () => {
+    const empty = buildReasonMix([], 4);
+    expect(empty).toEqual({ rows: [], tagged: 0, untagged: 4 });
+    expect(buildReasonMix([{ call_reason: "documents", calls: 6 }], 4).untagged).toBe(0);
   });
 });

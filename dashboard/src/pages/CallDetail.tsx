@@ -4,9 +4,11 @@ import {
   CircleCheck,
   CircleX,
   ClipboardCopy,
+  ClipboardList,
   ContactRound,
   Copy,
   Download,
+  ExternalLink,
   FileText,
   Fingerprint,
   Gauge,
@@ -29,7 +31,9 @@ import { Link, useParams } from "react-router-dom";
 import { AudioPlayer } from "@/components/calls/AudioPlayer";
 import { CallerContactCard } from "@/components/calls/CallerContactCard";
 import { CallerTypeBadge } from "@/components/calls/CallerTypeBadge";
+import { CallReasonBadge } from "@/components/calls/CallReasonBadge";
 import { ChannelLabel } from "@/components/calls/CallTable";
+import { ClaimIntakeCard } from "@/components/calls/ClaimIntakeCard";
 import { CostBreakdown, costParts } from "@/components/calls/CostBreakdown";
 import { EmailList } from "@/components/calls/EmailList";
 import { OutboxList } from "@/components/calls/OutboxList";
@@ -52,7 +56,9 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "@/components/ui/sonner";
 import {
+  CALL_REASON_SOURCE_LABELS,
   callerLabel,
+  callReasonMeta,
   DASH,
   formatDateTimeLong,
   formatDuration,
@@ -62,12 +68,15 @@ import {
   formatTime,
   NA,
 } from "@/lib/format";
+import { env } from "@/lib/env";
+import { ghlContactUrl } from "@/lib/ghl";
 import {
   fetchCall,
   fetchCallAttempts,
   fetchCallContact,
   fetchCallEmails,
   fetchCallEscalations,
+  fetchCallIntake,
   fetchCallOutbox,
   fetchCallSession,
   fetchTranscriptLines,
@@ -158,6 +167,7 @@ export default function CallDetail() {
   // The outbox row is written by the end-of-call writer, so it arrives after hangup (Realtime).
   const outboxQ = useQuery({ queryKey: qk.callOutbox(id), queryFn: () => fetchCallOutbox(id), enabled: id !== "" });
   const contactQ = useQuery({ queryKey: qk.callContact(id), queryFn: () => fetchCallContact(id), enabled: id !== "", refetchInterval: poll });
+  const intakeQ = useQuery({ queryKey: qk.callIntake(id), queryFn: () => fetchCallIntake(id), enabled: id !== "", refetchInterval: poll });
 
   // Per-call subscriptions. The streaming tables only matter while the call is live.
   const on = id !== "";
@@ -169,6 +179,7 @@ export default function CallDetail() {
   useRealtimeRows("emails", `call_key=eq.${id}`, [qk.callEmails(id)], { enabled: on });
   useRealtimeRows("outbox_events", `ref_id=eq.${id}`, [qk.callOutbox(id)], { enabled: on });
   useRealtimeRows("caller_contacts", `call_key=eq.${id}`, [qk.callContact(id)], { enabled: on });
+  useRealtimeRows("claim_intakes", `call_key=eq.${id}`, [qk.callIntake(id)], { enabled: on });
 
   const attempts = useMemo(() => attemptsQ.data ?? [], [attemptsQ.data]);
   const liveItems = useMemo(() => fromLiveLines(linesQ.data ?? [], attempts), [linesQ.data, attempts]);
@@ -250,6 +261,9 @@ export default function CallDetail() {
   const emailsView = view(emailsQ);
   const contact = contactQ.data ?? null;
   const contactView = view(contactQ);
+  const intake = intakeQ.data ?? null;
+  const intakeView = view(intakeQ);
+  const ghlUrl = ghlContactUrl(outboxQ.data ?? [], env.ghlLocationId);
 
   const exportRecord = () =>
     downloadJson(`call-${id}.json`, {
@@ -257,6 +271,7 @@ export default function CallDetail() {
       call,
       identity: session,
       contact,
+      claim_intake: intake,
       attempts,
       escalations,
       emails,
@@ -279,6 +294,8 @@ export default function CallDetail() {
                 <IdentityBadge level={session?.level} />
               )}
               <OutcomeBadge outcome={call?.outcome} live={live} />
+              {/* Set by the end-of-call writer; nothing renders while the call has no reason yet. */}
+              <CallReasonBadge reason={call?.call_reason} source={call?.call_reason_source} />
               {!live && <SentimentBadge sentiment={call?.sentiment} />}
               {success && <SuccessBadge meta={success} />}
               {call?.emergency && (
@@ -303,6 +320,15 @@ export default function CallDetail() {
         }
         actions={
           <>
+            {ghlUrl && (
+              <Button asChild variant="outline" size="sm">
+                <a href={ghlUrl} target="_blank" rel="noopener noreferrer">
+                  <ExternalLink aria-hidden="true" />
+                  Open in GoHighLevel
+                  <span className="sr-only"> (opens in a new tab)</span>
+                </a>
+              </Button>
+            )}
             <Button variant="outline" size="sm" disabled={items.length === 0} onClick={() => void copyText(transcriptToText(items), "Transcript")}>
               <ClipboardCopy aria-hidden="true" />
               Copy transcript
@@ -422,6 +448,17 @@ export default function CallDetail() {
         </div>
 
         <div className="min-w-0 space-y-4">
+          {/* Only calls that reported a loss have an intake, so the card appears when one does (or its read failed). */}
+          {(intake || intakeView === "error") && (
+            <Section title="Claim reported" icon={ClipboardList}>
+              {intake ? (
+                <ClaimIntakeCard intake={intake} live={live} />
+              ) : (
+                <ErrorState compact title="Could not load the reported claim" error={intakeQ.error} onRetry={() => void intakeQ.refetch()} />
+              )}
+            </Section>
+          )}
+
           <Section title="Caller contact" icon={ContactRound}>
             {contactView === "error" ? (
               <ErrorState compact title="Could not load the caller contact" error={contactQ.error} onRetry={() => void contactQ.refetch()} />
@@ -473,7 +510,7 @@ export default function CallDetail() {
               <SectionSkeleton rows={1} />
             ) : (outboxQ.data ?? []).length === 0 ? (
               <p className="text-sm text-ink-2">
-                {live ? "Queued for the Airtable call log when the call ends." : "Nothing queued for this call."}
+                {live ? "Queued for the Airtable call log and the CRM when the call ends." : "Nothing queued for this call."}
               </p>
             ) : (
               <OutboxList events={outboxQ.data ?? []} />
@@ -614,6 +651,8 @@ function CallFacts({ id, call, callerNumber }: { id: string; call: CallInteracti
     { label: "Started", value: formatDateTimeLong(call?.started_at ?? call?.created_at) },
     { label: "Ended", value: call?.ended_at ? formatDateTimeLong(call.ended_at) : "In progress" },
     { label: "Caller number", value: <span className="tabular">{formatPhone(phone)}</span> },
+    { label: "Call reason", value: call ? reasonLabel(call) : DASH },
+    ...(call?.claim_number ? [{ label: "Claim filed", value: <span className="font-mono text-xs">{call.claim_number}</span> }] : []),
     { label: "Ended reason", value: call?.ended_reason ? <span className="font-mono text-xs">{call.ended_reason}</span> : DASH },
     { label: "Assistant", value: call?.assistant_name ?? DASH },
     { label: "Analysis", value: call ? analysisLabel(call) : DASH },
@@ -628,6 +667,14 @@ function CallFacts({ id, call, callerNumber }: { id: string; call: CallInteracti
       ))}
     </dl>
   );
+}
+
+/** "File a claim (Server facts)"; a call with no reason yet says so rather than guessing one. */
+function reasonLabel(call: CallInteraction): string {
+  const meta = callReasonMeta(call.call_reason);
+  if (!meta) return call.call_reason === undefined ? DASH : call.ended_at ? "Not tagged" : "After hangup";
+  const source = call.call_reason_source ? (CALL_REASON_SOURCE_LABELS[call.call_reason_source] ?? null) : null;
+  return source ? `${meta.label} (${source})` : meta.label;
 }
 
 function analysisLabel(call: CallInteraction): string {

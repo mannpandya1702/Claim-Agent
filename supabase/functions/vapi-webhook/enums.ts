@@ -10,6 +10,25 @@ export type AttemptKind = typeof ATTEMPT_KINDS[number];
 export const CLAIM_TYPES = ["auto", "home", "property"] as const;
 export type ClaimType = typeof CLAIM_TYPES[number];
 
+// What a claim filed by phone asks the customer for, by type (file_claim_intake in
+// 0007_fnol_reasons.sql writes the same lists into claims.documents_required; enums_test.ts checks
+// the two agree). Worded like the seeded claims and data/faq.json.
+export const CLAIM_DOCUMENTS: Readonly<Record<ClaimType, readonly string[]>> = {
+  auto: ["photos of the damage", "the police report, if one was filed", "a repair estimate"],
+  home: ["photos of the damage", "a contractor estimate", "proof of ownership for the damaged items"],
+  property: ["photos of the damage", "a contractor estimate", "proof of ownership for the damaged items"],
+};
+
+// claim_intakes.kind (0007_fnol_reasons.sql). claim: a verified customer's intake, filed as a claims
+// row; lead_intake: a new caller's confirmed details plus the loss, for a specialist to set up.
+export const CLAIM_INTAKE_KINDS = ["claim", "lead_intake"] as const;
+export type ClaimIntakeKind = typeof CLAIM_INTAKE_KINDS[number];
+
+// verify_identity's optional intent: what the caller said they want, so a verified answer can lead
+// straight into it (claim_status reads the claims in the same call; file_claim asks what happened).
+export const VERIFY_INTENTS = ["claim_status", "file_claim", "other"] as const;
+export type VerifyIntent = typeof VERIFY_INTENTS[number];
+
 export const CLAIM_STATUSES = [
   "received",
   "under_review",
@@ -26,7 +45,11 @@ export type EscalationKind = typeof ESCALATION_KINDS[number];
 
 // Reasons the model may pass to escalate(). The server derives auth_locked / not_found from
 // session state and coerces anything off this list to representative_requested.
-export const MODEL_ESCALATION_REASONS = ["representative_requested", "unsupported_question", "transfer_failed"] as const;
+export const MODEL_ESCALATION_REASONS = [
+  "representative_requested",
+  "unsupported_question",
+  "transfer_failed",
+] as const;
 export type ModelEscalationReason = typeof MODEL_ESCALATION_REASONS[number];
 
 export const ESCALATION_REASONS = [
@@ -69,6 +92,8 @@ export const EMAIL_KINDS = [
   "document_checklist",
   "claim_summary",
   "how_to_start_claim",
+  "claim_received", // the customer's confirmation of a claim taken by phone
+  "claim_intake", // the team's notice of a claim taken by phone
 ] as const;
 export type EmailKind = typeof EMAIL_KINDS[number];
 
@@ -100,6 +125,24 @@ export type Outcome = typeof OUTCOMES[number];
 // The analysis / structured-output schema offers every outcome except in_progress.
 export const ANALYSIS_OUTCOMES = OUTCOMES.filter((o) => o !== "in_progress");
 
+// call_interactions.call_reason (0007_fnol_reasons.sql): the primary reason for the call, also offered
+// to the analysis schema (render.ts). call_reason_source ranks who set it: server facts beat the
+// structured output, which beats a reason derived from what the tools did.
+export const CALL_REASONS = [
+  "claim_status",
+  "file_claim",
+  "documents",
+  "general_question",
+  "speak_to_agent",
+  "update_details",
+  "emergency",
+  "other",
+] as const;
+export type CallReason = typeof CALL_REASONS[number];
+
+export const CALL_REASON_SOURCES = ["server", "structured_output", "derived"] as const;
+export type CallReasonSource = typeof CALL_REASON_SOURCES[number];
+
 export const ANALYSIS_STATUSES = ["pending", "ok", "backfilled", "missing"] as const;
 export type AnalysisStatus = typeof ANALYSIS_STATUSES[number];
 
@@ -108,6 +151,7 @@ export const FLAGS = [
   "status_read_without_verified_identity",
   "tool_markup_spoken",
   "email_promised_without_send",
+  "claim_promised_without_filing",
 ] as const;
 export type Flag = typeof FLAGS[number];
 
@@ -121,6 +165,8 @@ export const SERVER_TOOLS = [
   "send_info_email",
   "capture_contact",
   "confirm_contact",
+  "start_claim",
+  "confirm_claim",
 ] as const;
 export type ServerTool = typeof SERVER_TOOLS[number];
 
@@ -172,6 +218,23 @@ export const CODES = [
   "contact_retry",
   "contact_saved_new",
   "contact_saved_existing",
+  // start_claim
+  "claim_readback",
+  "claim_needs_lookup",
+  "claim_needs_contact",
+  "claim_needs_verification",
+  "claim_locked",
+  "claim_needs_description",
+  "claim_bad_date",
+  "claim_date_help",
+  "claim_too_old",
+  "claim_needs_phone",
+  "claim_already_filed",
+  // confirm_claim
+  "claim_not_pending",
+  "claim_retry",
+  "claim_filed",
+  "claim_intake_saved",
 ] as const;
 export type Code = typeof CODES[number];
 
@@ -185,12 +248,35 @@ export type AlertSink = typeof ALERT_SINKS[number];
 export const JOB_NAMES = ["sla", "digest", "reaper", "outbox"] as const;
 export type JobName = typeof JOB_NAMES[number];
 
-// outbox_events CHECK lists (0005_outbox.sql).
+// outbox_events CHECK lists (kind: 0005_outbox.sql; destination: 0008_ghl.sql puts it back widened).
 export const OUTBOX_KINDS = ["interaction.completed"] as const;
 export type OutboxKind = typeof OUTBOX_KINDS[number];
 
-export const OUTBOX_DESTINATIONS = ["airtable"] as const;
+export const OUTBOX_DESTINATIONS = ["airtable", "ghl"] as const;
 export type OutboxDestination = typeof OUTBOX_DESTINATIONS[number];
+
+// Every tag the GoHighLevel adapter (ghl.ts) can add to a contact: lowercase, one "oi-" prefix, an
+// outcome tag per outcome and a reason tag per call reason. Tags are only ever added (never put or
+// deleted), so a contact collects one outcome tag per call it made.
+export const GHL_TAGS = [
+  "oi-voice",
+  "oi-caller-existing",
+  "oi-caller-new",
+  "oi-verified",
+  "oi-unverified",
+  "oi-verify-locked",
+  "oi-lead-new", // only on a contact the adapter created, and not when it is do-not-contact
+  "oi-phone-matched", // a new caller whose confirmed number matched an existing contact
+  "oi-channel-phone",
+  "oi-channel-web",
+  ...OUTCOMES.map((o) => `oi-outcome-${o}` as const),
+  ...CALL_REASONS.map((r) => `oi-reason-${r}` as const),
+  "oi-callback",
+  "oi-emergency",
+  "oi-claim-filed", // a verified customer's claim filed on the call
+  "oi-claim-intake", // a new caller's claim details taken for a specialist
+] as const;
+export type GhlTag = typeof GHL_TAGS[number];
 
 export const MAIN_LINE_SPOKEN = "1-800-555-0142";
 export const CLAIMS_URL_SPOKEN = "observeinsurance dot com slash claims";

@@ -1,8 +1,8 @@
 import { assert, assertEquals, assertFalse } from "@std/assert";
 import {
   airtableConfigured,
-  interactionToFields,
   type InteractionForMirror,
+  interactionToFields,
   MERGE_FIELD,
   MIRROR_COLUMNS,
   upsertCallRecord,
@@ -27,6 +27,8 @@ const row: InteractionForMirror = {
   analysis_status: "ok",
   caller_type: "existing",
   caller_email: null,
+  call_reason: "claim_status",
+  claim_number: null,
 };
 
 function deps(env: Partial<Env>, fetchImpl: typeof fetch): Deps {
@@ -94,7 +96,9 @@ Deno.test("upsertCallRecord: PATCH with performUpsert on Call ID, typecast and B
   const fetchImpl = ((url: string, init: RequestInit) => {
     seen = { url, init };
     return Promise.resolve(
-      new Response(JSON.stringify({ records: [{ id: "rec1", fields: {} }], createdRecords: ["rec1"], updatedRecords: [] })),
+      new Response(
+        JSON.stringify({ records: [{ id: "rec1", fields: {} }], createdRecords: ["rec1"], updatedRecords: [] }),
+      ),
     );
   }) as unknown as typeof fetch;
   const r = await upsertCallRecord(deps(configured, fetchImpl), { [MERGE_FIELD]: "call-abc-123" });
@@ -178,7 +182,13 @@ Deno.test("interactionToFields: Caller Type always, and the confirmed caller-giv
   assertEquals(existing["Caller Type"], "existing");
   assertFalse("Email" in existing, "no address: the cell is left alone");
   const fresh = interactionToFields(
-    { ...row, caller_name: "Jane Doe", caller_type: "new", caller_email: " jane.doe@gmail.com ", caller_phone: "+16025550177" },
+    {
+      ...row,
+      caller_name: "Jane Doe",
+      caller_type: "new",
+      caller_email: " jane.doe@gmail.com ",
+      caller_phone: "+16025550177",
+    },
     at,
   );
   assertEquals([fresh["Caller Name"], fresh["Caller Type"], fresh["Email"], fresh["Caller Phone"]], [
@@ -208,4 +218,29 @@ Deno.test("upsertCallRecord: a field the table lacks pauses the outbox (config) 
   );
   assert(!badValue.ok);
   assertEquals([badValue.retryable, badValue.config === true], [false, false]);
+});
+
+Deno.test("interactionToFields: Call Reason and Claim Number as stored, and left alone when the call has none", () => {
+  const at = new Date("2026-10-12T15:03:00Z");
+  const status = interactionToFields(row, at);
+  assertEquals(status["Call Reason"], "claim_status");
+  assertFalse("Claim Number" in status, "no claim filed: the cell is left alone");
+
+  const filed = interactionToFields({ ...row, call_reason: "file_claim", claim_number: " CLM-104472 " }, at);
+  assertEquals([filed["Call Reason"], filed["Claim Number"]], ["file_claim", "CLM-104472"]);
+
+  // a call not tagged yet (the backfill may tag it later) omits both, never an empty or guessed value
+  const untagged = interactionToFields({ ...row, call_reason: null, claim_number: "" }, at);
+  assertFalse("Call Reason" in untagged);
+  assertFalse("Claim Number" in untagged);
+  // a record built before the columns existed maps the same way
+  const { call_reason: _reason, claim_number: _number, ...older } = row;
+  const old = interactionToFields(older, at);
+  assertFalse("Call Reason" in old);
+  assertFalse("Claim Number" in old);
+});
+
+Deno.test("MIRROR_COLUMNS reads the call reason and the filed claim number, never the reason's source", () => {
+  for (const c of ["call_reason", "claim_number"]) assert((MIRROR_COLUMNS as readonly string[]).includes(c), c);
+  assertFalse((MIRROR_COLUMNS as readonly string[]).includes("call_reason_source"));
 });

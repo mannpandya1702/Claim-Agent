@@ -35,7 +35,8 @@ const run = crypto.randomUUID().slice(0, 8);
 const DOB = [1986, 3, 14] as const;
 
 // Grants the dashboard migration (0003), the outbox migration (0005, the staff read of
-// outbox_events) and the contacts migration (0006, the staff read of caller_contacts) give to
+// outbox_events), the contacts migration (0006, the staff read of caller_contacts) and the FNOL
+// migration (0007, the staff read of claim_intakes and the call-reason chart) give to
 // authenticated. Anything outside this list is a failure; before 0003 is
 // applied authenticated must hold nothing at all.
 const AUTHENTICATED_ALLOWLIST = [
@@ -44,6 +45,7 @@ const AUTHENTICATED_ALLOWLIST = [
   "table:transcript_lines:SELECT",
   "table:outbox_events:SELECT",
   "table:caller_contacts:SELECT",
+  "table:claim_intakes:SELECT",
   "table:ops_health:SELECT",
   "column:call_interactions.staff_notes:UPDATE",
   ...[
@@ -54,6 +56,7 @@ const AUTHENTICATED_ALLOWLIST = [
     "calls_by_day",
     "search_calls",
     "escalation_delivery_gap",
+    "call_reason_counts",
   ].map((f) => `function:${f}:EXECUTE`),
 ];
 
@@ -63,10 +66,15 @@ const SERVER_FUNCTIONS = [
   "verify_dob_attempt(text,integer,integer,integer,text)",
   "upsert_escalation(text,text,text,text,text,text,text,boolean)",
   "upsert_interaction(jsonb)",
-  "enqueue_outbox(text,text,text)",
+  "enqueue_outbox(text,text,text,integer)",
   "claim_outbox(integer)",
+  "save_outbox_progress(uuid,jsonb,integer,timestamptz)",
   "upsert_caller_contact(text,text,text,text,text,text,text,uuid)",
   "set_caller_contact_confirmed(text,boolean)",
+  "upsert_claim_intake(text,text,text,date,text,text,uuid)",
+  "file_claim_intake(text)",
+  "reject_claim_intake(text)",
+  "file_claim_intake_once(text)",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -471,10 +479,21 @@ await test("caller_contacts: captured unconfirmed, confirmed once, kept by an id
   select * into r from set_caller_contact_confirmed(${k}, true);
   assert r.confirmed_at = '2001-01-01T00:00:00Z', format('second confirm moved the time: %s', r.confirmed_at);
 
-  -- the same read-back again keeps the yes, even with another callback number (not read back)
+  -- the same read-back again keeps the yes
+  select * into r from ${upsert("jane.doe@example.com")};
+  assert r.confirmed and r.confirmed_at = '2001-01-01T00:00:00Z' and r.callback_phone = '+16025550177'
+    and r.callback_source = 'argument', format('identical capture: %s', row_to_json(r));
+  -- 0009: a changed callback number, or the same number from another source, needs a new yes
+  select * into r from ${upsert("jane.doe@example.com", "+16025550222")};
+  assert not r.confirmed and r.confirmed_at is null and r.callback_phone = '+16025550222',
+    format('changed number: %s', row_to_json(r));
+  perform set_caller_contact_confirmed(${k}, true);
+  select * into r from ${upsert("jane.doe@example.com", "+16025550222", "caller_id")};
+  assert not r.confirmed and r.confirmed_at is null, format('changed number source: %s', row_to_json(r));
+  perform set_caller_contact_confirmed(${k}, true);
   select * into r from ${upsert("jane.doe@example.com", null, "none")};
-  assert r.confirmed and r.confirmed_at = '2001-01-01T00:00:00Z' and r.callback_phone is null
-    and r.callback_source = 'none', format('identical capture: %s', row_to_json(r));
+  assert not r.confirmed and r.confirmed_at is null, format('number dropped: %s', row_to_json(r));
+  perform set_caller_contact_confirmed(${k}, true);
   -- a changed address needs a new yes
   select * into r from ${upsert("jayne.doe@example.com")};
   assert not r.confirmed and r.confirmed_at is null, format('changed capture: %s', row_to_json(r));
@@ -482,14 +501,18 @@ await test("caller_contacts: captured unconfirmed, confirmed once, kept by an id
   select * into r from set_caller_contact_confirmed(${k}, false);
   assert not r.confirmed and r.confirmed_at is null, format('no: %s', row_to_json(r));
   assert (select count(*) from caller_contacts where call_key = ${k}) = 1, 'one row per call';
-  assert not exists (select 1 from set_caller_contact_confirmed(${lit(`${f.callKey}-none`)}, true)), 'no row, no confirm';
+  assert not exists (select 1 from set_caller_contact_confirmed(${
+        lit(`${f.callKey}-none`)
+      }, true)), 'no row, no confirm';
 
   -- an email update carries the verified customer; an unknown customer is refused
   select * into r from upsert_caller_contact(${lit(`${f.callKey}-upd`)}, 'email_update', 'Dbtest', 'Customer',
     'dbtest@example.com', null, 'none', ${lit(f.customerId)});
   assert r.kind = 'email_update' and r.customer_id = ${lit(f.customerId)}, format('update: %s', row_to_json(r));
   begin
-    perform upsert_caller_contact(${lit(`${f.callKey}-fk`)}, 'email_update', 'A', 'B', null, null, 'none', gen_random_uuid());
+    perform upsert_caller_contact(${
+        lit(`${f.callKey}-fk`)
+      }, 'email_update', 'A', 'B', null, null, 'none', gen_random_uuid());
     assert false, 'an unknown customer was accepted';
   exception when foreign_key_violation then null;
   end;
@@ -557,6 +580,295 @@ await test("upsert_interaction: caller_type replaces unknown, never downgrades; 
   select * into s from search_calls(p_q => ${lit(k)}, p_limit => 5);
   assert s.vapi_call_id = ${lit(k)} and s.caller_type = 'existing' and s.caller_email_masked = 'j***@example.com',
     format('search_calls: %s', row_to_json(s));`,
+    "c record; s record;",
+  )));
+});
+
+// ---------------------------------------------------------------------------------------------
+// First notice of loss and call reasons (0007)
+// ---------------------------------------------------------------------------------------------
+await test("claim_intakes: replaced until filed; filed once with a fresh number and the claims row; never rewritten", async () => {
+  const f = fixture("intake");
+  const k = lit(f.callKey);
+  const upsert = (type: string, date: string, kind = "claim", customer: string | null = f.customerId) =>
+    `upsert_claim_intake(${k}, ${lit(kind)}, ${lit(type)}, ${lit(date)}, 'rear-ended', 'Someone rear-ended me.', ${
+      lit(customer)
+    })`;
+  await sql(tx(
+    insertCustomer(f),
+    doBlock(
+      `
+  assert not exists (select 1 from file_claim_intake(${k})), 'no intake, nothing filed';
+  assert not exists (select 1 from reject_claim_intake(${k})), 'no intake, nothing rejected';
+
+  select * into r from ${upsert("auto", "2026-10-10")};
+  assert not r.confirmed and r.claim_number is null and r.kind = 'claim', format('first upsert: %s', row_to_json(r));
+  select * into r from ${upsert("home", "2026-10-09")};
+  assert r.claim_type = 'home' and r.loss_date = '2026-10-09', format('replaced: %s', row_to_json(r));
+  assert (select count(*) from claim_intakes where call_key = ${k}) = 1, 'one intake per call';
+  select * into r from reject_claim_intake(${k});
+  assert not r.confirmed and r.claim_type = 'home', 'a no keeps it unconfirmed';
+
+  select * into r from file_claim_intake(${k});
+  assert r.confirmed and r.confirmed_at = now() and r.claim_number ~ '^CLM-[0-9]{6}$' and r.claim_id is not null,
+    format('filed: %s', row_to_json(r));
+  v_number := r.claim_number;
+  select * into c from claims where id = r.claim_id;
+  assert c.customer_id = ${lit(f.customerId)} and c.claim_number = v_number and c.claim_type = 'home'
+     and c.status = 'received'
+     and c.status_detail = 'Reported by phone. An adjuster will be assigned within one business day.'
+     and c.documents_required = array['photos of the damage', 'a contractor estimate', 'proof of ownership for the damaged items']
+     and c.documents_due is null and c.adjuster_name is null and c.amount_approved is null
+     and c.filed_on = (now() at time zone 'America/New_York')::date and c.updated_on = c.filed_on
+     and c.reported_call_key = ${k},
+    format('claims row: %s', row_to_json(c));
+
+  -- filed once: a second file, a new upsert and a no all return the filed row unchanged
+  select * into r from file_claim_intake(${k});
+  assert r.claim_number = v_number, 'a second file drew a new number';
+  select * into r from ${upsert("auto", "2026-10-01")};
+  assert r.confirmed and r.claim_type = 'home' and r.loss_date = '2026-10-09', 'a filed intake was rewritten';
+  select * into r from reject_claim_intake(${k});
+  assert r.confirmed, 'a filed intake was un-filed';
+  assert (select count(*) from claims where reported_call_key = ${k}) = 1, 'one claim per call';
+  begin
+    insert into claims (customer_id, claim_number, claim_type, status, filed_on, updated_on, reported_call_key)
+    values (${lit(f.customerId)}, 'CLM-T${run}', 'auto', 'received', '2026-10-10', '2026-10-10', ${k});
+    assert false, 'a second claim for the call was accepted';
+  exception when unique_violation then null;
+  end;
+
+  -- the auto list, and a lead intake files without a claims row
+  perform upsert_claim_intake(${lit(`${f.callKey}-auto`)}, 'claim', 'auto', '2026-10-10', 'x', 'y z w', ${
+        lit(f.customerId)
+      });
+  select * into r from file_claim_intake(${lit(`${f.callKey}-auto`)});
+  assert (select documents_required from claims where id = r.claim_id)
+    = array['photos of the damage', 'the police report, if one was filed', 'a repair estimate'], 'auto documents';
+  assert r.claim_number <> v_number, 'two filings drew the same number';
+  perform ${upsert("property", "2026-10-10", "lead_intake", null).replace(k, lit(`${f.callKey}-lead`))};
+  select * into r from file_claim_intake(${lit(`${f.callKey}-lead`)});
+  assert r.confirmed and r.claim_id is null and r.claim_number is null, format('lead: %s', row_to_json(r));
+  assert not exists (select 1 from claims where reported_call_key = ${
+        lit(`${f.callKey}-lead`)
+      }), 'a lead intake filed a claim';`,
+      "r record; c record; v_number text;",
+    ),
+  ));
+});
+
+await test("file_claim_intake_once (0009): filed_now only for the call that filed it", async () => {
+  const f = fixture("once");
+  const k = lit(f.callKey);
+  const lead = lit(`${f.callKey}-lead`);
+  await sql(tx(
+    insertCustomer(f),
+    doBlock(
+      `
+  assert not exists (select 1 from file_claim_intake_once(${k})), 'no intake, nothing filed';
+  perform upsert_claim_intake(${k}, 'claim', 'auto', '2026-10-10', 'x', 'y z w', ${lit(f.customerId)});
+  select * into r from file_claim_intake_once(${k});
+  assert r.filed_now and (r.intake).confirmed and (r.intake).claim_number ~ '^CLM-[0-9]{6}$'
+    and (r.intake).call_key = ${k}, format('filed: %s', row_to_json(r));
+  v_number := (r.intake).claim_number;
+  select * into r from file_claim_intake_once(${k});
+  assert not r.filed_now and (r.intake).claim_number = v_number, format('filed again: %s', row_to_json(r));
+  assert (select count(*) from claims where reported_call_key = ${k}) = 1, 'one claim per call';
+  perform upsert_claim_intake(${lead}, 'lead_intake', 'home', '2026-10-10', 'x', 'y z w', null);
+  select * into r from file_claim_intake_once(${lead});
+  assert r.filed_now and (r.intake).claim_id is null, format('lead: %s', row_to_json(r));`,
+      "r record; v_number text;",
+    ),
+  ));
+});
+
+await test("file_claim_intake_once (0009): two overlapping filings, one filed_now", async () => {
+  // Two statements at once: the first holds the row lock while it sleeps, the second waits on it and
+  // then reads the intake as filed. Committed rows, removed below.
+  const f = fixture("race");
+  const k = lit(f.callKey);
+  await sql(`begin; ${insertCustomer(f)}
+    select upsert_claim_intake(${k}, 'claim', 'auto', '2026-10-10', 'x', 'y z w', ${lit(f.customerId)});
+    commit;`);
+  try {
+    const first = sql<{ filed_now: boolean }>(
+      `select filed_now, pg_sleep(2) is null as slept from file_claim_intake_once(${k})`,
+    );
+    await new Promise((r) => setTimeout(r, 500));
+    const second = sql<{ filed_now: boolean }>(`select filed_now from file_claim_intake_once(${k})`);
+    const [a, b] = await Promise.all([first, second]);
+    assertEquals([a[0]?.filed_now, b[0]?.filed_now].sort(), [false, true], "exactly one filing says it filed");
+    const [n] = await sql<{ n: number }>(`select count(*)::int n from claims where reported_call_key = ${k}`);
+    assertEquals(n.n, 1, "one claim");
+  } finally {
+    await sql(`begin;
+      delete from claim_intakes where call_key = ${k};
+      delete from claims where reported_call_key = ${k};
+      delete from customers where id = ${lit(f.customerId)};
+      commit;`);
+  }
+});
+
+await test("claim_intakes: a drawn number already taken is drawn again", async () => {
+  const f = fixture("draw");
+  const k = lit(f.callKey);
+  // setseed makes random() repeat within the session: the first draw is taken beforehand
+  await sql(tx(
+    insertCustomer(f),
+    doBlock(
+      `
+  perform setseed(0.42);
+  v_first := 'CLM-' || lpad(floor(random() * 1000000)::int::text, 6, '0');
+  v_second := 'CLM-' || lpad(floor(random() * 1000000)::int::text, 6, '0');
+  if not exists (select 1 from claims where claim_number = v_first) then
+    insert into claims (customer_id, claim_number, claim_type, status, filed_on, updated_on)
+    values (${lit(f.customerId)}, v_first, 'auto', 'closed', '2026-01-01', '2026-01-01');
+  end if;
+  perform upsert_claim_intake(${k}, 'claim', 'auto', '2026-10-10', 'x', 'y z w', ${lit(f.customerId)});
+  perform setseed(0.42);
+  select * into r from file_claim_intake(${k});
+  assert r.claim_number <> v_first, format('reused a taken number: %s', r.claim_number);
+  assert r.claim_number = v_second or exists (select 1 from claims where claim_number = v_second and reported_call_key is distinct from ${k}),
+    format('expected the next draw %s, got %s', v_second, r.claim_number);`,
+      "r record; v_first text; v_second text;",
+    ),
+  ));
+});
+
+await test("claim_intakes rejects what the CHECKs and keys refuse; a claim without its customer is not filed", async () => {
+  const f = fixture("intakechk");
+  const k = f.callKey;
+  const bad = (label: string, args: string, state = "check_violation") => `
+  begin
+    perform upsert_claim_intake(${args});
+    assert false, ${lit(`accepted ${label}`)};
+  exception when ${state} then null;
+  end;`;
+  const args = (over: Partial<Record<"kind" | "type" | "date" | "summary" | "description" | "customer", string>>) =>
+    [
+      lit(k),
+      over.kind ?? "'claim'",
+      over.type ?? "'auto'",
+      over.date ?? "'2026-10-10'",
+      over.summary ?? "'x'",
+      over.description ?? "'y z w'",
+      over.customer ?? lit(f.customerId),
+    ].join(", ");
+  await sql(tx(
+    insertCustomer(f),
+    doBlock(
+      [
+        bad("an unknown kind", args({ kind: "'lead'" })),
+        bad("an unknown type", args({ type: "'boat'" })),
+        bad("an empty summary", args({ summary: "''" })),
+        bad("a long summary", args({ summary: `repeat('x', 81)` })),
+        bad("an empty description", args({ description: "''" })),
+        bad("a long description", args({ description: `repeat('y', 501)` })),
+        bad("no date", args({ date: "null" }), "not_null_violation"),
+        bad("an unknown customer", args({ customer: lit(crypto.randomUUID()) }), "foreign_key_violation"),
+        `perform upsert_claim_intake(${args({ summary: "repeat('x', 80)", description: "repeat('y', 500)" })});`,
+        `begin
+    update claim_intakes set confirmed = true where call_key = ${lit(k)};
+    assert false, 'confirmed without a time';
+  exception when check_violation then null;
+  end;`,
+        `begin
+    update claim_intakes set claim_number = 'CLM-12' where call_key = ${lit(k)};
+    assert false, 'a malformed claim number';
+  exception when check_violation then null;
+  end;`,
+        `perform upsert_claim_intake(${lit(`${k}-orphan`)}, 'claim', 'auto', '2026-10-10', 'x', 'y z w', null);
+  begin
+    perform file_claim_intake(${lit(`${k}-orphan`)});
+    assert false, 'a claim without a customer was filed';
+  exception when not_null_violation then null;
+  end;
+  assert not (select confirmed from claim_intakes where call_key = ${lit(`${k}-orphan`)}), 'left unconfirmed';`,
+        `begin
+    insert into emails (call_key, kind, to_masked) values (${lit(k)}, 'claim_update', 'x');
+    assert false, 'an unknown email kind';
+  exception when check_violation then null;
+  end;
+  insert into emails (call_key, kind, to_masked) values (${lit(k)}, 'claim_received', 'o***@example.com'),
+                                                         (${lit(k)}, 'claim_intake', 't***@example.com');`,
+      ].join("\n"),
+    ),
+  ));
+});
+
+await test("upsert_interaction: call_reason by source rank, claim_number kept; search_calls and call_reason_counts read them", async () => {
+  const f = fixture("reason");
+  const k = f.callKey;
+  const j = (v: Record<string, unknown>) => `${lit(JSON.stringify({ vapi_call_id: k, ...v }))}::jsonb`;
+  const row = `select * into c from call_interactions where vapi_call_id = ${lit(k)};`;
+  const is = (reason: string | null, source: string | null, claim: string | null, label: string) =>
+    `${row}
+  assert c.call_reason is not distinct from ${lit(reason)} and c.call_reason_source is not distinct from ${lit(source)}
+     and c.claim_number is not distinct from ${lit(claim)}, format('${label}: %s/%s/%s', c.call_reason,
+     c.call_reason_source, c.claim_number);`;
+  await sql(tx(doBlock(
+    `
+  perform upsert_interaction(${j({ outcome: "in_progress", started_at: "2001-01-01T10:00:00Z" })});
+  ${is(null, null, null, "stub")}
+  perform upsert_interaction(${j({ call_reason: "claim_status", call_reason_source: "derived" })});
+  ${is("claim_status", "derived", null, "derived")}
+  perform upsert_interaction(${j({ call_reason: "documents", call_reason_source: "derived" })});
+  ${is("documents", "derived", null, "equal rank replaces")}
+  perform upsert_interaction(${
+      j({ call_reason: "general_question", call_reason_source: "structured_output", claim_number: "CLM-123456" })
+    });
+  ${is("general_question", "structured_output", "CLM-123456", "structured output")}
+  perform upsert_interaction(${j({ call_reason: "claim_status", call_reason_source: "derived", claim_number: "" })});
+  perform upsert_interaction(${j({ call_reason: null, call_reason_source: null, claim_number: null })});
+  ${is("general_question", "structured_output", "CLM-123456", "lower rank, null and empty keep")}
+  perform upsert_interaction(${
+      j({ call_reason: "file_claim", call_reason_source: "server", ended_at: "2001-01-01T10:05:00Z" })
+    });
+  ${is("file_claim", "server", "CLM-123456", "server")}
+  perform upsert_interaction(${
+      j({ call_reason: "other", call_reason_source: "structured_output", ended_at: "2001-01-01T10:05:00Z" })
+    });
+  ${is("file_claim", "server", "CLM-123456", "below server")}
+  -- forward-only: a stub after the end changes nothing
+  perform upsert_interaction(${j({ call_reason: "emergency", call_reason_source: "server" })});
+  ${is("file_claim", "server", "CLM-123456", "stub after end")}
+  -- a reason without a source is stored without one and ranks lowest
+  perform upsert_interaction(${lit(JSON.stringify({ vapi_call_id: `${k}-nosrc`, call_reason: "other" }))}::jsonb);
+  assert (select call_reason_source from call_interactions where vapi_call_id = ${
+      lit(`${k}-nosrc`)
+    }) is null, 'no source';
+  -- a source without a reason is not stored
+  perform upsert_interaction(${
+      lit(JSON.stringify({ vapi_call_id: `${k}-noreason`, call_reason_source: "server" }))
+    }::jsonb);
+  assert (select call_reason_source from call_interactions where vapi_call_id = ${lit(`${k}-noreason`)}) is null,
+    'a source without a reason';
+
+  begin
+    perform upsert_interaction(${lit(JSON.stringify({ vapi_call_id: `${k}-bad`, call_reason: "complaint" }))}::jsonb);
+    assert false, 'an unknown call_reason was accepted';
+  exception when check_violation then null;
+  end;
+  begin
+    perform upsert_interaction(${
+      lit(JSON.stringify({ vapi_call_id: `${k}-bad2`, call_reason: "other", call_reason_source: "llm" }))
+    }::jsonb);
+    assert false, 'an unknown call_reason_source was accepted';
+  exception when check_violation then null;
+  end;
+
+  -- the prefix search also finds this case's other rows; the one under test carries its reason
+  select * into s from search_calls(p_q => ${lit(k)}, p_limit => 10) x where x.vapi_call_id = ${lit(k)};
+  assert s.call_reason = 'file_claim', format('search_calls: %s', row_to_json(s));
+  -- the window holds only this case's rows (2001), so the counts are exact
+  assert (select coalesce(jsonb_object_agg(call_reason, calls), '{}') from
+          call_reason_counts('2001-01-01T00:00:00Z', '2001-01-02T00:00:00Z')) = '{"file_claim": 1}'::jsonb,
+    'call_reason_counts';
+  update call_interactions set started_at = '2001-01-01T11:00:00Z' where vapi_call_id like ${lit(`${k}-%`)};
+  -- most first, then by name; the call with no reason is left out
+  assert (select array_agg(call_reason || ':' || calls) from
+          call_reason_counts('2001-01-01T00:00:00Z', '2001-01-02T00:00:00Z')) = array['file_claim:1', 'other:1'],
+    'call_reason_counts leaves out a call without a reason and orders the rest';`,
     "c record; s record;",
   )));
 });
@@ -699,6 +1011,11 @@ await test("runtime: anon and authenticated are denied the customer data and the
   exception when insufficient_privilege then null;
   end;
   begin
+    perform public.save_outbox_progress(gen_random_uuid(), '{}'::jsonb, 1, now());
+    assert false, '${role} can call save_outbox_progress';
+  exception when insufficient_privilege then null;
+  end;
+  begin
     perform public.upsert_caller_contact('dbtest-denied', 'new_customer', 'A', 'B', null, null, 'none', null);
     assert false, '${role} can call upsert_caller_contact';
   exception when insufficient_privilege then null;
@@ -711,6 +1028,32 @@ await test("runtime: anon and authenticated are denied the customer data and the
   begin
     insert into public.caller_contacts (call_key, kind, first_name, last_name) values ('dbtest-denied', 'new_customer', 'A', 'B');
     assert false, '${role} can insert caller_contacts';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform public.upsert_claim_intake('dbtest-denied', 'lead_intake', 'auto', '2026-10-10', 'x', 'y', null);
+    assert false, '${role} can call upsert_claim_intake';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform public.file_claim_intake('dbtest-denied');
+    assert false, '${role} can call file_claim_intake';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform public.reject_claim_intake('dbtest-denied');
+    assert false, '${role} can call reject_claim_intake';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform public.file_claim_intake_once('dbtest-denied');
+    assert false, '${role} can call file_claim_intake_once';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    insert into public.claim_intakes (call_key, kind, claim_type, loss_date, summary, description)
+    values ('dbtest-denied', 'lead_intake', 'auto', '2026-10-10', 'x', 'y');
+    assert false, '${role} can insert claim_intakes';
   exception when insufficient_privilege then null;
   end;
   begin
@@ -774,6 +1117,62 @@ await test("outbox: enqueue_outbox inserts once and re-arms; claim_outbox bumps 
   )));
 });
 
+await test("outbox (0008): a ghl row waits out its delay; progress merges under a guard; a re-arm keeps progress", async () => {
+  const k = lit(`dbtest-ghl-${run}`);
+  await sql(tx(doBlock(
+    `
+  perform enqueue_outbox('interaction.completed', ${k}, 'airtable');
+  perform enqueue_outbox('interaction.completed', ${k}, 'ghl', 90);
+  assert (select count(*) from outbox_events where ref_id = ${k}) = 2, 'one row per destination';
+  select * into r from outbox_events where ref_id = ${k} and destination = 'ghl';
+  v_id := r.id;
+  assert r.progress = '{}'::jsonb and r.attempts = 0 and r.next_attempt_at = now() + interval '90 seconds',
+    format('queued 90 s out with empty progress: %s', r);
+  assert (select next_attempt_at from outbox_events where ref_id = ${k} and destination = 'airtable') = now(),
+    'no delay: due at once';
+  -- both head the queue; claim_outbox takes only the one that is due
+  update outbox_events set created_at = '2001-01-01T00:00:00Z' where ref_id = ${k};
+  select array_agg(c.destination order by c.destination) into v_dest from claim_outbox(1000) c where c.ref_id = ${k};
+  assert v_dest = array['airtable'], format('claimed: %s', v_dest);
+
+  -- progress: a shallow merge that always lands; held only while attempts and the write time match
+  select * into r from outbox_events where id = v_id;
+  select * into p from save_outbox_progress(v_id, '{"contact_id": "c1", "tags_done": true}', 0, r.updated_at);
+  assert p.held and p.saved_at is not null, format('the guard of the row as read holds: %s', p);
+  select * into p from save_outbox_progress(v_id, '{"note_id": "n1", "tags_done": false}', 0, r.updated_at);
+  assert p.held, 'a second save under the same claim holds';
+  select * into p from save_outbox_progress(v_id, '{"task_claim_id": "t1"}', 3, r.updated_at);
+  assert not p.held, 'another claim''s attempts do not hold';
+  assert (select progress from outbox_events where id = v_id)
+    = '{"contact_id": "c1", "tags_done": false, "note_id": "n1", "task_claim_id": "t1"}'::jsonb,
+    format('merged: %s', (select progress from outbox_events where id = v_id));
+  update outbox_events set delivered_at = now() where id = v_id;
+  select * into p from save_outbox_progress(v_id, '{}', 0, (select updated_at from outbox_events where id = v_id));
+  assert not p.held, 'a delivered row is no longer held';
+  assert not exists (select 1 from save_outbox_progress(gen_random_uuid(), '{}', 0, now())), 'no row: nothing returned';
+  begin
+    perform save_outbox_progress(v_id, '[1]', 0, now());
+    assert false, 'a progress that is not an object was accepted';
+  exception when check_violation then null;
+  end;
+
+  -- a re-arm resets the delivery and the budget and moves the wait; progress and the contact id stay
+  update outbox_events set attempts = 5, last_error = 'old', external_id = 'contactX' where id = v_id;
+  perform enqueue_outbox('interaction.completed', ${k}, 'ghl', 90);
+  select * into r from outbox_events where id = v_id;
+  assert r.delivered_at is null and r.attempts = 0 and r.last_error is null and r.external_id = 'contactX'
+    and r.next_attempt_at = now() + interval '90 seconds'
+    and r.progress = '{"contact_id": "c1", "tags_done": false, "note_id": "n1", "task_claim_id": "t1"}'::jsonb,
+    format('re-arm: %s', r);
+  assert not exists (select 1 from claim_outbox(1000) c where c.id = v_id), 'claimed inside its delay';
+  perform enqueue_outbox('interaction.completed', ${k}, 'ghl', -5);
+  assert (select next_attempt_at from outbox_events where id = v_id) = now(), 'a negative delay is no delay';
+  select count(*) into n from claim_outbox(1000) c where c.id = v_id;
+  assert n = 1, 'due once the delay is gone';`,
+    "r record; p record; v_id uuid; v_dest text[]; n bigint;",
+  )));
+});
+
 // ---------------------------------------------------------------------------------------------
 // Committed cases (cleaned up)
 // ---------------------------------------------------------------------------------------------
@@ -802,6 +1201,35 @@ await test("8 concurrent deliveries of one toolCallId record exactly one attempt
     assertEquals(row, { attempts: 1, misses: 1, sessions: 1, level: "none" });
   } finally {
     await sql(`delete from attempts where call_key = ${k}; delete from call_sessions where call_key = ${k};`);
+  }
+});
+
+await test("8 concurrent files of one intake file exactly one claim", async () => {
+  const f = fixture("fileconc");
+  const k = lit(f.callKey);
+  await sql(`begin; ${insertCustomer(f)}
+    select * from upsert_claim_intake(${k}, 'claim', 'auto', '2026-10-10', 'x', 'y z w', ${lit(f.customerId)});
+    commit;`);
+  const at = lit(new Date(Date.now() + 2500).toISOString());
+  const q = `select pg_sleep(greatest(0, extract(epoch from (${at}::timestamptz - clock_timestamp()))));
+    select claim_number, confirmed from file_claim_intake(${k});`;
+  try {
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => sql<{ claim_number: string; confirmed: boolean }>(q)),
+    );
+    const numbers = new Set(results.map((r) => r[0]?.claim_number));
+    assertEquals(numbers.size, 1, `numbers: ${[...numbers].join(", ")}`);
+    assert(results.every((r) => r[0]?.confirmed === true));
+    const [row] = await sql<{ claims: number }>(
+      `select count(*)::int claims from claims where reported_call_key = ${k}`,
+    );
+    assertEquals(row.claims, 1);
+  } finally {
+    await sql(`begin;
+      delete from claim_intakes where call_key = ${k};
+      delete from claims where reported_call_key = ${k};
+      delete from customers where id = ${lit(f.customerId)};
+      commit;`);
   }
 });
 
@@ -1051,12 +1479,18 @@ await test("store.ts round trip: caller contacts and the post-call caller column
     assertEquals([update.kind, update.customer_id, update.confirmed], ["email_update", f.customerId, false]);
     assertEquals(await store.getContact(k), update);
     assertEquals((await store.setContactConfirmed(k, false))?.confirmed_at, null);
-    await assertRejects(() => store.upsertContact({ ...jane, email: "Jane@Example.com" }), Error, "store.upsertContact");
+    await assertRejects(
+      () => store.upsertContact({ ...jane, email: "Jane@Example.com" }),
+      Error,
+      "store.upsertContact",
+    );
 
     await store.upsertInteraction({ vapi_call_id: k, caller_type: "new", caller_email: "jane.doe@example.com" });
     await store.upsertInteraction({ vapi_call_id: k, caller_type: "unknown" });
     assertEquals(
-      await sql(`select caller_type, caller_email, caller_email_masked from call_interactions where vapi_call_id = ${lit(k)}`),
+      await sql(
+        `select caller_type, caller_email, caller_email_masked from call_interactions where vapi_call_id = ${lit(k)}`,
+      ),
       [{ caller_type: "new", caller_email: "jane.doe@example.com", caller_email_masked: "j***@example.com" }],
     );
     const mirror = await store.getInteractionForMirror(k);
@@ -1067,6 +1501,104 @@ await test("store.ts round trip: caller contacts and the post-call caller column
       delete from call_interactions where vapi_call_id = ${lit(k)};
       delete from customers where id = ${lit(f.customerId)};
       commit;`);
+  }
+});
+
+await test("store.ts round trip: claim intakes, filing and the claims row they write", async () => {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return "skip";
+  const f = fixture("intakert");
+  const k = f.callKey;
+  const lead = `${k}-lead`;
+  await sql(`begin; ${insertCustomer(f, "dbtest@example.com")} commit;`);
+  const store = createStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+  const args = {
+    callKey: k,
+    kind: "claim" as const,
+    claimType: "auto" as const,
+    lossDate: "2026-10-10",
+    summary: "rear-ended",
+    description: "Someone rear-ended me at a light.",
+    customerId: f.customerId,
+  };
+  try {
+    assertEquals(await store.getClaimIntake(k), null);
+    assertEquals(await store.fileClaimIntake(k), null);
+    assertEquals(await store.rejectClaimIntake(k), null);
+    assertEquals(await store.upsertClaimIntake(args), {
+      call_key: k,
+      kind: "claim",
+      claim_type: "auto",
+      loss_date: "2026-10-10",
+      summary: "rear-ended",
+      description: "Someone rear-ended me at a light.",
+      customer_id: f.customerId,
+      claim_id: null,
+      claim_number: null,
+      confirmed: false,
+      confirmed_at: null,
+    });
+    const home = await store.upsertClaimIntake({ ...args, claimType: "home", lossDate: "2026-10-09" });
+    assertEquals([home.claim_type, home.loss_date], ["home", "2026-10-09"]);
+    assertEquals((await store.rejectClaimIntake(k))?.confirmed, false);
+
+    const once = await store.fileClaimIntake(k);
+    assertEquals(once?.filedNow, true, "this call filed it");
+    const filed = once!.intake;
+    assert(filed.confirmed && typeof filed.confirmed_at === "string", "filed with a time");
+    assert(/^CLM-\d{6}$/.test(filed.claim_number ?? ""), `claim number ${filed.claim_number}`);
+    assertEquals(await store.getClaimIntake(k), filed);
+    // 0009 file_claim_intake_once: filing again changes nothing, and says it did not file
+    assertEquals(await store.fileClaimIntake(k), { intake: filed, filedNow: false }, "filing again changes nothing");
+    assertEquals(await store.upsertClaimIntake(args), filed, "a filed intake is never rewritten");
+    assertEquals(await store.rejectClaimIntake(k), filed, "nor un-filed");
+    // the customer's claims now include it, read through the Claim columns
+    const claim = (await store.getClaims(f.customerId)).find((c) => c.claim_number === filed.claim_number);
+    assertEquals(
+      [claim?.id, claim?.claim_type, claim?.status, claim?.documents_required.length],
+      [filed.claim_id, "home", "received", 3],
+    );
+
+    await store.upsertClaimIntake({ ...args, callKey: lead, kind: "lead_intake", customerId: null });
+    const leadRow = await store.fileClaimIntake(lead);
+    assertEquals(
+      [leadRow?.filedNow, leadRow?.intake.confirmed, leadRow?.intake.claim_id, leadRow?.intake.claim_number],
+      [true, true, null, null],
+    );
+    await assertRejects(
+      () => store.upsertClaimIntake({ ...args, claimType: "boat" as "auto" }),
+      Error,
+      "store.upsertClaimIntake",
+    );
+
+    // the new email kinds and the post-call columns through PostgREST
+    assertEquals(await store.claimEmail(k, "claim_received", "d***@example.com"), { claimed: true });
+    assertEquals(await store.claimEmail(k, "claim_intake", "t***@example.com"), { claimed: true });
+    await store.upsertInteraction({
+      vapi_call_id: k,
+      call_reason: "file_claim",
+      call_reason_source: "server",
+      claim_number: filed.claim_number,
+    });
+    assertEquals(
+      await sql(
+        `select call_reason, call_reason_source, claim_number from call_interactions where vapi_call_id = ${lit(k)}`,
+      ),
+      [{ call_reason: "file_claim", call_reason_source: "server", claim_number: filed.claim_number }],
+    );
+  } finally {
+    // phone-filed claims are found by the call that filed them, never by number
+    await sql(`begin;
+      delete from claim_intakes where call_key in (${lit(k)}, ${lit(lead)});
+      delete from claims where reported_call_key in (${lit(k)}, ${lit(lead)});
+      delete from emails where call_key = ${lit(k)};
+      delete from call_interactions where vapi_call_id = ${lit(k)};
+      delete from customers where id = ${lit(f.customerId)};
+      commit;`);
+    const [left] = await sql<{ n: number }>(
+      `select (select count(*) from claims where reported_call_key in (${lit(k)}, ${lit(lead)}))::int
+            + (select count(*) from claim_intakes where call_key in (${lit(k)}, ${lit(lead)}))::int n`,
+    );
+    assertEquals(left.n, 0, "the cleanup left phone-filed rows behind");
   }
 });
 
@@ -1092,9 +1624,11 @@ await test("store.ts round trip: the outbox, job runs and the scheduled jobs' re
     // outbox: the claim's compare-and-set, the lease and the guarded finish. An insert does not
     // fire the touch trigger, so the row heads the queue (2001) and reads as never written since
     // (both timestamps equal): the one untargeted claim below takes it and no real row. Every
-    // later claim names the row.
-    await sql(`insert into outbox_events (kind, ref_id, destination, created_at, updated_at)
-      values ('interaction.completed', ${lit(ended)}, 'airtable', '2001-01-01T00:00:00Z', '2001-01-01T00:00:00Z')`);
+    // later claim names the row. next_attempt_at too sits in 2001, so the row is due whatever this
+    // script's clock says.
+    await sql(`insert into outbox_events (kind, ref_id, destination, created_at, updated_at, next_attempt_at)
+      values ('interaction.completed', ${lit(ended)}, 'airtable', '2001-01-01T00:00:00Z', '2001-01-01T00:00:00Z',
+              '2001-01-01T00:00:00Z')`);
     const [c] = await store.claimOutbox(1);
     assertEquals(
       [c?.ref_id, c?.attempts, c?.kind, c?.destination, c?.delivered_at, c?.external_id],
@@ -1104,8 +1638,9 @@ await test("store.ts round trip: the outbox, job runs and the scheduled jobs' re
     assertEquals(await store.claimOutbox(1, ref), [], "a claimed row is held for the lease");
     // eight runners after one fresh row at once: the compare-and-set lets exactly one take it
     const race = `${k}-race`;
-    await sql(`insert into outbox_events (kind, ref_id, destination, created_at, updated_at)
-      values ('interaction.completed', ${lit(race)}, 'airtable', '2001-01-01T00:00:01Z', '2001-01-01T00:00:01Z')`);
+    await sql(`insert into outbox_events (kind, ref_id, destination, created_at, updated_at, next_attempt_at)
+      values ('interaction.completed', ${lit(race)}, 'airtable', '2001-01-01T00:00:01Z', '2001-01-01T00:00:01Z',
+              '2001-01-01T00:00:01Z')`);
     const raceRef = { ...ref, refId: race };
     const won = (await Promise.all(Array.from({ length: 8 }, () => store.claimOutbox(1, raceRef)))).flat();
     assertEquals(won.map((r) => [r.ref_id, r.attempts]), [[race, 1]]);
@@ -1136,7 +1671,9 @@ await test("store.ts round trip: the outbox, job runs and the scheduled jobs' re
     );
     assert(await store.finishOutbox(c.id, { delivered: true, externalId: "recDB", attempt: 1 }));
     assertEquals(await outboxRow(), { attempts: 1, delivered: true, last_error: null, external_id: "recDB" });
-    assert(await store.finishOutbox(c.id, { delivered: false, error: "airtable 401: bad token", refund: true, attempt: 1 }));
+    assert(
+      await store.finishOutbox(c.id, { delivered: false, error: "airtable 401: bad token", refund: true, attempt: 1 }),
+    );
     assertEquals((await outboxRow()).attempts, 0, "a refund gives the attempt back");
     assert(await store.finishOutbox(c.id, { delivered: false, error: "airtable 422: bad value", dead: true }));
     assertEquals((await outboxRow()).attempts, 5);
@@ -1183,7 +1720,11 @@ await test("store.ts round trip: the outbox, job runs and the scheduled jobs' re
     ]);
     assertEquals(await store.getInteractionForMirror(`${k}-none`), null);
     assertEquals(
-      [await store.interactionEnded(ended), await store.interactionEnded(open), await store.interactionEnded(`${k}-none`)],
+      [
+        await store.interactionEnded(ended),
+        await store.interactionEnded(open),
+        await store.interactionEnded(`${k}-none`),
+      ],
       [true, false, false],
     );
 
@@ -1195,6 +1736,12 @@ await test("store.ts round trip: the outbox, job runs and the scheduled jobs' re
     assertEquals(await store.listOutboxGaps(day.from, day.to), [unqueued]);
     await sql(`update outbox_events set delivered_at = now() where ref_id = ${lit(ended)}`);
     assertEquals(await store.listOutboxGaps(day.from, day.to), [unqueued], "delivered after its last change");
+    // GoHighLevel: a call with no ghl row is a gap; a delivered one, even before the last change, is not
+    assertEquals(await store.listOutboxGaps(day.from, day.to, "ghl"), [ended, unqueued]);
+    await store.enqueueOutbox("interaction.completed", ended, "ghl", 0);
+    await sql(`update outbox_events set delivered_at = now() - interval '1 day'
+                where ref_id = ${lit(ended)} and destination = 'ghl'`);
+    assertEquals(await store.listOutboxGaps(day.from, day.to, "ghl"), [unqueued]);
 
     assert(await store.claimJobRun(job, "p1"));
     assertFalse(await store.claimJobRun(job, "p1"));
@@ -1224,14 +1771,20 @@ await test("store.ts round trip: the outbox, job runs and the scheduled jobs' re
       [ended, "representative", "representative_requested", "webCall", false],
     ]);
     assert(await store.markRealerted(stale[0].id));
-    const [{ at: first }] = await sql<{ at: string }>(`select realerted_at at from escalations where call_key = ${lit(ended)}`);
+    const [{ at: first }] = await sql<{ at: string }>(
+      `select realerted_at at from escalations where call_key = ${lit(ended)}`,
+    );
     assert(first, "realerted_at set");
     assertFalse(await store.markRealerted(stale[0].id));
-    const [{ at: second }] = await sql<{ at: string }>(`select realerted_at at from escalations where call_key = ${lit(ended)}`);
+    const [{ at: second }] = await sql<{ at: string }>(
+      `select realerted_at at from escalations where call_key = ${lit(ended)}`,
+    );
     assertEquals(second, first, "set once");
     assertEquals(await store.listStaleEscalations(day.to), []);
     // a row staff claimed is never marked, so it is never paged
-    const [{ id: claimedId }] = await sql<{ id: string }>(`select id from escalations where call_key = ${lit(claimed)}`);
+    const [{ id: claimedId }] = await sql<{ id: string }>(
+      `select id from escalations where call_key = ${lit(claimed)}`,
+    );
     assertFalse(await store.markRealerted(claimedId));
     assertEquals(
       await sql(`select realerted_at from escalations where call_key = ${lit(claimed)}`),
@@ -1257,7 +1810,13 @@ await test("store.ts round trip: the outbox, job runs and the scheduled jobs' re
       await sql(`select vapi_call_id, outcome, analysis_status, ended_reason, ended_at is not null ended
                  from call_interactions where vapi_call_id in (${lit(stuck)}, ${lit(ended)}) order by vapi_call_id`),
       [
-        { vapi_call_id: ended, outcome: "resolved", analysis_status: "ok", ended_reason: "customer-ended-call", ended: true },
+        {
+          vapi_call_id: ended,
+          outcome: "resolved",
+          analysis_status: "ok",
+          ended_reason: "customer-ended-call",
+          ended: true,
+        },
         { vapi_call_id: stuck, outcome: "abandoned", analysis_status: "missing", ended_reason: "reaped", ended: true },
       ],
     );
@@ -1283,6 +1842,112 @@ await test("store.ts round trip: the outbox, job runs and the scheduled jobs' re
       delete from escalations where call_key like ${like};
       delete from call_interactions where vapi_call_id like ${like};
       commit;`);
+  }
+});
+
+await test("store.ts round trip: ghl rows by destination and due time, guarded progress saves, retry-after", async () => {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return "skip";
+  // Every row is inserted in 2000 (an insert does not fire the touch trigger, so it reads as never
+  // written since), ahead of any real row, so the one untargeted claim below can only take this
+  // case's own row; every other claim names its row.
+  const k = `dbtest-ghlrt-${run}`;
+  const [airtableKey, ghlKey, laterKey, dueKey] = ["airtable", "ghl", "later", "due"].map((s) => `${k}-${s}`);
+  const store = createStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+  const refOf = (refId: string) => ({ kind: "interaction.completed", refId, destination: "ghl" }) as const;
+  const rowOf = async (refId: string) =>
+    (await sql<
+      {
+        attempts: number;
+        delivered: boolean;
+        progress: Record<string, unknown>;
+        waits_s: number;
+        external_id: string | null;
+      }
+    >(
+      `select attempts, delivered_at is not null delivered, progress, external_id,
+              round(extract(epoch from next_attempt_at - now()))::int waits_s
+       from outbox_events where ref_id = ${lit(refId)} and destination = 'ghl'`,
+    ))[0];
+  try {
+    await sql(`insert into outbox_events (kind, ref_id, destination, created_at, updated_at, next_attempt_at)
+      values ('interaction.completed', ${lit(airtableKey)}, 'airtable', '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z',
+              '2000-01-01T00:00:00Z'),
+             ('interaction.completed', ${lit(ghlKey)}, 'ghl', '2000-01-01T00:00:01Z', '2000-01-01T00:00:01Z',
+              '2000-01-01T00:00:01Z'),
+             ('interaction.completed', ${lit(laterKey)}, 'ghl', '2000-01-01T00:00:02Z', '2000-01-01T00:00:02Z',
+              now() + interval '1 hour'),
+             ('interaction.completed', ${lit(dueKey)}, 'ghl', '2000-01-01T00:00:03Z', '2000-01-01T00:00:03Z',
+              now() - interval '1 minute')`);
+
+    // the destination filter: the airtable row heads the queue, the ghl claim passes it over
+    const [g] = await store.claimOutbox(1, undefined, "ghl");
+    assertEquals([g?.ref_id, g?.destination, g?.attempts, g?.progress], [ghlKey, "ghl", 1, {}]);
+    assert(typeof g.next_attempt_at === "string", "the claim returns next_attempt_at");
+    // the due time: not before next_attempt_at, at once after it
+    assertEquals(await store.claimOutbox(1, refOf(laterKey)), [], "claimed before its next_attempt_at");
+    assertEquals((await store.claimOutbox(1, refOf(dueKey))).map((r) => r.ref_id), [dueKey]);
+
+    // progress saves: each one held under the claim and the previous save, merged either way
+    const first = await store.saveOutboxProgress(g.id, { contact_id: "c1", contact_created: true }, {
+      attempt: 1,
+      claimedAt: g.updated_at,
+    });
+    assert(first?.held, "the claim's guard holds");
+    assert(Date.parse(first.savedAt) > Date.parse(g.updated_at), "a save moves the write time");
+    const second = await store.saveOutboxProgress(g.id, { tags_done: true }, { attempt: 1, claimedAt: first.savedAt });
+    assert(second?.held, "the previous save's write time is the next guard");
+    const stale = await store.saveOutboxProgress(g.id, { note_id: "n1" }, { attempt: 1, claimedAt: g.updated_at });
+    assertEquals(stale?.held, false, "a stale write time no longer holds");
+    assertEquals((await rowOf(ghlKey)).progress, {
+      contact_id: "c1",
+      contact_created: true,
+      tags_done: true,
+      note_id: "n1",
+    });
+    assertEquals(
+      await store.saveOutboxProgress(crypto.randomUUID(), { x: 1 }, { attempt: 1, claimedAt: g.updated_at }),
+      null,
+    );
+    await assertRejects(
+      () =>
+        store.saveOutboxProgress(g.id, [1] as unknown as Record<string, unknown>, {
+          attempt: 1,
+          claimedAt: g.updated_at,
+        }),
+      Error,
+      "23514",
+    );
+
+    // a retryable failure with a retry-after: pending, not claimable until then
+    const latest =
+      (await sql<{ updated_at: string }>(`select updated_at from outbox_events where id = ${lit(g.id)}`))[0];
+    assert(
+      await store.finishOutbox(g.id, {
+        delivered: false,
+        error: "ghl 429 POST /contacts/search: too many requests",
+        retryAfterS: 600,
+        attempt: 1,
+        claimedAt: latest.updated_at,
+      }),
+    );
+    const waiting = await rowOf(ghlKey);
+    assertEquals([waiting.attempts, waiting.delivered], [1, false]);
+    assert(waiting.waits_s > 500 && waiting.waits_s <= 600, `retry-after: waits ${waiting.waits_s} s`);
+    // a re-arm 90 s out keeps progress (and the contact id) and resets the budget
+    await sql(`update outbox_events set external_id = 'contactX' where id = ${lit(g.id)}`);
+    await store.enqueueOutbox("interaction.completed", ghlKey, "ghl", 90);
+    const rearmed = await rowOf(ghlKey);
+    assertEquals([rearmed.attempts, rearmed.delivered, rearmed.external_id], [0, false, "contactX"]);
+    assertEquals(rearmed.progress, { contact_id: "c1", contact_created: true, tags_done: true, note_id: "n1" });
+    assert(rearmed.waits_s > 80 && rearmed.waits_s <= 90, `re-arm: waits ${rearmed.waits_s} s`);
+    // an airtable enqueue keeps its old shape: no delay
+    await store.enqueueOutbox("interaction.completed", airtableKey);
+    assertEquals(
+      await sql(`select next_attempt_at <= now() due from outbox_events where ref_id = ${lit(airtableKey)}`),
+      [{ due: true }],
+    );
+  } finally {
+    await sql(`delete from outbox_events where ref_id like ${lit(`${k}%`)}`);
   }
 });
 

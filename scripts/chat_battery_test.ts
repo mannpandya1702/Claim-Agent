@@ -12,21 +12,29 @@ import {
   assertThrows,
 } from "@std/assert";
 import { SERVER_TOOLS } from "../supabase/functions/vapi-webhook/enums.ts";
-import { sentenceFor } from "../supabase/functions/vapi-webhook/speak.ts";
+import { parseLossDate } from "../supabase/functions/vapi-webhook/loss_date.ts";
+import {
+  sentenceFor,
+  verifiedFileClaimSentence,
+  verifiedStatusSentence,
+} from "../supabase/functions/vapi-webhook/speak.ts";
 import { VapiError } from "./lib/vapi.ts";
 import {
   advance,
   buildAssistant,
   type ChatFn,
   ConfigError,
+  datePhraseKey,
   DEFAULTS,
   digitRuns,
   fictionProblems,
+  flagProblems,
   genericProblems,
   HaltError,
   initialState,
   isFillerText,
   loadBase,
+  lossDateCandidates,
   mockCode,
   mockPlan,
   type MockResult,
@@ -36,8 +44,10 @@ import {
   PERSONAS,
   phonesIn,
   type PlanCtx,
+  readbackPhrase,
   runConversation,
   selectPersonas,
+  SIM_CLAIM_NUMBER,
   type SimState,
   type TurnRecord,
   vapiChat,
@@ -61,7 +71,7 @@ async function answer(tool: string, state: SimState, args: unknown, extra: Parti
   return await runMock(mockCode(mockPlan(tool, ctx(state, extra))), args);
 }
 
-function stateAfter(steps: { tool: string; args: Obj; code: string }[]): SimState {
+function stateAfter(steps: { tool: string; args: Obj; code: string; data?: Obj }[]): SimState {
   const state = initialState();
   const turn: TurnRecord = {
     user: "",
@@ -78,7 +88,7 @@ function stateAfter(steps: { tool: string; args: Obj; code: string }[]): SimStat
       rawArgs: JSON.stringify(s.args),
       content: null,
       wordsBefore: false,
-      result: { code: s.code as any, message: "", meta: { request_id: "x" } },
+      result: { code: s.code as any, message: "", ...(s.data ? { data: s.data } : {}), meta: { request_id: "x" } },
     })),
   };
   assertEquals(advance(state, turn, NOW), []);
@@ -419,6 +429,478 @@ Deno.test("info email mock: a confirmed new caller gets only the start-a-claim s
 });
 
 // ---------------------------------------------------------------------------------------------
+// Reporting a loss: verify_identity's intent, start_claim and confirm_claim.
+// ---------------------------------------------------------------------------------------------
+const TODAY = "2026-10-12"; // NOW in New York, a Monday
+const TOBIAS_FILE_VERIFY = { dob_month: 3, dob_day: 14, dob_year: 1986, intent: "file_claim" };
+const PIPE = {
+  claim_type: "home",
+  loss_date: "on Sunday",
+  description: "A pipe burst under my kitchen sink and flooded the floor.",
+  summary: "a burst pipe under the sink",
+};
+// start_claim's read-back of PIPE on NOW: Sunday is the day before
+const PIPE_READBACK = {
+  tool: "start_claim",
+  args: PIPE,
+  code: "claim_readback",
+  data: { claim_type: "home", loss_date: "2026-10-11" },
+};
+// with a number to call back on: a new caller's intake promises a call
+const NEW_CALLER_CONFIRMED = [
+  ...NOT_FOUND_TWICE,
+  { tool: "capture_contact", args: { ...JORDAN, callback_phone: "6025550177" }, code: "contact_readback" },
+  { tool: "confirm_contact", args: { correct: true }, code: "contact_saved_new" },
+];
+
+Deno.test("verify mock with an intent: straight into the claim, or the claims read in the same answer", async () => {
+  const found = stateAfter([TOBIAS_LOOKUP]);
+  const plain = sentenceFor("verified", { first_name: "Tobias" });
+  const file = await answer("verify_identity", found, TOBIAS_FILE_VERIFY);
+  assertEquals([file.code, file.message], ["verified", verifiedFileClaimSentence(plain)]);
+  const status = await answer("verify_identity", found, { ...TOBIAS_FILE_VERIFY, intent: " Claim_Status " });
+  const claims = await answer("get_claim_status", stateAfter([TOBIAS_LOOKUP, TOBIAS_VERIFY]), {});
+  assertEquals(status.message, verifiedStatusSentence(plain, claims.message));
+  assertEquals(status.data, { first_name: "Tobias", status_read: true, claims: claims.data?.claims });
+  // other, an unknown intent or none: the plain answer
+  for (const intent of ["other", "something", undefined]) {
+    assertEquals((await answer("verify_identity", found, { ...TOBIAS_VERIFY.args, intent })).message, plain);
+  }
+  // Ines has no claims: the opening and the no-claims sentence
+  const ines = stateAfter([{ tool: "lookup_customer", args: { phone: "6025550105" }, code: "needs_dob" }]);
+  const none = await answer("verify_identity", ines, {
+    dob_month: 5,
+    dob_day: 9,
+    dob_year: 1990,
+    intent: "claim_status",
+  });
+  assertEquals(none.message, `Thank you, Ines, you're verified. ${sentenceFor("no_claims")}`);
+  assertEquals(none.data?.claims, []);
+  // the welcome-back variant keeps its opening and loses only its closing question
+  const back = await answer("verify_identity", found, { ...TOBIAS_FILE_VERIFY }, { persona: persona("returning") });
+  assertMatch(back.message, /Welcome back\. I see you called on October tenth\. Let's get your claim started\./);
+  // a wrong date of birth never reads anything, whatever the intent
+  assertEquals(
+    (await answer("verify_identity", found, { dob_month: 6, dob_day: 2, dob_year: 1984, intent: "claim_status" })).code,
+    "auth_failed",
+  );
+});
+
+Deno.test("start_claim mock: who may report a loss comes from the call's state, before any argument", async () => {
+  const code = async (state: SimState, args: Obj = PIPE) => (await answer("start_claim", state, args)).code;
+  assertEquals(await code(initialState()), "claim_needs_lookup");
+  // an unreadable number was never a lookup
+  assertEquals(
+    await code(stateAfter([{ tool: "lookup_customer", args: { phone: "12345" }, code: "invalid_phone" }])),
+    "claim_needs_lookup",
+  );
+  assertEquals(await code(stateAfter(NOT_FOUND_TWICE.slice(0, 1))), "claim_needs_contact");
+  // unconfirmed details are not enough
+  assertEquals(await code(stateAfter(NEW_CALLER_CONFIRMED.slice(0, 3))), "claim_needs_contact");
+  assertEquals(await code(stateAfter([TOBIAS_LOOKUP])), "claim_needs_verification");
+  const locked = stateAfter([
+    TOBIAS_LOOKUP,
+    { tool: "verify_identity", args: { dob_month: 6, dob_day: 2, dob_year: 1984 }, code: "auth_failed" },
+    { tool: "verify_identity", args: { dob_month: 6, dob_day: 3, dob_year: 1984 }, code: "locked" },
+  ]);
+  assertEquals(await code(locked), "claim_locked");
+  assertEquals(await code(locked, {}), "claim_locked");
+  assertEquals(await code(stateAfter([TOBIAS_LOOKUP, TOBIAS_VERIFY])), "claim_readback");
+  assertEquals(await code(stateAfter(NEW_CALLER_CONFIRMED)), "claim_readback");
+  // confirmed details with no number to call back on (a chat has no caller id): the number first
+  const noNumber = [
+    ...NOT_FOUND_TWICE,
+    { tool: "capture_contact", args: JORDAN, code: "contact_readback" },
+    { tool: "confirm_contact", args: { correct: true }, code: "contact_saved_new" },
+  ];
+  assertEquals(await code(stateAfter(noNumber)), "claim_needs_phone");
+});
+
+Deno.test("mocks: a loss told before verification or the details is taken down on the next yes", async () => {
+  // start_claim sent the caller to verify first: the verified answer asks to take it down now
+  const found = stateAfter([TOBIAS_LOOKUP, { tool: "start_claim", args: PIPE, code: "claim_needs_verification" }]);
+  const plain = sentenceFor("verified", { first_name: "Tobias" });
+  assertEquals(
+    (await answer("verify_identity", found, TOBIAS_FILE_VERIFY)).message,
+    verifiedFileClaimSentence(plain, true),
+  );
+  // start_claim asked for a new caller's details first: the saved answer asks the same
+  const told = stateAfter([
+    ...NOT_FOUND_TWICE,
+    { tool: "start_claim", args: PIPE, code: "claim_needs_contact" },
+    { tool: "capture_contact", args: { ...JORDAN, callback_phone: "6025550177" }, code: "contact_readback" },
+  ]);
+  const saved = await answer("confirm_contact", told, { correct: true });
+  assertEquals(saved.message, sentenceFor("contact_saved_new", { first_name: "Jordan", resume_claim: true }));
+  // otherwise the saved answer offers taking it down first
+  const plainSaved = await answer("confirm_contact", stateAfter(NEW_CALLER_CONFIRMED.slice(0, 3)), { correct: true });
+  assertStringIncludes(plainSaved.message, "I can take down what happened now");
+});
+
+Deno.test("start_claim mock: a second date it cannot read offers a specialist", async () => {
+  const verified = stateAfter([TOBIAS_LOOKUP, TOBIAS_VERIFY]);
+  assertEquals((await answer("start_claim", verified, { ...PIPE, loss_date: "the other day" })).code, "claim_bad_date");
+  const once = stateAfter([
+    TOBIAS_LOOKUP,
+    TOBIAS_VERIFY,
+    { tool: "start_claim", args: { ...PIPE, loss_date: "the other day" }, code: "claim_bad_date" },
+  ]);
+  const help = await answer("start_claim", once, { ...PIPE, loss_date: "a few days ago" });
+  assertEquals([help.code, help.message], ["claim_date_help", sentenceFor("claim_date_help")]);
+  // a readable day still reads back
+  assertEquals((await answer("start_claim", once, PIPE)).code, "claim_readback");
+});
+
+Deno.test("start_claim mock: the read-back is the server's sentence, and bad arguments get the server's answers", async () => {
+  const verified = stateAfter([TOBIAS_LOOKUP, TOBIAS_VERIFY]);
+  const r = await answer("start_claim", verified, PIPE);
+  assertEquals(r.data, { claim_type: "home", loss_date: "2026-10-11" });
+  assertEquals(
+    r.message,
+    sentenceFor("claim_readback", { claim_type: "home", loss_date: "2026-10-11", summary: PIPE.summary, today: TODAY }),
+  );
+  assertEquals(
+    r.message,
+    "Let me make sure I have this right. A home claim, for a burst pipe under the sink, from Sunday, October eleventh. Is that correct?",
+  );
+  // the summary as the server stores and says it: cleaned, lower-cased (an acronym kept), or left out
+  const cases: [unknown, string][] = [
+    ["A cracked windshield.", "a cracked windshield"],
+    ["TV knocked off the wall", "TV knocked off the wall"],
+    ["hail damage, roof", "hail damage, roof"],
+    ["Home claim", ""],
+    ["water everywhere in the kitchen and the hallway and the basement", ""],
+    [undefined, ""],
+    // the caller's first person: "my" read as "your", anything else left out
+    ["a tree branch on my roof", "a tree branch on your roof"],
+    ["Our basement flooded", "your basement flooded"],
+    ["I hit a deer", ""],
+    ["someone hit me", ""],
+  ];
+  for (const [summary, said] of cases) {
+    const got = await answer("start_claim", verified, { ...PIPE, summary });
+    const want = sentenceFor("claim_readback", {
+      claim_type: "home",
+      loss_date: "2026-10-11",
+      today: TODAY,
+      ...(said ? { summary: said } : {}),
+    });
+    assertEquals(got.message, want, String(summary));
+    assertEquals(readbackPhrase(summary, "home"), said, String(summary));
+  }
+  const auto = await answer("start_claim", verified, { ...PIPE, claim_type: "AUTO", summary: "a dented door" });
+  assertStringIncludes(auto.message, "An auto claim, for a dented door, from Sunday, October eleventh.");
+  assertEquals((await answer("start_claim", verified, { ...PIPE, claim_type: "boat" })).code, "bad_args");
+  assertEquals(
+    (await answer("start_claim", verified, { ...PIPE, description: "pipe burst" })).code,
+    "claim_needs_description",
+  );
+  assertEquals((await answer("start_claim", verified, { ...PIPE, loss_date: "a while back" })).code, "claim_bad_date");
+  assertEquals((await answer("start_claim", verified, { ...PIPE, loss_date: "tomorrow" })).code, "claim_bad_date");
+  // a phrase the persona says is read exactly as the server reads it, an old one included
+  const old = await answer("start_claim", verified, { ...PIPE, loss_date: "January fifth, 2025" }, {
+    persona: { lossDates: ["January fifth, 2025"] },
+  });
+  assertEquals(old.code, "claim_too_old");
+});
+
+Deno.test("start_claim mock reads common date phrases exactly as loss_date.ts does", async () => {
+  const verified = stateAfter([TOBIAS_LOOKUP, TOBIAS_VERIFY]);
+  const phrases = [
+    "yesterday",
+    "Yesterday afternoon",
+    "last night",
+    "the day before yesterday",
+    "three days ago",
+    "5 days ago",
+    "a week ago",
+    "Saturday",
+    "last Saturday",
+    "this past Saturday",
+    "Saturday night",
+    "it happened on Sunday",
+    "Monday",
+    "last Monday",
+    "October 10th",
+    "Oct 10",
+    "October tenth",
+    "the tenth of October",
+    "Saturday, October tenth",
+    "10/10",
+    "10/10/2026",
+    "2026-10-10",
+    "the 10th",
+    "yesterday at 3 pm",
+    "October 2nd",
+    "the second of October",
+    // hedges, nights, a couple of days and the weekend (Saturday) read as the server reads them
+    "Saturday, I think",
+    "I'm not sure, maybe Saturday",
+    "late last night",
+    "early this morning",
+    "two nights ago",
+    "a couple of days ago",
+    "over the weekend",
+    "last weekend",
+    "the night before last",
+  ];
+  for (const phrase of phrases) {
+    const want = parseLossDate(phrase, NOW);
+    assert("date" in want, `${phrase} is a date the server reads`);
+    const r = await answer("start_claim", verified, { ...PIPE, loss_date: phrase });
+    assertEquals([r.code, r.data?.loss_date], ["claim_readback", want.date], phrase);
+  }
+  // keys are the parser's own cleaning, so a filler or punctuation never changes the lookup
+  assertEquals(datePhraseKey("It happened on Saturday, October 10th."), "saturday october 10th");
+  assertEquals(datePhraseKey("10 / 10"), "10/10");
+  assert(lossDateCandidates(NOW).length < 600, "the candidate table stays small enough to send every turn");
+});
+
+Deno.test("start_claim mock: a filed claim is never rewritten", async () => {
+  const filed = stateAfter([
+    TOBIAS_LOOKUP,
+    TOBIAS_VERIFY,
+    PIPE_READBACK,
+    { tool: "confirm_claim", args: { correct: true }, code: "claim_filed" },
+  ]);
+  assertEquals(filed.intake, {
+    kind: "claim",
+    claimType: "home",
+    lossDate: "2026-10-11",
+    confirmed: true,
+    number: SIM_CLAIM_NUMBER,
+  });
+  const again = await answer("start_claim", filed, PIPE);
+  assertEquals([again.code, again.message], [
+    "claim_already_filed",
+    sentenceFor("claim_already_filed", { claim_last3: "472" }),
+  ]);
+  assertEquals((await answer("confirm_claim", filed, { correct: false })).code, "claim_already_filed");
+});
+
+Deno.test("confirm_claim mock: nothing pending, a no, a yes that files a claim or a new caller's intake", async () => {
+  assertEquals((await answer("confirm_claim", initialState(), { correct: true })).code, "claim_not_pending");
+  const pending = stateAfter([TOBIAS_LOOKUP, TOBIAS_VERIFY, PIPE_READBACK]);
+  assertEquals(pending.intake?.confirmed, false);
+  const yes = await answer("confirm_claim", pending, { correct: true });
+  assertEquals([yes.code, yes.message], [
+    "claim_filed",
+    sentenceFor("claim_filed", { claim_last3: "472", emailed: true }),
+  ]);
+  assertEquals((await answer("confirm_claim", pending, { correct: "Yes" })).code, "claim_filed");
+  const no = await answer("confirm_claim", pending, { correct: "no" });
+  assertEquals([no.code, no.message], ["claim_retry", "No problem. What should I change?"]);
+  assertEquals((await answer("confirm_claim", pending, { correct: "maybe" })).code, "bad_args");
+  // a no keeps the intake unfiled for the corrected read-back
+  const retried = stateAfter([
+    TOBIAS_LOOKUP,
+    TOBIAS_VERIFY,
+    PIPE_READBACK,
+    { tool: "confirm_claim", args: { correct: false }, code: "claim_retry" },
+  ]);
+  assertEquals(retried.intake?.confirmed, false);
+  // Teague has no address on file: filed, and nothing emailed
+  const teague = stateAfter([TEAGUE_LOOKUP, TEAGUE_VERIFY, PIPE_READBACK]);
+  assertEquals(
+    (await answer("confirm_claim", teague, { correct: true })).message,
+    sentenceFor("claim_filed", { claim_last3: "472", emailed: false }),
+  );
+  // a new caller's loss goes to a specialist, with a confirmation to the address they confirmed
+  const lead = stateAfter([...NEW_CALLER_CONFIRMED, PIPE_READBACK]);
+  assertEquals(lead.intake?.kind, "lead_intake");
+  const saved = await answer("confirm_claim", lead, { correct: true });
+  assertEquals([saved.code, saved.message], [
+    "claim_intake_saved",
+    sentenceFor("claim_intake_saved", { first_name: "Jordan", emailed: true }),
+  ]);
+});
+
+Deno.test("advance names a date phrase the mock could not read but the server would", () => {
+  const state = stateAfter([TOBIAS_LOOKUP, TOBIAS_VERIFY]);
+  const turn: TurnRecord = {
+    user: "",
+    chatId: "c",
+    model: [],
+    continuation: [],
+    filler: [],
+    heard: [],
+    cost: 0,
+    calls: [{
+      id: "call-1",
+      name: "start_claim",
+      args: { ...PIPE, loss_date: "two weeks ago" },
+      rawArgs: "",
+      content: null,
+      wordsBefore: false,
+      result: { code: "claim_bad_date", message: "", meta: { request_id: "x" } },
+    }],
+  };
+  const notes = advance(state, turn, NOW);
+  assertEquals(notes, ['harness: the mock could not read loss_date "two weeks ago" (the server reads 2026-09-28)']);
+  assertEquals(state.intake, null);
+});
+
+Deno.test("a claim spoken of as filed before confirm_claim filed it is flagged; a filed one is not", () => {
+  const turn = (model: string[], calls: TurnRecord["calls"] = []): TurnRecord => ({
+    user: "",
+    chatId: "c",
+    model,
+    continuation: [],
+    filler: [],
+    heard: [],
+    cost: 0,
+    calls,
+  });
+  assertEquals(flagProblems([turn(["Great, I've filed your claim."])]), ["flag claim_promised_without_filing"]);
+  const filed = turn([], [{
+    id: "c1",
+    name: "confirm_claim",
+    args: { correct: true },
+    rawArgs: "",
+    content: null,
+    wordsBefore: false,
+    result: {
+      code: "claim_filed",
+      message: "",
+      data: { claim_last3: "472", emailed: true },
+      meta: { request_id: "x" },
+    },
+  }]);
+  assertEquals(flagProblems([filed, turn(["Yes, your claim has been filed and I've emailed the details."])]), []);
+});
+
+// The compliant model for each reporting-a-loss persona, request by request.
+const FNOL_VERIFIED: Action[][] = [
+  [{ call: "lookup_customer", args: { phone: "6025550101" } }],
+  [{ call: "verify_identity", args: TOBIAS_FILE_VERIFY }],
+  [{ say: "I'm so sorry that happened. When did it happen?" }],
+  [{
+    call: "start_claim",
+    args: {
+      claim_type: "auto",
+      loss_date: "last Saturday",
+      description: "Someone rear-ended me at a red light and cracked my back bumper.",
+      summary: "a cracked rear bumper",
+    },
+  }],
+  [{ call: "confirm_claim", args: { correct: true } }],
+  [{ call: "endCall" }],
+];
+
+Deno.test("FNOL verified with a compliant model: the opening, the date question, the read-back, filed", async () => {
+  const vapi = fakeVapi(FNOL_VERIFIED);
+  const r = await runConversation(persona("fnol-verified"), 1, base, vapi.chat, () => NOW);
+  assertEquals(r.problems, []);
+  assertEquals(
+    r.turns[3].calls[0].result?.message,
+    sentenceFor("claim_readback", {
+      claim_type: "auto",
+      loss_date: "2026-10-10",
+      summary: "a cracked rear bumper",
+      today: TODAY,
+    }),
+  );
+  assertStringIncludes(r.turns[4].heard.join(" "), "Your claim number ends in four seven two");
+});
+
+Deno.test("FNOL verified fails on a read-back of its own, a date worked out, or a claim called filed too soon", async () => {
+  const script = structuredClone(FNOL_VERIFIED);
+  script[2] = [{ say: "Sorry to hear it. When was that? And do you have your policy number?" }];
+  // the day the caller meant, worked out by the model instead of passed in their words
+  const worked = parseLossDate("last Saturday", new Date());
+  (script[3][0] as { call: string; args: Obj }).args.loss_date = "date" in worked ? worked.date : "";
+  script[4] = [{ say: "Great, I've filed your claim." }];
+  const r = await runConversation(persona("fnol-verified"), 1, base, fakeVapi(script).chat, () => NOW);
+  const text = r.problems.join(" | ");
+  assertStringIncludes(text, "t3: 2 questions in one turn");
+  assertStringIncludes(text, "model text matches /\\bpolicy number\\b/i");
+  assertStringIncludes(text, "is a date worked out by the model");
+  assertStringIncludes(text, "t5: tools [], expected [confirm_claim]");
+  assertStringIncludes(text, "flag claim_promised_without_filing");
+});
+
+Deno.test("FNOL new caller with a compliant model: details confirmed first, then the loss taken as a lead", async () => {
+  const vapi = fakeVapi([
+    [{ call: "lookup_customer", args: { phone: "6025550199" } }],
+    [{ call: "lookup_customer", args: { phone: "6025550199" } }],
+    [{ say: "Thanks, Dana. What's the best email address for you? Please spell it out, letter by letter." }],
+    [{ say: "Got it. What's the best number to reach you?" }],
+    [{
+      call: "capture_contact",
+      args: {
+        first_name: "Dana",
+        last_name: "Whitfield",
+        email: "dana.whitfield@gmail.com",
+        callback_phone: "6025550188",
+      },
+    }],
+    [{ call: "confirm_contact", args: { correct: true } }],
+    [{
+      call: "start_claim",
+      args: {
+        claim_type: "home",
+        loss_date: "last night",
+        description: "A big tree branch came down on my roof in the storm.",
+        summary: "a tree branch on the roof",
+      },
+    }],
+    [{ call: "confirm_claim", args: { correct: true } }],
+  ]);
+  const r = await runConversation(persona("fnol-new-caller"), 1, base, vapi.chat, () => NOW);
+  assertEquals(r.problems, []);
+  assertEquals(
+    r.turns.at(-1)?.calls[0].result?.message,
+    sentenceFor("claim_intake_saved", {
+      first_name: "Dana",
+      emailed: true,
+    }),
+  );
+});
+
+Deno.test("FNOL correction with a compliant model: a no, the corrected day read back, filed", async () => {
+  const pipe = { ...PIPE, loss_date: "Sunday" };
+  const vapi = fakeVapi([
+    [{ call: "lookup_customer", args: { phone: "6025550101" } }],
+    [{ call: "verify_identity", args: TOBIAS_FILE_VERIFY }],
+    [{ call: "start_claim", args: pipe }],
+    [{ call: "confirm_claim", args: { correct: false } }],
+    [{ call: "start_claim", args: { ...pipe, loss_date: "Friday" } }],
+    [{ call: "confirm_claim", args: { correct: true } }],
+  ]);
+  const r = await runConversation(persona("fnol-correction"), 1, base, vapi.chat, () => NOW);
+  assertEquals(r.problems, []);
+  assertStringIncludes(r.turns[4].calls[0].result?.message ?? "", "from Friday, October ninth.");
+});
+
+Deno.test("FNOL locked: the server's refusal or the model's own both pass; asking for the details fails", async () => {
+  const head: Action[][] = [
+    [{ call: "lookup_customer", args: { phone: "6025550101" } }],
+    [{ call: "verify_identity", args: { dob_month: 6, dob_day: 2, dob_year: 1984 } }],
+    [{ call: "verify_identity", args: { dob_month: 6, dob_day: 3, dob_year: 1984 } }],
+  ];
+  const tail: Action[] = [{
+    call: "escalate",
+    args: { reason: "representative_requested", details: "Wants to report a claim." },
+  }];
+  const server = fakeVapi([...head, [{ call: "start_claim", args: PIPE }], tail]);
+  const viaTool = await runConversation(persona("fnol-locked"), 1, base, server.chat, () => NOW);
+  assertEquals(viaTool.problems, []);
+  assertEquals(viaTool.turns[3].calls[0].result?.message, sentenceFor("claim_locked"));
+  const own = fakeVapi([
+    ...head,
+    [{
+      say:
+        "Since I couldn't verify your identity, I can't take a claim on this call. I can have a claims representative call you back. Would you like that?",
+    }],
+    tail,
+  ]);
+  assertEquals((await runConversation(persona("fnol-locked"), 1, base, own.chat, () => NOW)).problems, []);
+  const asks = fakeVapi([...head, [{ say: "I'm sorry to hear that. When did it happen?" }], tail]);
+  const r = await runConversation(persona("fnol-locked"), 1, base, asks.chat, () => NOW);
+  assertStringIncludes(r.problems.join(" | "), "t4: model text matches /\\bwhen\\b");
+});
+
+// ---------------------------------------------------------------------------------------------
 // The transient assistant and the parser.
 // ---------------------------------------------------------------------------------------------
 Deno.test("the transient assistant is the rendered solo-core prompt with code mocks and the real endCall", () => {
@@ -557,35 +1039,50 @@ Deno.test("generic checks: smuggled identity fields, two questions, a missing mo
 // ---------------------------------------------------------------------------------------------
 // Whole conversations against the fake.
 // ---------------------------------------------------------------------------------------------
+const TOBIAS_STATUS_VERIFY = { dob_month: 3, dob_day: 14, dob_year: 1986, intent: "claim_status" };
+
 Deno.test("F1 with a compliant model passes, and the requests chain like a voice call", async () => {
   const vapi = fakeVapi([
     [{ call: "lookup_customer", args: { phone: "6025550101" } }],
-    [{ call: "verify_identity", args: { dob_month: 3, dob_day: 14, dob_year: 1986 } }],
-    [{ call: "get_claim_status" }],
+    [{ call: "verify_identity", args: TOBIAS_STATUS_VERIFY }],
     [{ call: "endCall" }],
   ]);
   const r = await runConversation(persona("f1"), 1, base, vapi.chat, () => NOW);
   assertEquals(r.problems, []);
   assert(r.pass);
-  assertEquals(r.requests, 4);
+  assertEquals(r.requests, 3);
   assertEquals(vapi.bodies[0].input, [{ role: "assistant", content: base.firstMessage }, {
     role: "user",
     content: persona("f1").turns[0].user,
   }]);
   assertEquals(vapi.bodies[0].previousChatId, undefined);
   assertEquals(vapi.bodies[1].previousChatId, "chat-1");
-  assertEquals(vapi.bodies[3].input, "No, that's everything. Thanks, bye.");
+  assertEquals(vapi.bodies[2].input, "No, that's everything. Thanks, bye.");
   for (const b of vapi.bodies) assert(b.name.startsWith("INTERNAL ") && b.name.length <= 40, b.name);
-  assertEquals(r.turns.map((t) => t.calls.map((c) => c.result?.code ?? c.name)), [["needs_dob"], ["verified"], ["ok"], [
+  assertEquals(r.turns.map((t) => t.calls.map((c) => c.result?.code ?? c.name)), [["needs_dob"], ["verified"], [
     "endCall",
   ]]);
+  // the verified answer carried the claims read, as the server's chained read does
+  assertStringIncludes(r.turns[1].heard.join(" "), "four thousand eight hundred twenty dollars");
+});
+
+Deno.test("F1 fails when the verified answer is not asked for the claims and they are read separately", async () => {
+  const vapi = fakeVapi([
+    [{ call: "lookup_customer", args: { phone: "6025550101" } }],
+    [{ call: "verify_identity", args: { dob_month: 3, dob_day: 14, dob_year: 1986 } }],
+    [{ call: "get_claim_status" }],
+  ]);
+  const r = await runConversation(persona("f1"), 1, base, vapi.chat, () => NOW);
+  const text = r.problems.join(" | ");
+  assertStringIncludes(text, "t2: verify_identity: intent was null");
+  assertStringIncludes(text, "t3: tools [get_claim_status], expected [endCall]");
+  assertStringIncludes(text, "called get_claim_status");
 });
 
 Deno.test("F1 fails when the model adds words before a tool call or reads the name too early", async () => {
   const vapi = fakeVapi([
     [{ say: "Thanks Tobias!" }, { call: "lookup_customer", args: { phone: "6025550101" } }],
-    [{ call: "verify_identity", args: { dob_month: 3, dob_day: 14, dob_year: 1986 } }],
-    [{ call: "get_claim_status" }, { say: "Anything else?" }],
+    [{ call: "verify_identity", args: TOBIAS_STATUS_VERIFY }, { say: "Anything else?" }],
     [{ call: "endCall" }],
   ]);
   const r = await runConversation(persona("f1"), 1, base, vapi.chat, () => NOW);
@@ -593,16 +1090,15 @@ Deno.test("F1 fails when the model adds words before a tool call or reads the na
   const text = r.problems.join(" | ");
   assertStringIncludes(text, "t1: words of its own in a tool turn");
   assertStringIncludes(text, "t1: model text matches /\\b(Tobias|Halvorsen)\\b/i");
-  // words after get_claim_status's spoken sentence are the /chat continuation voice never speaks
-  assertFalse(text.includes("t3:"), text);
-  assertEquals(r.turns[2].continuation, ["Anything else?"]);
+  // words after verify_identity's spoken sentence are the /chat continuation voice never speaks
+  assertFalse(text.includes("t2:"), text);
+  assertEquals(r.turns[1].continuation, ["Anything else?"]);
 });
 
 Deno.test("a second server tool chained in the verify turn is named as such", async () => {
   const vapi = fakeVapi([
     [{ call: "lookup_customer", args: { phone: "6025550101" } }],
-    [{ call: "verify_identity", args: { dob_month: 3, dob_day: 14, dob_year: 1986 } }, { call: "get_claim_status" }],
-    [{ call: "get_claim_status" }],
+    [{ call: "verify_identity", args: TOBIAS_STATUS_VERIFY }, { call: "get_claim_status" }],
     [{ call: "endCall" }],
   ]);
   const r = await runConversation(persona("f1"), 1, base, vapi.chat, () => NOW);
@@ -649,15 +1145,14 @@ Deno.test("an offer instead of the tool gets one yes, and the tool on that yes p
   const vapi = fakeVapi([
     [{ say: "I can email that once you're verified. What's the phone number on your account?" }],
     [{ call: "lookup_customer", args: { phone: "6025550101" } }],
-    [{ call: "verify_identity", args: { dob_month: 3, dob_day: 14, dob_year: 1986 } }],
-    [{ call: "get_claim_status" }],
+    [{ call: "verify_identity", args: { dob_month: 3, dob_day: 14, dob_year: 1986, intent: "other" } }],
     [{ say: "Would you like me to email the document list to the address on your account?" }],
     [{ call: "send_info_email", args: { topic: "document_checklist" } }],
   ]);
   const r = await runConversation(persona("info-email"), 1, base, vapi.chat, () => NOW);
   assertEquals(r.problems, []);
-  assertEquals(r.requests, 6);
-  assertEquals(vapi.bodies[5].input, "Yes, please.");
+  assertEquals(r.requests, 5);
+  assertEquals(vapi.bodies[4].input, "Yes, please.");
 });
 
 Deno.test("new caller with a compliant model: captured, read back with the real sentence, confirmed, steps emailed", async () => {

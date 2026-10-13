@@ -5,16 +5,20 @@
 import { assert, assertEquals, assertMatch, assertThrows } from "@std/assert";
 import {
   ANALYSIS_OUTCOMES,
+  CALL_REASONS,
+  CLAIM_TYPES,
   INFO_EMAIL_TOPICS,
   MODEL_ESCALATION_REASONS,
   SENTIMENTS,
   SERVER_TOOLS,
   TIMEZONE,
+  VERIFY_INTENTS,
 } from "../supabase/functions/vapi-webhook/enums.ts";
 import {
   ACCOUNT_TOOLS,
   ASSISTANT_KEYS,
   type AssistantKey,
+  CLAIM_TOOLS,
   CONTACT_ASSISTANTS,
   CONTACT_TOOLS,
   deepMerge,
@@ -72,6 +76,12 @@ const FILLERS: Record<string, { start: string; delayed: string }> = {
   // Without a request-start VAPI speaks a default filler of its own ("Hold on a sec"), and the
   // result opens with "Perfect", "Thanks" or "Sorry", so the filler is a neutral acknowledgement.
   confirm_contact: { start: "Okay.", delayed: DELAYED },
+  // Outcome-neutral: most results are not a read-back (verify first, details first, locked, a date it
+  // cannot read, already filed), and "Let me write that down." before a refusal says the opposite.
+  start_claim: { start: "Alright, one moment.", delayed: DELAYED },
+  // Spoken on a yes and on a no alike, so it says nothing about filing: on a no the next words are
+  // "No problem. What should I change?".
+  confirm_claim: { start: "Okay, one moment.", delayed: DELAYED },
   // An emergency keeps a steady line rather than a cheerful one.
   report_emergency: {
     start:
@@ -311,7 +321,10 @@ Deno.test("no prompt, knowledge-base line, tool description or spoken string car
 Deno.test("every prompt names Ava and carries the honest disclosure rule; none claims to be human", () => {
   for (const key of ASSISTANT_KEYS) {
     const prompt = Deno.readTextFileSync(promptPath(key));
-    assertMatch(prompt, new RegExp(`^You are ${PERSONA_NAME}, and you answer the claims line for Observe Insurance`, "m"));
+    assertMatch(
+      prompt,
+      new RegExp(`^You are ${PERSONA_NAME}, and you answer the claims line for Observe Insurance`, "m"),
+    );
     const phone = PHONE_ASSISTANTS.includes(key);
     assert(prompt.includes(phone ? DISCLOSURE_PHONE : DISCLOSURE_WEB), `${key}: disclosure answer missing`);
     if (!phone) assert(!/connect you with a person/.test(prompt), `${key}: a web prompt promises a live connection`);
@@ -413,7 +426,11 @@ Deno.test("analysis schema and structured output share the enums.ts value lists"
       assertEquals(s.properties.sentiment.enum, [...SENTIMENTS]);
       assertEquals(s.properties.outcome.enum, [...ANALYSIS_OUTCOMES]);
       assert(!s.properties.outcome.enum.includes("in_progress"));
-      assertEquals(s.required, ["caller_name", "sentiment", "outcome"]);
+      assertEquals(s.properties.call_reason.enum, [...CALL_REASONS]);
+      // one line per value, so the analysis knows what each reason means
+      for (const r of CALL_REASONS) assertMatch(s.properties.call_reason.description, new RegExp(`\\b${r}: `), r);
+      assertMatch(s.properties.call_reason.description, /the main reason, not everything the call touched/);
+      assertEquals(s.required, ["caller_name", "sentiment", "outcome", "call_reason"]);
     }
     assertEquals(p.analysisPlan.summaryPlan.enabled, true);
     assertEquals(p.analysisPlan.successEvaluationPlan.rubric, "PassFail");
@@ -481,7 +498,14 @@ Deno.test("function tools: the server tools, flat non-strict schemas, Bearer ser
       Object.entries<any>(withRep.tools[n].function.parameters.properties).map(([k, s]) => [k, s.type]),
     );
   assertEquals(props("lookup_customer"), { phone: "string" });
-  assertEquals(props("verify_identity"), { dob_month: "integer", dob_day: "integer", dob_year: "integer" });
+  assertEquals(props("verify_identity"), {
+    dob_month: "integer",
+    dob_day: "integer",
+    dob_year: "integer",
+    intent: "string",
+  });
+  // the intent is optional: an unstated reason verifies exactly as before
+  assertEquals(withRep.tools.verify_identity.function.parameters.required, ["dob_month", "dob_day", "dob_year"]);
   assertEquals(props("get_claim_status"), {});
   assertEquals(props("escalate"), { reason: "string", details: "string", callback_phone: "string" });
   assertEquals(props("report_emergency"), { note: "string" });
@@ -493,6 +517,16 @@ Deno.test("function tools: the server tools, flat non-strict schemas, Bearer ser
     callback_phone: "string",
   });
   assertEquals(props("confirm_contact"), { correct: "boolean" });
+  assertEquals(props("start_claim"), {
+    claim_type: "string",
+    loss_date: "string",
+    description: "string",
+    summary: "string",
+  });
+  // a missing or unusable summary only leaves the phrase out of the read-back
+  assertEquals(withRep.tools.start_claim.function.parameters.required, ["claim_type", "loss_date", "description"]);
+  assertEquals(props("confirm_claim"), { correct: "boolean" });
+  assertEquals(withRep.tools.confirm_claim.function.parameters.required, ["correct"]);
   // A verified caller's name comes from the account, so the names are not required of the model.
   assertEquals(withRep.tools.capture_contact.function.parameters.required, undefined);
   assertEquals(withRep.tools.confirm_contact.function.parameters.required, ["correct"]);
@@ -504,6 +538,8 @@ Deno.test("tool enums match enums.ts", () => {
   const p = (n: string) => withRep.tools[n].function.parameters.properties;
   assertEquals(p("escalate").reason.enum, [...MODEL_ESCALATION_REASONS]);
   assertEquals(p("send_info_email").topic.enum, [...INFO_EMAIL_TOPICS]);
+  assertEquals(p("verify_identity").intent.enum, [...VERIFY_INTENTS]);
+  assertEquals(p("start_claim").claim_type.enum, [...CLAIM_TYPES]);
 });
 
 Deno.test("native tools: endCall says the goodbye, handoffs arrive silently, faq_search reads the KB file", () => {
@@ -580,7 +616,12 @@ Deno.test("contact capture: the graded assistants carry both tools and the flow;
 Deno.test("contact branching: a would-be new caller is asked about a policy first, and not found is not always new", () => {
   for (const key of CONTACT_ASSISTANTS) {
     const prompt = withRep.assistants[key].prompt;
-    assertMatch(prompt, /before giving a number, they say they want to start or file a new claim/, key);
+    assertMatch(
+      prompt,
+      /want to start or file a new claim, report a loss, or want the steps emailed, and haven't said any phone number yet, ask one question first/,
+      key,
+    );
+    assertMatch(prompt, /When they say a number in the same breath, that question is never asked/, key);
     assertMatch(prompt, /"Do you already have a policy with us\?"/, key);
     assertMatch(prompt, /If the caller says they already have a policy or a claim with us, they're not new/, key);
     assertMatch(prompt, /If they say which part is wrong without the fix/, key);
@@ -588,6 +629,137 @@ Deno.test("contact branching: a would-be new caller is asked about a policy firs
   }
   // Knowledge cannot take an address, so a caller who wants to spell one goes back to Concierge
   assertMatch(withRep.assistants.knowledge.prompt, /wants to spell an email address to add to their account/);
+});
+
+Deno.test("reporting a loss: the contact assistants carry both claim tools and the flow; Knowledge hands such callers back", () => {
+  for (const t of CLAIM_TOOLS) {
+    assert(!(FLOOR_TOOLS as readonly string[]).includes(t), `${t} must not be a squad floor tool`);
+    assert((SERVER_TOOLS as readonly string[]).includes(t), `${t} is served by the webhook`);
+  }
+  for (const key of ASSISTANT_KEYS) {
+    const tools = toolsOf(withRep, key);
+    const prompt = withRep.assistants[key].prompt;
+    if (!CONTACT_ASSISTANTS.includes(key)) {
+      for (const t of CLAIM_TOOLS) assert(!tools.includes(t), `${key} carries ${t}`);
+      assert(!prompt.includes("REPORTING A LOSS"), `${key}: the intake belongs to the graded assistants`);
+      assertMatch(prompt, /wants to report a loss or file a new claim on this call, or wants to spell an email/);
+      continue;
+    }
+    for (const t of CLAIM_TOOLS) assert(tools.includes(t), `${key} lacks ${t}`);
+    assert(prompt.split("\n").includes("REPORTING A LOSS"), `${key}: section REPORTING A LOSS missing`);
+    // who they are first: verified with the intent, or a new caller's confirmed details
+    assertMatch(
+      prompt,
+      /An existing customer is verified first, as STEP 1 and STEP 2 say, with intent file_claim/,
+      key,
+    );
+    assertMatch(prompt, /A new caller gives their details first, as NEW CALLERS says/, key);
+    assertMatch(prompt, /If they want to tell you what happened now, take it down as REPORTING A LOSS says/, key);
+    // one question at a time, the date in the caller's words, no read-back of its own
+    assertMatch(prompt, /you need two things: what happened, in their own words, and when it happened/, key);
+    assertMatch(
+      prompt,
+      /Ask only for what's still missing, one question per turn: what happened if you don't have it yet, otherwise when/,
+      key,
+    );
+    // a day said in passing is the date: asking for it again is the one question the caller already answered
+    assertMatch(
+      prompt,
+      /Any day they mention is when it happened, even said in passing and even just a day of the week/,
+    );
+    assertMatch(prompt, /Never ask when it happened once they've said a day/, key);
+    assertMatch(prompt, /The moment you have both, even from one sentence, call start_claim with no words of your own/);
+    assertMatch(
+      prompt,
+      /loss_date exactly as they said it, such as "last Tuesday" or "October tenth", never a date you worked out/,
+    );
+    assertMatch(prompt, /Never read the claim back yourself, and never repeat its read-back/, key);
+    assertMatch(prompt, /call confirm_claim with no words at all/, key);
+    assertMatch(prompt, /a yes means correct set to true, and a no means correct set to false/, key);
+    assertMatch(prompt, /call start_claim again with every detail, corrected/, key);
+    // nothing promised before the server filed it; never a policy number or injury questions
+    assertMatch(prompt, /Only confirm_claim's sentence can say a claim is filed/, key);
+    assertMatch(
+      prompt,
+      /Never ask for a policy number, and never ask about injuries beyond the safety check in rule 9/,
+    );
+    assertMatch(prompt, /say you can't take a claim on this call and offer once to have a claims representative call/);
+    // identity: a number said is looked up at once, the intent is passed, a chained read is not repeated
+    assertMatch(prompt, /call lookup_customer with it right away; never ask whether they have a policy with us first/);
+    assertMatch(
+      prompt,
+      /intent set from what the caller has asked for: claim_status .*, file_claim .*, and other /,
+      key,
+    );
+    assertMatch(prompt, /never call get_claim_status for that same request/, key);
+    // only a read that happened stops the separate one: a failed chained read leaves get_claim_status open
+    assertMatch(prompt, /When verify_identity's verified sentence has already read the caller's claims, or said/, key);
+    assertMatch(
+      prompt,
+      /with intent claim_status but its sentence only said they're verified, .*call get_claim_status/,
+      key,
+    );
+    // the wrong part named without the fix is asked for, even the date
+    assertMatch(
+      prompt,
+      /If they say which part is wrong without the fix, such as "the date's wrong", ask for just/,
+      key,
+    );
+    // a guess of the day is a day; a vague time is not
+    assertMatch(prompt, /ask for their best guess of the day, and pass it as they said it/, key);
+    // the summary is said back by Ava, so never in the caller's first person
+    assertMatch(prompt, /in the third person, never "I", "my" or "we"/, key);
+    // a loss told before verification or the details is taken down on a yes, from what was said
+    assertMatch(prompt, /When a sentence asks whether to take down that claim now, a yes means call start_claim/, key);
+    assertMatch(prompt, /If it asks for the best number to reach them, ask nothing else/, key);
+  }
+  // Concierge keeps a loss report itself rather than handing it to Knowledge
+  assertMatch(withRep.assistants.concierge.prompt, /It is never for .*for reporting a loss/);
+});
+
+Deno.test("the claim sentences say what the prompt expects of them", async () => {
+  const { sentenceFor, verifiedFileClaimSentence, withoutTrailingQuestion } = await import(
+    "../supabase/functions/vapi-webhook/speak.ts"
+  );
+  const readback = sentenceFor("claim_readback", {
+    claim_type: "auto",
+    loss_date: "2026-10-10",
+    summary: "a cracked windshield",
+    today: "2026-10-13",
+  });
+  assertEquals(
+    readback,
+    "Let me make sure I have this right. An auto claim, for a cracked windshield, from Saturday, October tenth. Is that correct?",
+  );
+  // "When a sentence asks what to change", and the verified opening that leads into what happened
+  assertEquals(sentenceFor("claim_retry"), "No problem. What should I change?");
+  const verified = sentenceFor("verified", { first_name: "Tobias" });
+  assertEquals(
+    verifiedFileClaimSentence(verified),
+    "Thank you, Tobias, you're verified. Let's get your claim started. Can you tell me a little more about what happened?",
+  );
+  // "When a sentence asks whether to take down that claim now"
+  assertMatch(verifiedFileClaimSentence(verified, true), /take down that claim now\?$/);
+  assertMatch(
+    sentenceFor("contact_saved_new", { first_name: "Jane", resume_claim: true }),
+    /take down that claim now\?$/,
+  );
+  // "If it asks for the best number to reach them"
+  assertMatch(sentenceFor("claim_needs_phone"), /best number for our claims team to reach you\?$/);
+  assertEquals(withoutTrailingQuestion(verified), "Thank you, Tobias, you're verified.");
+  // the gate's sentences ask for exactly the step the prompt sends the caller back to
+  assertMatch(sentenceFor("claim_needs_lookup"), /phone number on your account\?$/);
+  assertMatch(sentenceFor("claim_needs_verification"), /date of birth on the account\?$/);
+  assertMatch(sentenceFor("claim_needs_contact"), /first and last name\?$/);
+  assertMatch(sentenceFor("claim_locked"), /can't file a claim on this call/);
+  // only a filed claim is spoken of as filed
+  assertMatch(
+    sentenceFor("claim_filed", { claim_last3: "472" }),
+    /^You're all set\. Your claim number ends in four seven two\./,
+  );
+  for (const code of ["claim_readback", "claim_retry", "claim_not_pending", "claim_bad_date"] as const) {
+    assert(!/\b(filed|submitted)\b/i.test(sentenceFor(code)), `${code} speaks of a filed claim`);
+  }
 });
 
 Deno.test("the callback question fits the channel: only the phone-only assistant asks about the calling number", () => {
@@ -608,7 +780,7 @@ Deno.test("the callback question fits the channel: only the phone-only assistant
 });
 
 Deno.test("endpointing waits longer after every sentence that asks for a number, a date, a name or a spelling", async () => {
-  const { sentenceFor } = await import("../supabase/functions/vapi-webhook/speak.ts");
+  const { sentenceFor, verifiedFileClaimSentence } = await import("../supabase/functions/vapi-webhook/speak.ts");
   const rules: { re: RegExp; timeoutSeconds: number }[] = withRep.assistants["solo-core"].payload.startSpeakingPlan
     .customEndpointingRules.map((r: any) => ({
       re: new RegExp(r.regex, r.regexOptions?.some((o: any) => o.type === "ignore-case" && o.enabled) ? "i" : ""),
@@ -631,8 +803,23 @@ Deno.test("endpointing waits longer after every sentence that asks for a number,
     ["contact_needs_phone", sentenceFor("contact_needs_phone")],
     ["not_pending (verified)", sentenceFor("not_pending", { verified: true })],
     // the read-back: a yes or no, or a correction spelled or said in digits
-    ["contact_readback", sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe", email: "jane@gmail.com" })],
+    [
+      "contact_readback",
+      sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe", email: "jane@gmail.com" }),
+    ],
     ["contact_readback (name only)", sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe" })],
+    // reporting a loss: what happened is told with pauses, a date in parts, a correction after a no
+    ["verified (file_claim)", verifiedFileClaimSentence(sentenceFor("verified", { first_name: "Tobias" }))],
+    ["claim_needs_lookup", sentenceFor("claim_needs_lookup")],
+    ["claim_needs_contact", sentenceFor("claim_needs_contact")],
+    ["claim_needs_verification", sentenceFor("claim_needs_verification")],
+    ["claim_needs_description", sentenceFor("claim_needs_description")],
+    ["claim_bad_date", sentenceFor("claim_bad_date")],
+    ["claim_needs_phone", sentenceFor("claim_needs_phone")],
+    ["contact_saved_new (take it down now)", sentenceFor("contact_saved_new", { first_name: "Jane" })],
+    ["claim_not_pending", sentenceFor("claim_not_pending")],
+    ["claim_retry", sentenceFor("claim_retry")],
+    ["the prompt's own date question", "When did it happen?"],
     // the prompt's own callback questions, often answered with digits
     ["calling-from question", CALLING_FROM_QUESTION],
     ["best-number question", BEST_NUMBER_QUESTION],
@@ -652,10 +839,10 @@ Deno.test("endpointing waits longer after every sentence that asks for a number,
 
 Deno.test("variants differ only where intended", () => {
   const t = (k: AssistantKey) => toolsOf(withRep, k);
-  assertEquals(t("solo-core").slice(-3), [...CONTACT_TOOLS, "endCall"]);
-  assertEquals(t("solo-web"), [...t("solo-core").slice(0, 8), "faq_search", "endCall"]);
-  assertEquals(t("solo-phone"), [...t("solo-core").slice(0, 8), "transferCall", "endCall"]);
-  assertEquals(t("concierge"), [...t("solo-core").slice(0, 8), "handoff_to_knowledge", "endCall"]);
+  assertEquals(t("solo-core").slice(-5), [...CONTACT_TOOLS, ...CLAIM_TOOLS, "endCall"]);
+  assertEquals(t("solo-web"), [...t("solo-core").slice(0, 10), "faq_search", "endCall"]);
+  assertEquals(t("solo-phone"), [...t("solo-core").slice(0, 10), "transferCall", "endCall"]);
+  assertEquals(t("concierge"), [...t("solo-core").slice(0, 10), "handoff_to_knowledge", "endCall"]);
   assert(!t("solo-core").includes("faq_search"));
   const strip = (k: AssistantKey) => {
     const { name: _n, model, metadata: _m, ...rest } = withRep.assistants[k].payload;
@@ -781,6 +968,10 @@ Deno.test("sync invariants hold for the rendered org and catch each kind of brea
   const account = liveViewOf(withRep);
   account.assistants.knowledge.model.toolIds.push(ids.tools.get_claim_status);
   assertMatch(invariantProblems(account).join("\n"), /assistant knowledge: carries get_claim_status/);
+
+  const claim = liveViewOf(withRep);
+  claim.assistants.knowledge.model.toolIds.push(ids.tools.start_claim);
+  assertMatch(invariantProblems(claim).join("\n"), /assistant knowledge: carries start_claim/);
 
   const stray = liveViewOf(withRep);
   stray.assistants["solo-core"].model.toolIds.push("tool-from-elsewhere");

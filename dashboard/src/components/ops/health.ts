@@ -54,7 +54,7 @@ export const JOB_SPECS: readonly JobSpec[] = [
     job: "outbox",
     label: "Outbox",
     schedule: "Every minute",
-    purpose: "Delivers completed calls to the Airtable call log",
+    purpose: "Delivers completed calls to the Airtable call log and GoHighLevel",
     okWithinMin: 5,
     lateWithinMin: 20,
     healthKey: "last_outbox_run",
@@ -117,7 +117,18 @@ export function normaliseHealth(h: OpsHealth): OpsHealth {
       outbox_dead: toCount(h.outbox_dead),
       outbox_delivered_24h: toCount(h.outbox_delivered_24h),
     }),
+    // GoHighLevel's counts arrive with 0008_ghl.sql, the same way.
+    ...(h.ghl_pending !== undefined && {
+      ghl_pending: toCount(h.ghl_pending),
+      ghl_dead: toCount(h.ghl_dead),
+      ghl_delivered_24h: toCount(h.ghl_delivered_24h),
+    }),
   };
+}
+
+/** True when ops_health carries GoHighLevel's outbox columns (0008_ghl.sql). */
+export function hasGhl(h: OpsHealth | null | undefined): h is OpsHealth & Required<Pick<OpsHealth, "ghl_pending" | "ghl_dead" | "ghl_delivered_24h">> {
+  return !!h && h.ghl_pending !== undefined;
 }
 
 /** True when ops_health carries the outbox columns. */
@@ -149,12 +160,14 @@ export const CHANNEL_NAMES: Record<DeliveryChannel, string> = {
   telegram: "Telegram",
   email: "Email",
   airtable: "Airtable call log",
+  ghl: "GoHighLevel CRM",
 };
 
 export const CHANNEL_FIX: Record<DeliveryChannel, string> = {
   telegram: "Check the bot token and chat id.",
   email: "Check the Resend key and the sender domain.",
   airtable: "Check the Airtable token, base id and table, and the outbox rows' last error.",
+  ghl: "Check the GoHighLevel token and location id, and the outbox rows' last error.",
 };
 
 export function channelHealth(row: { channel: DeliveryChannel; owed: unknown; delivered: unknown; failed: unknown }): ChannelHealth {
@@ -184,16 +197,25 @@ export function airtableChannel(h: OpsHealth | null | undefined): ChannelHealth 
   return channelHealth({ channel: "airtable", owed: delivered + failed + pending, delivered, failed });
 }
 
+/** GoHighLevel from its own outbox counts, counted the same way as the Airtable call log. */
+export function ghlChannel(h: OpsHealth | null | undefined): ChannelHealth | null {
+  if (!hasGhl(h)) return null;
+  const delivered = toCount(h.ghl_delivered_24h);
+  const failed = toCount(h.ghl_dead);
+  const pending = toCount(h.ghl_pending);
+  return channelHealth({ channel: "ghl", owed: delivered + failed + pending, delivered, failed });
+}
+
 /**
  * Telegram and email in a fixed order, so a channel with no row still shows as "nothing to
- * deliver", then the Airtable call log once the outbox exists.
+ * deliver", then each outbox destination once ops_health carries its counts.
  */
 export function deliveryChannels(rows: readonly DeliveryGapRow[], health?: OpsHealth | null): ChannelHealth[] {
   const alerts = (["telegram", "email"] as const).map((channel) =>
     channelHealth(rows.find((r) => r.channel === channel) ?? { channel, owed: 0, delivered: 0, failed: 0 }),
   );
-  const airtable = airtableChannel(health);
-  return airtable ? [...alerts, airtable] : alerts;
+  const outbox = [airtableChannel(health), ghlChannel(health)].filter((c): c is ChannelHealth => c !== null);
+  return [...alerts, ...outbox];
 }
 
 // ---------------------------------------------------------------------------------------------

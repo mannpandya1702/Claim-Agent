@@ -22,7 +22,7 @@ const READBACK_JANE =
 const READBACK_JANE_NUMBER =
   "Thanks, Jane. Let me read that back. Jane Doe, your email is J, A, N, E, dot, D, O, E, at gmail dot com, and the best number is six zero two... five five five... zero one seven seven. Did I get that right?";
 const SAVED_JANE =
-  "Perfect, thanks Jane. I've saved your details. I can email you the steps to start a new claim, or have someone from our claims team call you back. Which would you like?";
+  "Perfect, thanks Jane. I've saved your details. I can take down what happened now, email you the steps to start a claim, or have someone from our claims team call you back. Which would you like?";
 
 type Responder = (
   url: string,
@@ -489,7 +489,7 @@ Deno.test("replays of the same toolCallId repeat the answer without a second wri
   }, "cap-1");
   assertEquals(first.sentence, READBACK_JANE);
   assertEquals(
-    (await h.run("capture_contact", { first_name: "Jane", last_name: "Doe", email: "jane.doe@gmail.com" }, "cap-1")),
+    await h.run("capture_contact", { first_name: "Jane", last_name: "Doe", email: "jane.doe@gmail.com" }, "cap-1"),
     first,
   );
   // a later capture replaces the row; a retry of the first one must not put it back, and reads back
@@ -608,12 +608,20 @@ Deno.test("a replayed capture speaks the stored row, so the address confirmed an
   // a later capture with another address replaces the row, unconfirmed
   await h.run("capture_contact", { first_name: "Jane", last_name: "Jones", email: "evil@gmail.com" }, "cap-2");
   // a late retry of the first capture reads back what is stored now, not what its arguments said
-  const replay = await h.run("capture_contact", { first_name: "Jane", last_name: "Jones", email: "jane@gmail.com" }, "cap-1");
+  const replay = await h.run(
+    "capture_contact",
+    { first_name: "Jane", last_name: "Jones", email: "jane@gmail.com" },
+    "cap-1",
+  );
   assertStringIncludes(replay.sentence, "your email is E, V, I, L, at gmail dot com");
   assertFalse(replay.sentence.includes("J, A, N, E, at"));
   await h.run("confirm_contact", { correct: true });
   assertEquals((await h.run("send_info_email", { topic: "how_to_start_claim" })).code, "email_sent");
-  assertEquals(body(h.resendCalls()[0]).to, ["evil@gmail.com"], "sent only to the address the caller heard and confirmed");
+  assertEquals(
+    body(h.resendCalls()[0]).to,
+    ["evil@gmail.com"],
+    "sent only to the address the caller heard and confirmed",
+  );
 });
 
 Deno.test("verified with an email on file: no email update is stored, and no team email shows one", async () => {

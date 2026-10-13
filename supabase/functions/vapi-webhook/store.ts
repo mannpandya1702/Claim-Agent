@@ -9,10 +9,12 @@
 import { createClient } from "npm:@supabase/supabase-js@2.49.4";
 import { type InteractionForMirror, MIRROR_COLUMNS } from "./airtable.ts";
 import type { AlertStatus, Code, EmailKind, EmailStatus } from "./enums.ts";
+import { GHL_COLUMNS, type InteractionForGhl } from "./ghl.ts";
 import {
   type DigestCallRow,
   digestFromRows,
   JOB_LIST_LIMIT,
+  OUTBOX_DUE_SLACK_MS,
   OUTBOX_MAX_ATTEMPTS,
   outboxClaimable,
   outboxErrorText,
@@ -22,6 +24,7 @@ import type {
   AttemptRow,
   CallerContact,
   Claim,
+  ClaimIntake,
   Customer,
   EmailRow,
   EscalationRow,
@@ -60,10 +63,12 @@ const ESCALATION_COLUMNS = "id, call_key, kind, reason, details, callback_phone,
 const EMAIL_COLUMNS = "call_key, kind, to_masked, resend_id, status, error";
 const CONTACT_COLUMNS = "call_key, kind, first_name, last_name, email, callback_phone, callback_source, customer_id, " +
   "confirmed, confirmed_at";
+const INTAKE_COLUMNS = "call_key, kind, claim_type, loss_date, summary, description, customer_id, claim_id, " +
+  "claim_number, confirmed, confirmed_at";
 const STALE_COLUMNS = "id, call_key, kind, reason, channel, verified, created_at";
 const DIGEST_COLUMNS = "outcome, sentiment, flags, cost, ended_at";
-const OUTBOX_COLUMNS = "id, kind, ref_id, destination, attempts, delivered_at, last_error, external_id, created_at, " +
-  "updated_at";
+const OUTBOX_COLUMNS = "id, kind, ref_id, destination, attempts, delivered_at, last_error, external_id, progress, " +
+  "next_attempt_at, created_at, updated_at";
 // Rows one claim reads from the head of the queue; only the few inside a lease are passed over.
 const OUTBOX_CANDIDATES = 50;
 // PostgREST answers at most this many rows per request (the Supabase default max-rows), so the
@@ -115,6 +120,10 @@ function toOutboxRow(row: any): OutboxRow {
     delivered_at: row.delivered_at ?? null,
     last_error: row.last_error ?? null,
     external_id: row.external_id ?? null,
+    progress: row.progress !== null && typeof row.progress === "object" && !Array.isArray(row.progress)
+      ? row.progress
+      : {},
+    next_attempt_at: row.next_attempt_at ?? row.created_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -131,6 +140,23 @@ function toContact(row: any): CallerContact {
     callback_phone: row.callback_phone ?? null,
     callback_source: row.callback_source,
     customer_id: row.customer_id ?? null,
+    confirmed: row.confirmed === true,
+    confirmed_at: row.confirmed_at ?? null,
+  };
+}
+
+/** A claim_intakes row (the functions return every column) as the Store contract's shape. */
+function toIntake(row: any): ClaimIntake {
+  return {
+    call_key: row.call_key,
+    kind: row.kind,
+    claim_type: row.claim_type,
+    loss_date: row.loss_date,
+    summary: row.summary,
+    description: row.description,
+    customer_id: row.customer_id ?? null,
+    claim_id: row.claim_id ?? null,
+    claim_number: row.claim_number ?? null,
     confirmed: row.confirmed === true,
     confirmed_at: row.confirmed_at ?? null,
   };
@@ -376,6 +402,42 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
       return row ? toContact(row) : null;
     },
 
+    async upsertClaimIntake(p) {
+      const { data, error } = await db.rpc("upsert_claim_intake", {
+        p_call_key: p.callKey,
+        p_kind: p.kind,
+        p_claim_type: p.claimType,
+        p_loss_date: p.lossDate,
+        p_summary: p.summary,
+        p_description: p.description,
+        p_customer_id: p.customerId,
+      }).abortSignal(signal());
+      if (error) fail("upsertClaimIntake", error);
+      return toIntake(firstRow("upsertClaimIntake", data));
+    },
+
+    async fileClaimIntake(callKey) {
+      const { data, error } = await db.rpc("file_claim_intake_once", { p_call_key: callKey }).abortSignal(signal());
+      if (error) fail("fileClaimIntake", error);
+      // one row: the intake (a composite, as a nested object) and whether this call filed it
+      const row = rows<any>(data)[0];
+      return row?.intake ? { intake: toIntake(row.intake), filedNow: row.filed_now === true } : null;
+    },
+
+    async rejectClaimIntake(callKey) {
+      const { data, error } = await db.rpc("reject_claim_intake", { p_call_key: callKey }).abortSignal(signal());
+      if (error) fail("rejectClaimIntake", error);
+      const row = rows<any>(data)[0];
+      return row ? toIntake(row) : null;
+    },
+
+    async getClaimIntake(callKey) {
+      const { data, error } = await db.from("claim_intakes").select(INTAKE_COLUMNS).eq("call_key", callKey)
+        .abortSignal(signal()).maybeSingle();
+      if (error) fail("getClaimIntake", error);
+      return data ? toIntake(data) : null;
+    },
+
     async priorInteractions(customerId, excludeCallKey, limit) {
       const { data, error } = await db.from("call_interactions").select("vapi_call_id, started_at, summary")
         .eq("customer_id", customerId)
@@ -454,25 +516,32 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
       if (pruned.error) fail("captureWebhook.prune", pruned.error);
     },
 
-    async enqueueOutbox(kind, refId, destination = "airtable") {
-      const { error } = await db.rpc("enqueue_outbox", { p_kind: kind, p_ref_id: refId, p_destination: destination })
-        .abortSignal(signal());
+    async enqueueOutbox(kind, refId, destination = "airtable", delayS = 0) {
+      const { error } = await db.rpc("enqueue_outbox", {
+        p_kind: kind,
+        p_ref_id: refId,
+        p_destination: destination,
+        p_delay_s: delayS,
+      }).abortSignal(signal());
       if (error) fail("enqueueOutbox", error);
     },
 
-    async claimOutbox(limit: number, ref?: OutboxRef) {
+    async claimOutbox(limit: number, ref?: OutboxRef, destination?) {
       // Not claim_outbox (0005): its row locks end with its own statement, so a row in flight could
-      // be claimed again at once. Here the head of the queue is read, the rows inside a lease are
-      // passed over, and each claim is a compare-and-set on attempts and updated_at, which
-      // touch_updated_at moves on every write: of two runners only one can take a row.
+      // be claimed again at once. Here the head of the queue is read, the rows inside a lease or not
+      // yet due are passed over, and each claim is a compare-and-set on attempts and updated_at,
+      // which touch_updated_at moves on every write: of two runners only one can take a row.
       if (!Number.isInteger(limit)) throw new Error("store.claimOutbox: 22P02 limit must be an integer");
+      const nowMs = Date.now();
+      // Rows deferred well past now stay out of the window, so a backlog of them never hides a due row.
       let query = db.from("outbox_events").select(OUTBOX_COLUMNS).is("delivered_at", null)
-        .lt("attempts", OUTBOX_MAX_ATTEMPTS);
+        .lt("attempts", OUTBOX_MAX_ATTEMPTS)
+        .lte("next_attempt_at", new Date(nowMs + OUTBOX_DUE_SLACK_MS).toISOString());
       if (ref) query = query.eq("kind", ref.kind).eq("ref_id", ref.refId).eq("destination", ref.destination);
+      else if (destination) query = query.eq("destination", destination);
       const { data, error } = await query.order("created_at", { ascending: true }).order("id", { ascending: true })
         .limit(OUTBOX_CANDIDATES).abortSignal(signal());
       if (error) fail("claimOutbox", error);
-      const nowMs = Date.now();
       const due = rows<any>(data).map(toOutboxRow).filter((r) => outboxClaimable(r, nowMs));
       const claimed: OutboxRow[] = [];
       for (const c of due) {
@@ -497,12 +566,28 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
       else if (!result.delivered && result.refund && typeof result.attempt === "number") {
         patch.attempts = Math.max(result.attempt - 1, 0);
       }
+      const wait = result.retryAfterS;
+      if (!result.delivered && !result.dead && typeof wait === "number" && Number.isFinite(wait) && wait > 0) {
+        patch.next_attempt_at = new Date(Date.now() + Math.ceil(wait) * 1000).toISOString();
+      }
       let query = db.from("outbox_events").update(patch).eq("id", id);
       if (typeof result.attempt === "number") query = query.eq("attempts", result.attempt);
       if (typeof result.claimedAt === "string") query = query.eq("updated_at", result.claimedAt);
       const { data, error } = await query.select("id").abortSignal(signal());
       if (error) fail("finishOutbox", error);
       return rows(data).length > 0;
+    },
+
+    async saveOutboxProgress(id, patch, guard) {
+      const { data, error } = await db.rpc("save_outbox_progress", {
+        p_id: id,
+        p_patch: patch,
+        p_attempts: guard.attempt,
+        p_claimed_at: guard.claimedAt,
+      }).abortSignal(signal());
+      if (error) fail("saveOutboxProgress", error);
+      const row = rows<{ saved_at: string; held: boolean }>(data)[0];
+      return row ? { savedAt: row.saved_at, held: row.held === true } : null;
     },
 
     async getInteractionForMirror(vapiCallId) {
@@ -512,20 +597,31 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
       return (data as InteractionForMirror | null) ?? null;
     },
 
-    async listOutboxGaps(fromIso, toIso) {
+    async getInteractionForGhl(vapiCallId) {
+      const { data, error } = await db.from("call_interactions").select(GHL_COLUMNS.join(", "))
+        .eq("vapi_call_id", vapiCallId).abortSignal(signal()).maybeSingle();
+      if (error) fail("getInteractionForGhl", error);
+      return (data as InteractionForGhl | null) ?? null;
+    },
+
+    async listOutboxGaps(fromIso, toIso, destination = "airtable") {
       // PostgREST has no anti-join: the window's ended calls, then their outbox rows by key.
-      const ended = await readPages<{ vapi_call_id: string; updated_at: string }>("listOutboxGaps", () =>
-        db.from("call_interactions").select("vapi_call_id, updated_at").gte("ended_at", fromIso).lt("ended_at", toIso)
-          .order("ended_at", { ascending: true }).order("id", { ascending: true }));
+      const ended = await readPages<{ vapi_call_id: string; updated_at: string }>(
+        "listOutboxGaps",
+        () =>
+          db.from("call_interactions").select("vapi_call_id, updated_at").gte("ended_at", fromIso).lt("ended_at", toIso)
+            .order("ended_at", { ascending: true }).order("id", { ascending: true }),
+      );
       const queued = new Map<string, { delivered_at: string | null }>();
       for (const part of chunks(ended.map((r) => r.vapi_call_id), KEYS_PER_FILTER)) {
         const { data, error } = await db.from("outbox_events").select("ref_id, delivered_at")
-          .eq("kind", "interaction.completed").eq("destination", "airtable").in("ref_id", part).abortSignal(signal());
+          .eq("kind", "interaction.completed").eq("destination", destination).in("ref_id", part)
+          .abortSignal(signal());
         if (error) fail("listOutboxGaps", error);
         for (const r of rows<{ ref_id: string; delivered_at: string | null }>(data)) queued.set(r.ref_id, r);
       }
-      return ended.filter((r) => outboxGap(r.updated_at, queued.get(r.vapi_call_id))).map((r) => r.vapi_call_id)
-        .slice(0, JOB_LIST_LIMIT);
+      return ended.filter((r) => outboxGap(r.updated_at, queued.get(r.vapi_call_id), destination))
+        .map((r) => r.vapi_call_id).slice(0, JOB_LIST_LIMIT);
     },
 
     async claimJobRun(job, periodKey) {
@@ -576,12 +672,18 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
     },
 
     async digestStats(fromIso, toIso) {
-      const calls = readPages<DigestCallRow>("digestStats", () =>
-        db.from("call_interactions").select(DIGEST_COLUMNS).gte("created_at", fromIso).lt("created_at", toIso)
-          .order("id", { ascending: true }));
-      const escalations = readPages<{ status: string }>("digestStats", () =>
-        db.from("escalations").select("status").gte("created_at", fromIso).lt("created_at", toIso)
-          .order("id", { ascending: true }));
+      const calls = readPages<DigestCallRow>(
+        "digestStats",
+        () =>
+          db.from("call_interactions").select(DIGEST_COLUMNS).gte("created_at", fromIso).lt("created_at", toIso)
+            .order("id", { ascending: true }),
+      );
+      const escalations = readPages<{ status: string }>(
+        "digestStats",
+        () =>
+          db.from("escalations").select("status").gte("created_at", fromIso).lt("created_at", toIso)
+            .order("id", { ascending: true }),
+      );
       const emails = db.from("emails").select("id", { count: "exact", head: true }).eq("status", "sent")
         .gte("created_at", fromIso).lt("created_at", toIso).abortSignal(signal());
       const [callRows, escalationRows, sent] = await Promise.all([calls, escalations, emails]);

@@ -1,11 +1,11 @@
 import { dayKeysInRange, type DateRange } from "@/lib/dates";
-import { etDayKey, formatDayKey, HUED_OUTCOMES, OUTCOME_META, OUTCOME_ORDER, SENTIMENT_META } from "@/lib/format";
-import type { CallsByDayRow, DashboardMetrics } from "@/lib/types";
+import { callReasonMeta, etDayKey, formatDayKey, HUED_OUTCOMES, OUTCOME_META, OUTCOME_ORDER, SENTIMENT_META } from "@/lib/format";
+import { CALL_REASONS, type CallReasonCount, type CallsByDayRow, type DashboardMetrics } from "@/lib/types";
 
 /*
  * Pure shaping for the Overview page. Every number is aggregated in SQL (dashboard_metrics,
- * calls_by_day); this module only coerces types, fills zero days and orders series so colors
- * follow the outcome, never its rank.
+ * calls_by_day, call_reason_counts); this module only coerces types, fills zero days and orders
+ * series so colors follow the outcome, never its rank.
  */
 
 export type OutcomeKey = (typeof OUTCOME_ORDER)[number];
@@ -288,6 +288,55 @@ export function buildSentimentMix(sentiments: Record<string, number>): Sentiment
     rated,
     unrated,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Top call reasons (horizontal bars)
+// ---------------------------------------------------------------------------------------------
+
+export interface ReasonRow {
+  key: string;
+  label: string;
+  description: string;
+  value: number;
+  /** 0..1 of calls that have a reason. */
+  share: number;
+}
+
+export interface ReasonMix {
+  /** Reasons with at least one call, most first (ties in CALL_REASONS order). */
+  rows: ReasonRow[];
+  tagged: number;
+  /** Calls in range with no reason yet (in progress or untagged); null when the call total is unknown. */
+  untagged: number | null;
+}
+
+function reasonOrder(key: string): number {
+  const i = (CALL_REASONS as readonly string[]).indexOf(key);
+  return i === -1 ? CALL_REASONS.length : i;
+}
+
+/**
+ * Ranked rows from call_reason_counts. Every bar is one hue (it is one measure across
+ * categories), so ranking by size never repaints anything. `calls` is dashboard_metrics' count
+ * for the same range, which gives the calls still without a reason.
+ */
+export function buildReasonMix(counts: readonly CallReasonCount[], calls?: number | null): ReasonMix {
+  const merged = new Map<string, number>();
+  for (const c of counts) {
+    const n = num(c.calls);
+    if (!c.call_reason || n <= 0) continue;
+    merged.set(c.call_reason, (merged.get(c.call_reason) ?? 0) + n);
+  }
+  const tagged = [...merged.values()].reduce((s, n) => s + n, 0);
+  const rows = [...merged.entries()]
+    .sort(([a, x], [b, y]) => y - x || reasonOrder(a) - reasonOrder(b) || (a < b ? -1 : 1))
+    .map(([key, value]) => {
+      const meta = callReasonMeta(key)!;
+      return { key, label: meta.label, description: meta.description, value, share: tagged > 0 ? value / tagged : 0 };
+    });
+  const untagged = typeof calls === "number" && Number.isFinite(calls) ? Math.max(0, calls - tagged) : null;
+  return { rows, tagged, untagged };
 }
 
 // ---------------------------------------------------------------------------------------------

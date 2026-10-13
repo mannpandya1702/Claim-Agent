@@ -123,11 +123,35 @@ describe("Ops", () => {
     expect(within(airtable).getByText("2 failed")).toBeInTheDocument();
   });
 
+  it("splits the outbox by destination once ops_health carries GoHighLevel's counts", async () => {
+    m.fetchOpsHealth.mockResolvedValue({
+      ...HEALTH,
+      last_outbox_run: ago(1),
+      outbox_pending: 0,
+      outbox_dead: 0,
+      outbox_delivered_24h: 9,
+      ghl_pending: "1",
+      ghl_dead: "2",
+      ghl_delivered_24h: "6",
+    });
+    renderOps();
+    await waitFor(() => expect(tile("GoHighLevel backlog").value).toBe("1"));
+    expect(tile("GoHighLevel backlog").tone).toBe("warning");
+    expect(tile("GoHighLevel failures").value).toBe("2");
+    expect(tile("GoHighLevel failures").tone).toBe("critical");
+    expect(tile("Outbox failures").tone).toBe("good");
+    const ghl = await screen.findByRole("region", { name: "GoHighLevel CRM" });
+    expect(within(ghl).getByRole("img")).toHaveAccessibleName("GoHighLevel CRM: 6 delivered, 2 failed, 1 pending, of 9");
+    expect(within(screen.getByRole("region", { name: "Airtable call log" })).getByText("All delivered")).toBeInTheDocument();
+  });
+
   it("leaves the outbox out until ops_health carries it", async () => {
     renderOps();
     await waitFor(() => expect(tile("Open escalations").value).toBe("2"));
     expect(screen.queryByText("Outbox backlog", { selector: "dt" })).not.toBeInTheDocument();
+    expect(screen.queryByText("GoHighLevel backlog", { selector: "dt" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Airtable call log" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "GoHighLevel CRM" })).not.toBeInTheDocument();
   });
 
   it("asks escalation_delivery_gap for 24 hours and prints every count beside the meter", async () => {

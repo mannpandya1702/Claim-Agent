@@ -14,6 +14,8 @@ export const env = {
   assistantSoloId: clean(import.meta.env.VITE_ASSISTANT_SOLO_ID),
   squadId: clean(import.meta.env.VITE_SQUAD_ID),
   phoneNumber: clean(import.meta.env.VITE_PHONE_NUMBER),
+  /** GoHighLevel location (sub-account) id for the call page's contact link; the link hides without it. */
+  ghlLocationId: clean(import.meta.env.VITE_GHL_LOCATION_ID),
   buildSha: clean(import.meta.env.VITE_BUILD_SHA),
 } as const;
 

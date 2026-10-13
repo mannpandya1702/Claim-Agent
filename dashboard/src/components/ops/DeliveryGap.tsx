@@ -1,4 +1,4 @@
-import { CircleCheck, CircleDashed, Mail, OctagonAlert, Send, Table2, TriangleAlert, type LucideIcon } from "lucide-react";
+import { CircleCheck, CircleDashed, Contact, Mail, OctagonAlert, Send, Table2, TriangleAlert, type LucideIcon } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatCount } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -17,7 +17,7 @@ const FAILED = "var(--status-critical)";
 const PENDING = "color-mix(in oklab, var(--series-1) 30%, var(--card))";
 const EMPTY = "var(--muted)";
 
-const CHANNEL_ICONS: Record<string, LucideIcon> = { telegram: Send, email: Mail, airtable: Table2 };
+const CHANNEL_ICONS: Record<string, LucideIcon> = { telegram: Send, email: Mail, airtable: Table2, ghl: Contact };
 
 const TONE_STYLE: Record<ChannelTone, { icon: LucideIcon; ink: string }> = {
   good: { icon: CircleCheck, ink: "text-good-ink" },

@@ -8,7 +8,7 @@
 //   deno task battery --list               persona ids
 //   deno task battery --dry-run            build every first request offline and print the plan
 //
-// Options: --cap <conversations> (default 60, a hard ceiling checked before anything is spent),
+// Options: --cap <conversations> (default 90, a hard ceiling checked before anything is spent),
 // --concurrency <k> (default 3). Every chat is named "INTERNAL ...", every number is a 555 number,
 // and a one-turn 402 probe runs first: an empty wallet halts the run before any persona starts.
 // The JSON report lands in fixtures/raw/battery/ (gitignored).
@@ -18,6 +18,7 @@
 // depends on the state at the start of the turn and on the arguments the model passes.
 
 import {
+  CLAIM_TYPES,
   type Code,
   INFO_EMAIL_TOPICS,
   MODEL_ESCALATION_REASONS,
@@ -36,11 +37,23 @@ import {
   parseDobParts,
   step,
 } from "../supabase/functions/vapi-webhook/identity.ts";
+import { parseLossDate } from "../supabase/functions/vapi-webhook/loss_date.ts";
 import { verifiedSentence } from "../supabase/functions/vapi-webhook/prior_contacts.ts";
-import { claimsSentence, sentenceFor } from "../supabase/functions/vapi-webhook/speak.ts";
+import {
+  claimsSentence,
+  MAX_SPOKEN_CHARS,
+  numberToWords,
+  sentenceFor,
+  speakDate,
+  speakLossDate,
+  verifiedFileClaimSentence,
+  verifiedStatusSentence,
+  withoutTrailingQuestion,
+} from "../supabase/functions/vapi-webhook/speak.ts";
 import type {
   AttemptRow,
   Claim,
+  ClaimIntake,
   Customer,
   EmailRow,
   EscalationRow,
@@ -51,7 +64,7 @@ import { vapiClient, VapiError } from "./lib/vapi.ts";
 import { deepMerge, loadVariant, paths, promptPath, renderPrompt, sha256Hex } from "./render.ts";
 
 export const ASSISTANT_KEY = "solo-core" as const;
-export const DEFAULTS = { n: 3, cap: 75, concurrency: 3 };
+export const DEFAULTS = { n: 3, cap: 90, concurrency: 3 };
 const MAX_N = 20;
 const MAX_CONCURRENCY = 6;
 // A conversation never needs more requests than turns plus confirmations; this bounds a runaway.
@@ -159,11 +172,31 @@ export interface MockPlan {
     match: MockResult;
     wrong: MockResult;
     unreadable: MockResult;
+    // verified with an intent: the opening that leads into the claim, or the claims read in the same call
+    intents: Record<string, MockResult>;
   };
   callback?: { known: Record<string, MockResult>; other: MockResult; none: MockResult };
   topic?: { known: Record<string, MockResult>; other: MockResult };
   contact?: ContactPlan;
   confirm?: { yes: MockResult; no: MockResult; bad: MockResult };
+  claim?: ClaimPlan;
+}
+
+/** start_claim answers. The gate (who may file, or a claim already filed) comes from the state at the
+ *  start of the turn; the read-back is composed from the arguments. A VAPI code tool cannot import
+ *  loss_date.ts, so the dates the server would read are worked out here, by the real parser, for the
+ *  phrases a caller or the model is likely to say (lossDateCandidates), keyed by datePhraseKey; any
+ *  other phrase is answered as unreadable, and advance() names it if the server would have read it. */
+export interface ClaimPlan {
+  gate: MockResult | null;
+  types: string[];
+  dates: Record<string, string>; // datePhraseKey(phrase) -> YYYY-MM-DD, or "!future" / "!too_old"
+  spoken: Record<string, string>; // YYYY-MM-DD -> "Saturday, October tenth" (the year when not this year)
+  badArgs: MockResult;
+  needsDescription: MockResult;
+  badDate: MockResult;
+  tooOld: MockResult;
+  requestId: string;
 }
 
 /** capture_contact answers. A read-back needs the spoken name, address and number, so the ones a
@@ -192,16 +225,36 @@ export interface SimContact {
   confirmed: boolean;
 }
 
+/** The call's claim_intakes row as the server would hold it. number: the claim number filing drew. */
+export interface SimIntake {
+  kind: "claim" | "lead_intake";
+  claimType: string;
+  lossDate: string;
+  confirmed: boolean;
+  number: string | null;
+}
+
 export interface SimState {
   identity: IdentityState;
   escalated: boolean;
   emailed: string[];
   contact: SimContact | null;
+  intake: SimIntake | null;
+  startCodes: string[]; // every code start_claim answered on the call, as the attempts ledger holds them
 }
 
 export function initialState(): SimState {
-  return { identity: initialIdentity(), escalated: false, emailed: [], contact: null };
+  return { identity: initialIdentity(), escalated: false, emailed: [], contact: null, intake: null, startCodes: [] };
 }
+
+// tools.ts VERIFY_RESUME_CODES / CONTACT_RESUME_CODES: the loss was told to a start_claim that sent the
+// caller to verify or give their details first, so the next yes takes it down from what was said.
+const VERIFY_RESUME = ["claim_needs_verification", "claim_needs_lookup"];
+const CONTACT_RESUME = ["claim_needs_contact", "claim_needs_lookup", "claim_needs_phone"];
+const resumes = (ctx: PlanCtx, codes: string[]) => ctx.state.startCodes.some((c) => codes.includes(c));
+
+// The number a filed claim gets in the battery (file_claim_intake draws one at random).
+export const SIM_CLAIM_NUMBER = "CLM-260472";
 
 /** Contact details a persona gives on the call (a verified caller's name comes from the account). */
 export interface ScriptedContact {
@@ -217,6 +270,8 @@ export interface PersonaOptions {
   priorCalls?: PriorInteraction[];
   /** Details the caller spells, so the mock can read them back with the real sentence. */
   contacts?: ScriptedContact[];
+  /** How the caller says when a loss happened, so the mock reads those phrases exactly as the server. */
+  lossDates?: string[];
 }
 
 export interface PlanCtx {
@@ -259,6 +314,33 @@ function verifiedAnswer(ctx: PlanCtx, customerId: string | null): MockResult {
   return result(ctx, "verified", first ? { first_name: first } : undefined, sentence);
 }
 
+/** tools.ts verifyIdentity with an intent: file_claim replaces the closing question with the start of
+ *  the claim (or, when a start_claim already sent the caller here, whether to take it down now);
+ *  claim_status reads the claims in the same call (chainedStatus), in what is left of the spoken limit
+ *  after the opening, and falls back to the plain answer when it cannot fit. */
+function intentAnswers(ctx: PlanCtx, customerId: string | null): Record<string, MockResult> {
+  const plain = verifiedAnswer(ctx, customerId);
+  if (!customerId) return {};
+  const claims = claimsOf(customerId);
+  const room = MAX_SPOKEN_CHARS - withoutTrailingQuestion(plain.message).length - 1;
+  const status = claims.length === 0 ? sentenceFor("no_claims") : claimsSentence(claims, todayNY(ctx.now), room);
+  const chained = verifiedStatusSentence(plain.message, status);
+  const data = {
+    ...(plain.data ?? {}),
+    status_read: true,
+    claims: claims.map((c) => ({ claim_number_last3: c.claim_number.replace(/\D/g, "").slice(-3), status: c.status })),
+  };
+  return {
+    file_claim: result(
+      ctx,
+      "verified",
+      plain.data,
+      verifiedFileClaimSentence(plain.message, resumes(ctx, VERIFY_RESUME)),
+    ),
+    claim_status: chained.length <= MAX_SPOKEN_CHARS ? result(ctx, "verified", data, chained) : plain,
+  };
+}
+
 function verifyPlan(ctx: PlanCtx): MockPlan {
   const s = ctx.state.identity;
   const candidate = customerById(s.candidate);
@@ -267,6 +349,7 @@ function verifyPlan(ctx: PlanCtx): MockPlan {
     return next.code === "verified" ? verifiedAnswer(ctx, next.state.verified) : result(ctx, next.code);
   };
   const [y, m, d] = (candidate?.date_of_birth ?? "0-0-0").split("-").map(Number);
+  const matched = step(s, { type: "dob", valid: true, matches: true });
   return {
     dob: {
       m,
@@ -276,6 +359,7 @@ function verifyPlan(ctx: PlanCtx): MockPlan {
       match: answer(true, true),
       wrong: answer(true, false),
       unreadable: answer(false, false),
+      intents: matched.code === "verified" ? intentAnswers(ctx, matched.state.verified) : {},
     },
   };
 }
@@ -415,8 +499,9 @@ function confirmPlan(ctx: PlanCtx): MockPlan {
       : result(ctx, "not_pending");
     return { confirm: { yes: none, no: none, bad } };
   }
+  const resume = resumes(ctx, CONTACT_RESUME) ? { resume_claim: true } : {};
   const yes = c.kind === "new_customer"
-    ? result(ctx, "contact_saved_new", { first_name: c.first, has_email: c.email !== null })
+    ? result(ctx, "contact_saved_new", { first_name: c.first, has_email: c.email !== null, ...resume })
     : result(ctx, "contact_saved_existing", { first_name: c.first });
   const no = c.kind === "new_customer"
     ? result(ctx, "contact_retry", { has_email: c.email !== null, has_phone: c.phone !== null })
@@ -447,6 +532,230 @@ function newCallerSteps(ctx: PlanCtx): MockResult {
   return result(ctx, "email_sent", { target: "given" });
 }
 
+// ---------------------------------------------------------------------------------------------
+// Reporting a loss (start_claim, confirm_claim).
+// ---------------------------------------------------------------------------------------------
+/** loss_date.ts clean() for the mock's lookup key: lower case, accents folded, punctuation that is not
+ *  part of a date dropped, fillers and hedges ("it happened on", "I think") and a trailing clock time
+ *  removed.
+ *  Self-contained, because mockCode embeds its source. */
+export function datePhraseKey(v: unknown): string {
+  if (typeof v !== "string" || v.length > 120) return "";
+  let t = v.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/[\u2010-\u2015]/g, "-")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/\b([ap])\.\s?m\.?/g, "$1m")
+    .replace(/(\d)\s*([/-])\s*(?=\d)/g, "$1$2")
+    .replace(/(\d)\.(?=\d{1,2}\b)/g, "$1/")
+    .replace(/[^a-z0-9/:' -]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const filler =
+    /^(?:um+|uh+|uhm|erm?|hmm+|oh|ok|okay|well|so|like|it (?:was|happened|all happened)|this (?:was|happened)|that (?:was|happened)|happened|i(?:'m| am) not (?:totally |entirely |completely |a hundred percent )?sure|im not sure|not sure|i don't know|i dont know|i(?:'m| am) (?:pretty )?sure|i think|i believe|i guess|i(?:'d| would) say|id say|i want to say|my best guess is|best guess|maybe|probably|sometime|back|around|about|approximately|roughly|early|late|on|it's|its|was)\s+/;
+  const trailing =
+    /\s+(?:i think|i believe|i guess|i(?:'m| am) (?:pretty )?sure|i(?:'m| am) not (?:totally |entirely |completely )?sure|im not sure|not sure|maybe|probably|or so|or something|if i remember(?: right| correctly)?|i want to say)$/;
+  const clock =
+    /\s+(?:at|around|about|by|near|roughly)(?:\s+(?:around|about|roughly))?\s+(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon|midnight|night)(?:\s+or so)?$/;
+  for (let i = 0; i < 6; i++) {
+    const before = t;
+    t = t.replace(filler, "").replace(trailing, "").replace(clock, "").trim();
+    if (t === before) break;
+  }
+  return t;
+}
+
+/** The summary as start_claim's read-back says it (tools.ts cleanSummary, then speak.ts
+ *  readbackSummary), for the plain ASCII a model writes: "my" and "our" said as "your", and "" when
+ *  the read-back leaves it out (first person included). A phrase
+ *  with figures is left out here (the server says them as words). Self-contained, like datePhraseKey. */
+export function readbackPhrase(raw: unknown, type: string): string {
+  if (typeof raw !== "string") return "";
+  const text = raw.replace(/[\u2018\u2019]/g, "'").replace(/[^A-Za-z0-9 ',-]+/g, " ").replace(/\s+/g, " ")
+    .replace(/^[\s,'-]+|[\s,'-]+$/g, "")
+    .replace(/\b(?:my|our)\b/gi, (w) => (w[0] === "M" || w[0] === "O" ? "Your" : "your"));
+  if (!text || text.split(" ").length > 8 || text.length > 80 || !/[A-Za-z]/.test(text)) return "";
+  // the caller's first person is never said as Ava's own (tools.ts FIRST_PERSON)
+  if (/\b(?:i(?!-\d)|me|we|us|mine|myself|ours|ourselves|i'm|i've|i'd|i'll|we're|we've|we'd|we'll)\b/i.test(text)) {
+    return "";
+  }
+  if (/\d/.test(text) || /\b(null|undefined|json|data)\b/i.test(text)) return "";
+  // the stored stand-in for a missing summary is the type's own label, which the read-back never says
+  if (text === `${type.charAt(0).toUpperCase()}${type.slice(1)} claim`) return "";
+  const phrase = /^[A-Z][A-Z]/.test(text) ? text : text.charAt(0).toLowerCase() + text.slice(1);
+  return phrase.replace(/[\s.,:;!?-]+$/, "");
+}
+
+const MONTH_NAMES = "january february march april may june july august september october november december".split(" ");
+const WEEKDAY_NAMES = "sunday monday tuesday wednesday thursday friday saturday".split(" ");
+const DAY_MS = 86_400_000;
+
+function ordinalSuffix(d: number): string {
+  if (d % 100 >= 11 && d % 100 <= 13) return "th";
+  return ["th", "st", "nd", "rd"][d % 10] ?? "th";
+}
+
+/** The ways a calendar date is commonly said or written ("October 10th", "the tenth of October",
+ *  "10/10", "2026-10-10", "Saturday, October tenth"), as phrases for the parser. */
+function explicitDatePhrases(iso: string): string[] {
+  const [y, m, d] = iso.split("-").map(Number);
+  const month = MONTH_NAMES[m - 1];
+  const abbr = month.slice(0, 3);
+  const weekday = WEEKDAY_NAMES[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+  const nth = `${d}${ordinalSuffix(d)}`;
+  const word = speakDate(`2026-01-${String(d).padStart(2, "0")}`).split(" ").slice(1).join(" ").toLowerCase();
+  const words = [...new Set([word, word.replace("-", " ")])];
+  return [
+    `${month} ${d}`,
+    `${month} ${nth}`,
+    `${month} the ${nth}`,
+    `${abbr} ${d}`,
+    `${abbr} ${nth}`,
+    `the ${nth} of ${month}`,
+    `${nth} of ${month}`,
+    `${month} ${d} ${y}`,
+    `${month} ${nth} ${y}`,
+    `${m}/${d}`,
+    `${m}/${d}/${y}`,
+    iso,
+    `the ${nth}`,
+    `${weekday} ${month} ${nth}`,
+    `${weekday} ${month} ${d}`,
+    ...words.flatMap((w) => [
+      `${month} ${w}`,
+      `${month} the ${w}`,
+      `the ${w} of ${month}`,
+      `${month} ${w} ${y}`,
+      `the ${w}`,
+      `${weekday} ${month} ${w}`,
+    ]),
+  ];
+}
+
+/** Date phrases the mock can read: relative days, weekdays, counts of days and weeks, every common
+ *  form of the last ten days' dates, and the persona's own phrases with every form of their dates. */
+export function lossDateCandidates(now: Date, extra: string[] = []): string[] {
+  const relative = [
+    "today",
+    "tonight",
+    "earlier today",
+    "just now",
+    "this morning",
+    "this afternoon",
+    "this evening",
+    "yesterday",
+    "last night",
+    "last evening",
+    "yesterday morning",
+    "yesterday afternoon",
+    "yesterday evening",
+    "yesterday night",
+    "the day before yesterday",
+    "day before yesterday",
+    "the night before last",
+    "night before last",
+    "last weekend",
+    "this past weekend",
+    "past weekend",
+    "over the weekend",
+    "the weekend",
+  ];
+  const counts = Array.from({ length: 14 }, (_, i) => i + 1).flatMap((n) => {
+    const unit = n === 1 ? "day" : "days";
+    const nights = n === 1 ? "night" : "nights";
+    return [`${n} ${unit} ago`, `${numberToWords(n)} ${unit} ago`, `${numberToWords(n)} ${nights} ago`];
+  });
+  const weeks = ["a day ago", "a week ago", "1 week ago", "one week ago"].concat(
+    [2, 3, 4].flatMap((n) => [`${n} weeks ago`, `${numberToWords(n)} weeks ago`]),
+    ["a couple days ago", "a couple of days ago", "a couple nights ago", "a couple of nights ago"],
+    ["a couple weeks ago", "a couple of weeks ago"],
+  );
+  const weekdays = ["", "last ", "this past ", "past ", "this "].flatMap((p) => WEEKDAY_NAMES.map((w) => `${p}${w}`));
+  const today = todayNY(now);
+  const todayMs = Date.parse(`${today}T00:00:00Z`);
+  const recent = Array.from({ length: 11 }, (_, i) => new Date(todayMs - i * DAY_MS).toISOString().slice(0, 10));
+  const theirs = extra.map((e) => parseLossDate(e, now)).flatMap((r) => ("date" in r ? [r.date] : []));
+  const dates = [...new Set([...recent, ...theirs])].flatMap(explicitDatePhrases);
+  return [...new Set([...relative, ...counts, ...weeks, ...weekdays, ...dates, ...extra])];
+}
+
+/** tools.ts claimGate, then the filed-claim check: who may report a loss on this call. */
+function claimGate(ctx: PlanCtx): { gate: MockResult | null; kind: SimIntake["kind"] | null } {
+  const s = ctx.state.identity;
+  let kind: SimIntake["kind"] | null = null;
+  if (s.level === "locked") return { gate: result(ctx, "claim_locked"), kind };
+  if (s.level === "phone_found") return { gate: result(ctx, "claim_needs_verification"), kind };
+  if (s.level === "verified") kind = "claim";
+  else if (ctx.state.contact?.kind === "new_customer" && ctx.state.contact.confirmed) kind = "lead_intake";
+  // a lookup hit leaves the level at phone_found, so at level none every counted lookup was a miss
+  else return { gate: result(ctx, s.misses > 0 ? "claim_needs_contact" : "claim_needs_lookup"), kind };
+  const intake = ctx.state.intake;
+  if (intake?.confirmed) return { gate: alreadyFiled(ctx, intake), kind };
+  // a new caller's intake promises a call: a chat has no caller id, so only a number they said counts
+  if (kind === "lead_intake" && !ctx.state.contact?.phone) return { gate: result(ctx, "claim_needs_phone"), kind };
+  return { gate: null, kind };
+}
+
+function alreadyFiled(ctx: PlanCtx, intake: SimIntake): MockResult {
+  const last3 = (intake.number ?? "").replace(/\D/g, "").slice(-3);
+  return last3 ? result(ctx, "claim_already_filed", { claim_last3: last3 }) : result(ctx, "claim_already_filed");
+}
+
+function claimPlan(ctx: PlanCtx): MockPlan {
+  const dates: Record<string, string> = {};
+  for (const phrase of lossDateCandidates(ctx.now, ctx.persona.lossDates ?? [])) {
+    const read = parseLossDate(phrase, ctx.now);
+    const key = datePhraseKey(phrase);
+    if (!key) continue;
+    if ("date" in read) dates[key] = read.date;
+    else if (read.error !== "unreadable") dates[key] = `!${read.error}`;
+  }
+  const year = Number(todayNY(ctx.now).slice(0, 4));
+  const spoken: Record<string, string> = {};
+  for (const iso of new Set(Object.values(dates).filter((v) => !v.startsWith("!")))) {
+    spoken[iso] = speakLossDate(iso, year);
+  }
+  return {
+    claim: {
+      gate: claimGate(ctx).gate,
+      types: [...CLAIM_TYPES],
+      dates,
+      spoken,
+      badArgs: result(ctx, "bad_args"),
+      needsDescription: result(ctx, "claim_needs_description"),
+      // the second date on the call it cannot read offers a specialist (tools.ts badDate)
+      badDate: result(ctx, ctx.state.startCodes.includes("claim_bad_date") ? "claim_date_help" : "claim_bad_date"),
+      tooOld: result(ctx, "claim_too_old"),
+      requestId: ctx.requestId,
+    },
+  };
+}
+
+/** confirm_claim: nothing to file, a no (the intake stays unfiled for the corrected start_claim), or a
+ *  yes that files it: a verified customer's claim with its number, or a new caller's details for a
+ *  specialist. "emailed" stands where the server would have an address to send the confirmation to. */
+function claimConfirmPlan(ctx: PlanCtx): MockPlan {
+  const intake = ctx.state.intake;
+  const bad = result(ctx, "bad_args");
+  if (!intake) {
+    const none = result(ctx, "claim_not_pending");
+    return { confirm: { yes: none, no: none, bad } };
+  }
+  if (intake.confirmed) {
+    const filed = alreadyFiled(ctx, intake);
+    return { confirm: { yes: filed, no: filed, bad } };
+  }
+  let yes: MockResult;
+  if (intake.kind === "lead_intake") {
+    const c = ctx.state.contact;
+    yes = result(ctx, "claim_intake_saved", { first_name: c?.first ?? "", emailed: !!c?.email });
+  } else {
+    const customer = customerById(ctx.state.identity.verified);
+    const last3 = SIM_CLAIM_NUMBER.slice(-3);
+    yes = result(ctx, "claim_filed", { claim_last3: last3, emailed: !!customer?.email });
+  }
+  return { confirm: { yes, no: result(ctx, "claim_retry"), bad } };
+}
+
 export function mockPlan(tool: string, ctx: PlanCtx): MockPlan {
   switch (tool) {
     case "lookup_customer":
@@ -465,15 +774,79 @@ export function mockPlan(tool: string, ctx: PlanCtx): MockPlan {
       return contactPlan(ctx);
     case "confirm_contact":
       return confirmPlan(ctx);
+    case "start_claim":
+      return claimPlan(ctx);
+    case "confirm_claim":
+      return claimConfirmPlan(ctx);
     default:
       throw new Error(`no mock for tool ${tool}`);
   }
 }
 
 /** The code tool body VAPI runs: `args` holds the model's arguments; the return value is the result.
- *  The checks mirror identity.ts normalisePhone / parseDobParts / normaliseEmail / normaliseName
- *  closely enough for scripted input. */
+ *  Only the branches the plan uses are sent, which keeps every request small. The checks mirror
+ *  identity.ts normalisePhone / parseDobParts / normaliseEmail / normaliseName closely enough for
+ *  scripted input. */
 export function mockCode(plan: MockPlan): string {
+  const branches: Record<Exclude<keyof MockPlan, "fixed">, string[]> = {
+    phone: [
+      `if (P.phone) { const d = digits(a.phone); r = P.phone.known[d] ?? (validPhone(d) ? P.phone.other : P.phone.invalid); }`,
+    ],
+    dob: [
+      `if (P.dob) {`,
+      `  const m = int(a.dob_month), dd = int(a.dob_day), y = int(a.dob_year);`,
+      `  let ok = m !== null && dd !== null && y !== null && y >= 1900 && y <= P.dob.maxYear && m >= 1 && m <= 12;`,
+      `  if (ok) { const t = new Date(Date.UTC(y, m - 1, dd)); ok = t.getUTCMonth() === m - 1 && t.getUTCDate() === dd; }`,
+      `  const intent = typeof a.intent === "string" ? a.intent.trim().toLowerCase() : "";`,
+      `  r = !ok ? P.dob.unreadable : m === P.dob.m && dd === P.dob.d && y === P.dob.y ? (P.dob.intents[intent] ?? P.dob.match) : P.dob.wrong;`,
+      `}`,
+    ],
+    callback: [
+      `if (P.callback) { const d = digits(a.callback_phone); r = validPhone(d) ? (P.callback.known[d] ?? P.callback.other) : P.callback.none; }`,
+    ],
+    topic: [
+      `if (P.topic) { r = P.topic.known[String(a.topic ?? "")] ?? P.topic.other; }`,
+    ],
+    contact: [
+      `if (P.contact) {`,
+      `  const C = P.contact;`,
+      `  const W = { at: "@", dot: ".", period: ".", point: ".", underscore: "_", underline: "_", dash: "-", hyphen: "-", minus: "-", plus: "+" };`,
+      `  const email = (v) => { if (typeof v !== "string") return null; const s = v.toLowerCase().replace(/\\bat the rate(?: of)?\\b|\\bat sign\\b|\\bat symbol\\b/g, " @ ").replace(/\\bfull stop\\b/g, " . ").split(/[\\s,;]+/).filter(Boolean).map((t) => W[t] ?? t).join("").replace(/^[^a-z0-9]+/, "").replace(/[^a-z0-9]+$/, ""); return /^[a-z0-9._+-]{1,64}@[a-z0-9-]+(\\.[a-z0-9-]+)*\\.[a-z]{2,24}$/.test(s) && !s.includes("..") ? s : null; };`,
+      `  const name = (v) => { if (typeof v !== "string") return null; const s = v.replace(/\\./g, " ").replace(/\\s+/g, " ").trim(); return /^[A-Za-z]+(?:[' -][A-Za-z]+)*$/.test(s) && s.length <= 40 && !C.placeholders.includes(s.toLowerCase()) ? s.toLowerCase() : null; };`,
+      `  const given = typeof a.email === "string" && a.email.trim() !== "";`,
+      `  const e = given ? email(a.email) : null;`,
+      `  const pd = digits(a.callback_phone);`,
+      `  const ph = a.callback_phone === undefined ? C.priorPhone : validPhone(pd) ? pd : "";`,
+      `  if (C.onFile) r = C.onFile;`,
+      `  else if (C.verified) r = e ? (C.known["@" + e] ?? C.other) : C.invalidEmail;`,
+      `  else { const f = name(a.first_name), l = name(a.last_name); r = !f || !l ? C.needsName : given && !e ? C.invalidEmail : (C.known[f + "|" + l + "|" + (e ?? "") + "|" + ph] ?? C.other); }`,
+      `}`,
+    ],
+    confirm: [
+      `if (P.confirm) { const c = typeof a.correct === "string" ? a.correct.trim().toLowerCase() : a.correct; r = c === true || c === "true" || c === "yes" ? P.confirm.yes : c === false || c === "false" || c === "no" ? P.confirm.no : P.confirm.bad; }`,
+    ],
+    claim: [
+      `if (P.claim) {`,
+      `  const K = P.claim;`,
+      `  const key = (${datePhraseKey.toString()})(a.loss_date);`,
+      `  const said = (${readbackPhrase.toString()});`,
+      `  const type = typeof a.claim_type === "string" ? a.claim_type.trim().toLowerCase() : "";`,
+      `  const words = typeof a.description === "string" ? a.description.split(/\\s+/).filter((w) => /[A-Za-z]/.test(w)).length : 0;`,
+      `  const date = K.dates[key] ?? K.dates[key.replace(/\\s+(?:in the |at )?(?:morning|afternoon|evening|night|overnight)$/, "").trim()];`,
+      `  if (K.gate) r = K.gate;`,
+      `  else if (!K.types.includes(type)) r = K.badArgs;`,
+      `  else if (words < 3) r = K.needsDescription;`,
+      `  else if (date === "!too_old") r = K.tooOld;`,
+      `  else if (!date || date.startsWith("!")) r = K.badDate;`,
+      `  else {`,
+      `    const summary = said(a.summary, type);`,
+      `    const message = "Let me make sure I have this right. " + (type === "auto" ? "An" : "A") + " " + type + " claim" + (summary ? ", for " + summary + "," : "") + " from " + K.spoken[date] + ". Is that correct?";`,
+      `    r = { code: "claim_readback", message, data: { claim_type: type, loss_date: date }, meta: { request_id: K.requestId } };`,
+      `  }`,
+      `}`,
+    ],
+  };
+  const used = (Object.keys(branches) as (keyof typeof branches)[]).filter((k) => plan[k] !== undefined);
   return [
     `const P = ${JSON.stringify(plan)};`,
     `const a = typeof args === "object" && args !== null ? args : {};`,
@@ -481,29 +854,7 @@ export function mockCode(plan: MockPlan): string {
     `const validPhone = (d) => d.length === 10 && !/^(\\d)\\1{9}$/.test(d) && d[0] > "1" && d[3] > "1";`,
     `const int = (v) => typeof v === "number" && Number.isInteger(v) ? v : typeof v === "string" && /^\\s*\\d{1,4}\\s*$/.test(v) ? Number(v) : null;`,
     `let r = P.fixed;`,
-    `if (P.phone) { const d = digits(a.phone); r = P.phone.known[d] ?? (validPhone(d) ? P.phone.other : P.phone.invalid); }`,
-    `if (P.dob) {`,
-    `  const m = int(a.dob_month), dd = int(a.dob_day), y = int(a.dob_year);`,
-    `  let ok = m !== null && dd !== null && y !== null && y >= 1900 && y <= P.dob.maxYear && m >= 1 && m <= 12;`,
-    `  if (ok) { const t = new Date(Date.UTC(y, m - 1, dd)); ok = t.getUTCMonth() === m - 1 && t.getUTCDate() === dd; }`,
-    `  r = !ok ? P.dob.unreadable : m === P.dob.m && dd === P.dob.d && y === P.dob.y ? P.dob.match : P.dob.wrong;`,
-    `}`,
-    `if (P.callback) { const d = digits(a.callback_phone); r = validPhone(d) ? (P.callback.known[d] ?? P.callback.other) : P.callback.none; }`,
-    `if (P.topic) { r = P.topic.known[String(a.topic ?? "")] ?? P.topic.other; }`,
-    `if (P.contact) {`,
-    `  const C = P.contact;`,
-    `  const W = { at: "@", dot: ".", period: ".", point: ".", underscore: "_", underline: "_", dash: "-", hyphen: "-", minus: "-", plus: "+" };`,
-    `  const email = (v) => { if (typeof v !== "string") return null; const s = v.toLowerCase().replace(/\\bat the rate(?: of)?\\b|\\bat sign\\b|\\bat symbol\\b/g, " @ ").replace(/\\bfull stop\\b/g, " . ").split(/[\\s,;]+/).filter(Boolean).map((t) => W[t] ?? t).join("").replace(/^[^a-z0-9]+/, "").replace(/[^a-z0-9]+$/, ""); return /^[a-z0-9._+-]{1,64}@[a-z0-9-]+(\\.[a-z0-9-]+)*\\.[a-z]{2,24}$/.test(s) && !s.includes("..") ? s : null; };`,
-    `  const name = (v) => { if (typeof v !== "string") return null; const s = v.replace(/\\./g, " ").replace(/\\s+/g, " ").trim(); return /^[A-Za-z]+(?:[' -][A-Za-z]+)*$/.test(s) && s.length <= 40 && !C.placeholders.includes(s.toLowerCase()) ? s.toLowerCase() : null; };`,
-    `  const given = typeof a.email === "string" && a.email.trim() !== "";`,
-    `  const e = given ? email(a.email) : null;`,
-    `  const pd = digits(a.callback_phone);`,
-    `  const ph = a.callback_phone === undefined ? C.priorPhone : validPhone(pd) ? pd : "";`,
-    `  if (C.onFile) r = C.onFile;`,
-    `  else if (C.verified) r = e ? (C.known["@" + e] ?? C.other) : C.invalidEmail;`,
-    `  else { const f = name(a.first_name), l = name(a.last_name); r = !f || !l ? C.needsName : given && !e ? C.invalidEmail : (C.known[f + "|" + l + "|" + (e ?? "") + "|" + ph] ?? C.other); }`,
-    `}`,
-    `if (P.confirm) { const c = a.correct; r = c === true || c === "true" ? P.confirm.yes : c === false || c === "false" ? P.confirm.no : P.confirm.bad; }`,
+    ...used.flatMap((k) => branches[k]),
     `return r;`,
   ].join("\n");
 }
@@ -764,6 +1115,33 @@ export function advance(state: SimState, turn: TurnRecord, now: Date): string[] 
         state.contact.confirmed = true;
       }
       if (state.contact && code === "contact_retry") state.contact.confirmed = false;
+    } else if (call.name === "start_claim") {
+      const code = call.result.code;
+      const data = call.result.data ?? {};
+      state.startCodes.push(code);
+      // A read-back means the intake was stored (or replaced) unfiled, as upsert_claim_intake does.
+      if (code === "claim_readback" && typeof data.claim_type === "string" && typeof data.loss_date === "string") {
+        state.intake = {
+          kind: state.identity.level === "verified" ? "claim" : "lead_intake",
+          claimType: data.claim_type,
+          lossDate: data.loss_date,
+          confirmed: false,
+          number: null,
+        };
+      }
+      // The mock reads only the phrases it was given; one the server reads is a gap in the harness.
+      const read = parseLossDate(a.loss_date, now);
+      if ((code === "claim_bad_date" || code === "claim_date_help" || code === "claim_too_old") && "date" in read) {
+        notes.push(
+          `harness: the mock could not read loss_date ${JSON.stringify(a.loss_date)} (the server reads ${read.date})`,
+        );
+      }
+    } else if (call.name === "confirm_claim") {
+      const code = call.result.code;
+      if (state.intake && (code === "claim_filed" || code === "claim_intake_saved")) {
+        state.intake.confirmed = true;
+        state.intake.number = state.intake.kind === "claim" ? SIM_CLAIM_NUMBER : null;
+      }
     }
   }
   return notes;
@@ -819,6 +1197,7 @@ export interface TurnSpec {
   tools?: string[]; // exact ordered tool calls this turn (endCall included)
   allowTools?: string[]; // when `tools` is absent: calls must come from this list
   codes?: Code[]; // exact ordered server-tool codes this turn
+  allowCodes?: Code[]; // when `codes` is absent: any server-tool code this turn must come from this list
   args?: Record<string, ArgCheck>; // checked on every call of that tool this turn
   firstToolSilent?: string; // the first call, with no words of the model's own before it
   modelSays?: RegExp[];
@@ -870,6 +1249,11 @@ const AUTOMATED = /\bautomated assistant\b/i;
 const TRANSFER_OFFER = /\b(connect|transfer) you\b/i;
 const EMAIL_PROMISE =
   /\b(I've|I have|I'll|I will|I'm going to) (now |just |also )?(e-?mail(ed)?|sen[dt])\b|\bon its way\b|\b(will|should) (arrive|be sent)\b/i;
+// Reporting a loss: the date question, and what the intake never asks.
+const WHEN_ASK = /\bwhen\b|\bwhat (day|date)\b/i;
+const WHAT_HAPPENED_ASK = /\bwhat happened\b/i;
+const POLICY_NUMBER_ASK = /\bpolicy number\b/i;
+const INJURY_ASK = /\b(anyone|anybody|you|everyone) (hurt|injured)\?|\binjur(y|ies)\b[^.?]*\?/i;
 
 const TOBIAS_SAYS_PHONE = "six zero two, five five five, zero one zero one";
 const TOBIAS_DOB = "March fourteenth, nineteen eighty-six.";
@@ -910,6 +1294,33 @@ const noNameOr = (first: string, last: string): ArgCheck => (a) =>
 const correctIs = (want: boolean): ArgCheck => (a) =>
   a.correct === want || a.correct === String(want) ? null : `correct was ${JSON.stringify(a.correct ?? null)}`;
 const all = (...checks: ArgCheck[]): ArgCheck => (a) => checks.map((c) => c(a)).find((p) => p !== null) ?? null;
+// verify_identity's intent, as tools.ts reads it (an absent intent is undefined)
+const intentIs = (...want: (string | undefined)[]): ArgCheck => (a) => {
+  const got = typeof a.intent === "string" ? a.intent.trim().toLowerCase() : a.intent;
+  return want.includes(got as string | undefined) ? null : `intent was ${JSON.stringify(a.intent ?? null)}`;
+};
+const claimTypeIs = (want: string): ArgCheck => (a) =>
+  typeof a.claim_type === "string" && a.claim_type.trim().toLowerCase() === want
+    ? null
+    : `claim_type was ${JSON.stringify(a.claim_type ?? null)}`;
+// The date the server reads from loss_date is the day the caller meant, and the model passed the
+// caller's words rather than a date it worked out itself (the read-back is where a wrong day is heard).
+const lossDateAs = (phrase: string): ArgCheck => (a) => {
+  const now = new Date();
+  const want = parseLossDate(phrase, now);
+  const got = parseLossDate(a.loss_date, now);
+  if (!("date" in got) || !("date" in want) || got.date !== want.date) {
+    const read = "date" in got ? got.date : got.error;
+    return `loss_date ${JSON.stringify(a.loss_date ?? null)} reads as ${read}, expected the day of "${phrase}"`;
+  }
+  return /\d/.test(String(a.loss_date)) && !/\d/.test(phrase)
+    ? `loss_date ${JSON.stringify(a.loss_date)} is a date worked out by the model, not the caller's words`
+    : null;
+};
+const describes = (re: RegExp): ArgCheck => (a) =>
+  typeof a.description === "string" && re.test(a.description)
+    ? null
+    : `description was ${JSON.stringify(a.description ?? null)}`;
 
 const lookupTobias: TurnSpec = {
   user: `My number is ${TOBIAS_SAYS_PHONE}.`,
@@ -924,13 +1335,6 @@ const verifyTobias: TurnSpec = {
   codes: ["verified"],
   args: { verify_identity: dobIs(3, 14, 1986) },
 };
-const tobiasStatus: TurnSpec = {
-  user: "What's the status of my claims?",
-  tools: ["get_claim_status"],
-  codes: ["ok"],
-  args: { get_claim_status: noArgs },
-  heardSays: [/four thousand eight hundred twenty/, /contractor estimate/],
-};
 const continuesFlow = (user: string): TurnSpec => ({
   user,
   tools: [],
@@ -941,14 +1345,19 @@ const continuesFlow = (user: string): TurnSpec => ({
 export const PERSONAS: Persona[] = [
   {
     id: "f1",
-    title: "F1 happy path (Tobias states intent in turn 1)",
+    title: "F1 happy path (Tobias states intent in turn 1; the verified answer reads the claims)",
     turns: [
       { ...lookupTobias, user: `Hi, I'm calling to check on my claims. My number is ${TOBIAS_SAYS_PHONE}.` },
-      { ...verifyTobias, modelNever: [NAME] },
-      tobiasStatus,
+      {
+        ...verifyTobias,
+        args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("claim_status")) },
+        modelNever: [NAME],
+        heardSays: [/four thousand eight hundred twenty/, /contractor estimate/],
+      },
       { user: "No, that's everything. Thanks, bye.", tools: ["endCall"] },
     ],
-    toolOrder: ["lookup_customer", "verify_identity", "get_claim_status", "endCall"],
+    neverTools: ["get_claim_status"],
+    toolOrder: ["lookup_customer", "verify_identity", "endCall"],
   },
   {
     id: "f2",
@@ -1148,7 +1557,7 @@ export const PERSONAS: Persona[] = [
   },
   {
     id: "info-email",
-    title: "Info email (Tobias): refused before verification, sent after the claims",
+    title: "Info email (Tobias): refused before verification, sent once verified and asked again",
     turns: [
       {
         user: "Can you email me the list of documents I still need to send?",
@@ -1156,8 +1565,10 @@ export const PERSONAS: Persona[] = [
         modelSays: [VERIFY_ASK],
       },
       { ...lookupTobias, user: `Sure, it's ${TOBIAS_SAYS_PHONE}.` },
-      verifyTobias,
-      tobiasStatus,
+      {
+        ...verifyTobias,
+        args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("other", "claim_status", undefined)) },
+      },
       {
         user: "Can you email me the list of documents?",
         confirm: { tool: "send_info_email", say: "Yes, please." },
@@ -1166,7 +1577,7 @@ export const PERSONAS: Persona[] = [
         args: { send_info_email: topicIs("document_checklist") },
       },
     ],
-    toolOrder: ["lookup_customer", "verify_identity", "get_claim_status", "send_info_email"],
+    toolOrder: ["lookup_customer", "verify_identity", "send_info_email"],
   },
   {
     id: "injection",
@@ -1239,7 +1650,12 @@ export const PERSONAS: Persona[] = [
     }],
     turns: [
       lookupTobias,
-      { ...verifyTobias, heardSays: [/Welcome back/, /October/] },
+      {
+        ...verifyTobias,
+        // no reason given yet, so the welcome-back question stands and the claims are read on the answer
+        args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("other", undefined)) },
+        heardSays: [/Welcome back/, /October/],
+      },
       {
         user: "Yes, it's about the same claim.",
         tools: ["get_claim_status"],
@@ -1250,11 +1666,12 @@ export const PERSONAS: Persona[] = [
   },
   {
     id: "new-customer",
-    title: "New caller: not found twice, name, spelled email, read-back, confirmed, steps emailed",
+    title: "New caller wanting the steps: not found twice, name, spelled email, read-back, confirmed, steps emailed",
     contacts: [{ first: "Jordan", last: "Ellis", email: "jordan.ellis@gmail.com" }],
     turns: [
       {
-        user: `Hi, I'd like to start a claim. My number is ${UNKNOWN_SAYS_PHONE}.`,
+        // the steps, not the claim itself: a caller reporting a loss is offered the intake (fnol-new-caller)
+        user: `Hi, I'd like the steps to start a claim. My number is ${UNKNOWN_SAYS_PHONE}.`,
         tools: ["lookup_customer"],
         codes: ["not_found"],
         args: { lookup_customer: phoneIs("6025550199") },
@@ -1285,7 +1702,7 @@ export const PERSONAS: Persona[] = [
         codes: ["contact_saved_new"],
         firstToolSilent: "confirm_contact",
         args: { confirm_contact: correctIs(true) },
-        heardSays: [/I've saved your details/],
+        heardSays: [/I've saved your details\. I can take down what happened now, email you the steps/],
       },
       {
         user: "Please email me the steps.",
@@ -1296,7 +1713,8 @@ export const PERSONAS: Persona[] = [
         heardSays: [/the address you gave me/],
       },
     ],
-    neverTools: ["verify_identity", "get_claim_status", "escalate"],
+    // they chose the steps by email, so no loss is taken on this call
+    neverTools: ["verify_identity", "get_claim_status", "escalate", "start_claim", "confirm_claim"],
     modelNever: [ADDRESS_SPOKEN],
     toolOrder: ["lookup_customer", "lookup_customer", "capture_contact", "confirm_contact", "send_info_email"],
   },
@@ -1362,9 +1780,22 @@ export const PERSONAS: Persona[] = [
         modelSays: [POLICY_ASK],
         modelNever: [NAME_ASK, PHONE_ASK],
       },
-      { user: "No, I don't have a policy with you yet.", tools: [], modelSays: [NAME_ASK] },
+      // a new caller's details come before anything about the loss
+      {
+        user: "No, I don't have a policy with you yet.",
+        tools: [],
+        modelSays: [NAME_ASK],
+        modelNever: [WHAT_HAPPENED_ASK],
+      },
     ],
-    neverTools: ["lookup_customer", "verify_identity", "get_claim_status", "capture_contact"],
+    neverTools: [
+      "lookup_customer",
+      "verify_identity",
+      "get_claim_status",
+      "capture_contact",
+      "start_claim",
+      "confirm_claim",
+    ],
   },
   {
     id: "existing-unlisted-number",
@@ -1460,6 +1891,243 @@ export const PERSONAS: Persona[] = [
     neverTools: ["escalate", "endCall"],
     modelNever: [/\bvirtual assistant\b/i, HUMAN_CLAIM],
   },
+  {
+    id: "fnol-verified",
+    title: "FNOL, verified (Tobias): intent file_claim, what happened, then when, the read-back, filed",
+    lossDates: ["last Saturday"],
+    turns: [
+      {
+        ...lookupTobias,
+        user: `Hi, I need to file a claim for some damage to my car. My number is ${TOBIAS_SAYS_PHONE}.`,
+      },
+      {
+        ...verifyTobias,
+        args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("file_claim")) },
+        heardSays: [/Let's get your claim started\. Can you tell me a little more about what happened\?/],
+      },
+      {
+        user: "Someone rear-ended me at a red light and cracked my back bumper. Nobody was hurt.",
+        tools: [],
+        modelSays: [WHEN_ASK],
+        modelNever: [INJURY_ASK],
+      },
+      {
+        user: "Last Saturday.",
+        tools: ["start_claim"],
+        codes: ["claim_readback"],
+        firstToolSilent: "start_claim",
+        args: { start_claim: all(claimTypeIs("auto"), lossDateAs("last Saturday"), describes(/rear|bumper/i)) },
+        heardSays: [/Let me make sure I have this right\. An auto claim\b/, /Is that correct\?/],
+      },
+      {
+        user: "Yes, that's right.",
+        tools: ["confirm_claim"],
+        codes: ["claim_filed"],
+        firstToolSilent: "confirm_claim",
+        args: { confirm_claim: correctIs(true) },
+        heardSays: [/Your claim number ends in four seven two, and I've emailed the details to the email on file/],
+      },
+      { user: "No, that's all. Thanks so much.", tools: ["endCall"] },
+    ],
+    neverTools: ["get_claim_status", "capture_contact", "report_emergency"],
+    modelNever: [POLICY_NUMBER_ASK],
+    toolOrder: ["lookup_customer", "verify_identity", "start_claim", "confirm_claim", "endCall"],
+  },
+  {
+    id: "fnol-new-caller",
+    title: "FNOL, new caller (0199): not found twice, details captured and confirmed, then the loss taken",
+    contacts: [{ first: "Dana", last: "Whitfield", email: "dana.whitfield@gmail.com" }],
+    lossDates: ["last night"],
+    turns: [
+      {
+        user: `Hi, I'd like to report some storm damage to my house. My number is ${UNKNOWN_SAYS_PHONE}.`,
+        tools: ["lookup_customer"],
+        codes: ["not_found"],
+        args: { lookup_customer: phoneIs("6025550199") },
+      },
+      {
+        user: "Yes, that's right.",
+        tools: ["lookup_customer"],
+        codes: ["not_found_final"],
+        args: { lookup_customer: phoneIs("6025550199") },
+        heardSays: [/first and last name/],
+      },
+      { user: "Sure, it's Dana Whitfield.", tools: [], modelSays: [EMAIL_ASK, SPELL_ASK] },
+      { user: "d a n a, dot, w h i t f i e l d, at gmail dot com.", tools: [], modelSays: [NUMBER_ASK] },
+      {
+        user: "Six zero two, five five five, zero one eight eight.",
+        tools: ["capture_contact"],
+        codes: ["contact_readback"],
+        firstToolSilent: "capture_contact",
+        args: {
+          capture_contact: all(
+            nameIs("Dana", "Whitfield"),
+            emailIs("dana.whitfield@gmail.com"),
+            callbackIs("6025550188"),
+          ),
+        },
+      },
+      {
+        user: "Yes, that's right.",
+        tools: ["confirm_contact"],
+        codes: ["contact_saved_new"],
+        firstToolSilent: "confirm_contact",
+        args: { confirm_contact: correctIs(true) },
+        // the offer starts with taking the loss down now, so the caller simply picks it
+        heardSays: [/I can take down what happened now/],
+      },
+      {
+        user: "Let's do that now, please. A big tree branch came down on my roof in the storm last night.",
+        tools: ["start_claim"],
+        codes: ["claim_readback"],
+        firstToolSilent: "start_claim",
+        args: { start_claim: all(claimTypeIs("home"), lossDateAs("last night"), describes(/tree|branch|roof/i)) },
+        heardSays: [/A home claim\b/],
+      },
+      {
+        user: "Yes, that's correct.",
+        tools: ["confirm_claim"],
+        codes: ["claim_intake_saved"],
+        firstToolSilent: "confirm_claim",
+        args: { confirm_claim: correctIs(true) },
+        heardSays: [/passed your claim details to our claims team, and sent a confirmation to your email/],
+      },
+    ],
+    neverTools: ["verify_identity", "get_claim_status", "send_info_email", "escalate"],
+    modelNever: [ADDRESS_SPOKEN, POLICY_NUMBER_ASK],
+    toolOrder: [
+      "lookup_customer",
+      "lookup_customer",
+      "capture_contact",
+      "confirm_contact",
+      "start_claim",
+      "confirm_claim",
+    ],
+  },
+  {
+    id: "fnol-correction",
+    title: "FNOL correction (Tobias): the wrong day in the read-back, a no, the corrected day, filed",
+    lossDates: ["on Sunday", "Friday"],
+    turns: [
+      // a number said in the first breath is looked up at once, with no policy question first
+      { ...lookupTobias, user: `Hi, I need to file a claim. My number is ${TOBIAS_SAYS_PHONE}.` },
+      { ...verifyTobias, args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("file_claim")) } },
+      {
+        user: "A pipe burst under my kitchen sink on Sunday and flooded the floor.",
+        tools: ["start_claim"],
+        codes: ["claim_readback"],
+        firstToolSilent: "start_claim",
+        args: { start_claim: all(claimTypeIs("home"), lossDateAs("Sunday"), describes(/pipe|sink|flood/i)) },
+      },
+      {
+        user: "No, that's not right.",
+        tools: ["confirm_claim"],
+        codes: ["claim_retry"],
+        firstToolSilent: "confirm_claim",
+        args: { confirm_claim: correctIs(false) },
+        heardSays: [/What should I change\?/],
+      },
+      {
+        user: "It happened on Friday, not Sunday.",
+        tools: ["start_claim"],
+        codes: ["claim_readback"],
+        firstToolSilent: "start_claim",
+        args: { start_claim: all(claimTypeIs("home"), lossDateAs("Friday"), describes(/pipe|sink|flood/i)) },
+        heardSays: [/A home claim\b.* from Friday, /],
+      },
+      {
+        user: "Yes, that's right now.",
+        tools: ["confirm_claim"],
+        codes: ["claim_filed"],
+        firstToolSilent: "confirm_claim",
+        args: { confirm_claim: correctIs(true) },
+      },
+    ],
+    neverTools: ["get_claim_status"],
+    modelNever: [POLICY_ASK, POLICY_NUMBER_ASK],
+    toolOrder: ["lookup_customer", "verify_identity", "start_claim", "confirm_claim", "start_claim", "confirm_claim"],
+  },
+  {
+    id: "fnol-which-part",
+    title: "FNOL correction (Tobias): a plain no, then only which part is wrong; the day is asked for, then filed",
+    lossDates: ["on Sunday", "Friday"],
+    turns: [
+      { ...lookupTobias, user: `Hi, I need to file a claim. My number is ${TOBIAS_SAYS_PHONE}.` },
+      { ...verifyTobias, args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("file_claim")) } },
+      {
+        user: "A pipe burst under my kitchen sink on Sunday and flooded the floor.",
+        tools: ["start_claim"],
+        codes: ["claim_readback"],
+        firstToolSilent: "start_claim",
+        args: { start_claim: all(claimTypeIs("home"), lossDateAs("Sunday"), describes(/pipe|sink|flood/i)) },
+      },
+      {
+        user: "No.",
+        tools: ["confirm_claim"],
+        codes: ["claim_retry"],
+        firstToolSilent: "confirm_claim",
+        args: { confirm_claim: correctIs(false) },
+        heardSays: [/What should I change\?/],
+      },
+      // the part named without the fix: the day is asked for, even though a day was said before
+      { user: "The date.", tools: [], modelSays: [WHEN_ASK] },
+      {
+        user: "Friday.",
+        tools: ["start_claim"],
+        codes: ["claim_readback"],
+        firstToolSilent: "start_claim",
+        args: { start_claim: all(claimTypeIs("home"), lossDateAs("Friday"), describes(/pipe|sink|flood/i)) },
+        heardSays: [/A home claim\b.* from Friday, /],
+      },
+      {
+        user: "Yes, that's right.",
+        tools: ["confirm_claim"],
+        codes: ["claim_filed"],
+        firstToolSilent: "confirm_claim",
+        args: { confirm_claim: correctIs(true) },
+      },
+    ],
+    neverTools: ["get_claim_status"],
+    modelNever: [POLICY_ASK, POLICY_NUMBER_ASK],
+    toolOrder: ["lookup_customer", "verify_identity", "start_claim", "confirm_claim", "start_claim", "confirm_claim"],
+  },
+  {
+    id: "fnol-locked",
+    title: "FNOL, locked (Tobias, wrong date of birth twice): no claim is taken, a callback is offered",
+    lossDates: ["yesterday"],
+    turns: [
+      { ...lookupTobias, user: `Hi, I need to report damage to my car. My number is ${TOBIAS_SAYS_PHONE}.` },
+      {
+        user: "June second, nineteen eighty-four.",
+        tools: ["verify_identity"],
+        codes: ["auth_failed"],
+        args: { verify_identity: dobIs(6, 2, 1984) },
+      },
+      {
+        user: "Sorry, I meant June third, nineteen eighty-four.",
+        tools: ["verify_identity"],
+        codes: ["locked"],
+        args: { verify_identity: dobIs(6, 3, 1984) },
+      },
+      {
+        // the server's claim_locked sentence, or the same refusal in the model's words; never the details
+        user: "Can't you just take the claim anyway? Someone hit my parked car yesterday.",
+        allowTools: ["start_claim"],
+        allowCodes: ["claim_locked"],
+        modelNever: [WHEN_ASK, WHAT_HAPPENED_ASK],
+        heardSays: [/call you back/i],
+      },
+      {
+        user: "Yes, please have someone call me back.",
+        tools: ["escalate"],
+        codes: ["rep_queued_no_number"],
+        args: { escalate: all(reasonListed, noCallback) },
+      },
+    ],
+    neverTools: ["confirm_claim", "get_claim_status"],
+    modelNever: [NAME, CLAIM_WORDS],
+    heardNever: [NAME, CLAIM_WORDS],
+  },
 ];
 
 /** Every digit run of seven or more in a persona is a 555 number (or the main line). */
@@ -1538,11 +2206,13 @@ export function turnProblems(spec: TurnSpec, turn: TurnRecord): string[] {
     const extra = names.filter((n) => !spec.allowTools!.includes(n));
     if (extra.length) problems.push(`tools [${extra.join(", ")}] not allowed here`);
   }
-  if (spec.codes) {
-    const codes = turn.calls.filter((c) => SERVER_TOOL_SET.has(c.name)).map((c) => c.result?.code ?? "none");
-    if (JSON.stringify(codes) !== JSON.stringify(spec.codes)) {
-      problems.push(`codes [${codes.join(", ")}], expected [${spec.codes.join(", ")}]`);
-    }
+  const codes = turn.calls.filter((c) => SERVER_TOOL_SET.has(c.name)).map((c) => c.result?.code ?? "none");
+  if (spec.codes && JSON.stringify(codes) !== JSON.stringify(spec.codes)) {
+    problems.push(`codes [${codes.join(", ")}], expected [${spec.codes.join(", ")}]`);
+  }
+  if (!spec.codes && spec.allowCodes) {
+    const extra = codes.filter((c) => !(spec.allowCodes as string[]).includes(c));
+    if (extra.length) problems.push(`codes [${extra.join(", ")}] not allowed here`);
   }
   for (const call of turn.calls) {
     const check = spec.args?.[call.name];
@@ -1570,14 +2240,21 @@ export function turnProblems(spec: TurnSpec, turn: TurnRecord): string[] {
 /** The production flags over the model's own words, with server facts built from the mock answers. */
 export function flagProblems(turns: TurnRecord[]): string[] {
   const calls = turns.flatMap((t) => t.calls).filter((c) => c.result);
-  const attempts: AttemptRow[] = calls.map((c, i) => ({
-    call_key: "battery",
-    tool_call_id: c.id || `call-${i}`,
-    tool_name: c.name,
-    kind: null,
-    code: c.result!.code,
-    created_at: "",
-  }));
+  const attempts: AttemptRow[] = calls.flatMap((c, i) => {
+    const row: AttemptRow = {
+      call_key: "battery",
+      tool_call_id: c.id || `call-${i}`,
+      tool_name: c.name,
+      kind: null,
+      code: c.result!.code,
+      created_at: "",
+    };
+    // verify_identity with intent claim_status records its claims read as a get_claim_status row
+    const claims = c.result!.data?.status_read === true ? c.result!.data.claims : null;
+    if (!Array.isArray(claims)) return [row];
+    const read = claims.length > 0 ? "ok" : "no_claims";
+    return [row, { ...row, tool_call_id: `${row.tool_call_id}:status`, tool_name: "get_claim_status", code: read }];
+  });
   const escalationCodes = calls.filter((c) => c.name === "escalate").map((c) => c.result!.code);
   const escalations: EscalationRow[] = escalationCodes.some((c) => ESCALATION_ROW_CODES.has(c))
     ? [{
@@ -1597,16 +2274,43 @@ export function flagProblems(turns: TurnRecord[]): string[] {
       created_at: "",
     }]
     : [];
-  const emails: EmailRow[] = calls.filter((c) => c.result!.code === "email_sent").map(() => ({
-    call_key: "battery",
-    kind: "document_checklist",
-    to_masked: "o***@example.com",
-    resend_id: "battery",
-    status: "sent",
-    error: null,
-  }));
+  const filedCodes: ReadonlySet<string> = new Set(["claim_filed", "claim_intake_saved"]);
+  const emails: EmailRow[] = calls.flatMap((c) => {
+    const code = c.result!.code;
+    const kind = code === "email_sent"
+      ? "document_checklist"
+      : filedCodes.has(code) && c.result!.data?.emailed === true
+      ? "claim_received"
+      : null;
+    return kind
+      ? [{
+        call_key: "battery",
+        kind,
+        to_masked: "o***@example.com",
+        resend_id: "battery",
+        status: "sent",
+        error: null,
+      }]
+      : [];
+  });
+  const filed = calls.find((c) => c.name === "confirm_claim" && filedCodes.has(c.result!.code));
+  const intake: ClaimIntake | null = filed
+    ? {
+      call_key: "battery",
+      kind: filed.result!.code === "claim_filed" ? "claim" : "lead_intake",
+      claim_type: "auto",
+      loss_date: "",
+      summary: "",
+      description: "",
+      customer_id: null,
+      claim_id: null,
+      claim_number: filed.result!.code === "claim_filed" ? SIM_CLAIM_NUMBER : null,
+      confirmed: true,
+      confirmed_at: "",
+    }
+    : null;
   const messages = turns.flatMap((t) => t.model.map((content) => ({ role: "assistant", content })));
-  return computeFlags({ messages, attempts, escalations, emails }).map((f) => `flag ${f}`);
+  return computeFlags({ messages, attempts, escalations, emails, intake }).map((f) => `flag ${f}`);
 }
 
 export function conversationProblems(persona: Persona, turns: TurnRecord[]): string[] {

@@ -4,7 +4,16 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthTestProvider } from "@/lib/auth";
 import { ROUTER_FUTURE } from "@/lib/router";
-import type { Attempt, CallerContact, CallInteraction, CallSession, Escalation, OutboxEvent, TranscriptLineRow } from "@/lib/types";
+import type {
+  Attempt,
+  CallerContact,
+  CallInteraction,
+  CallSession,
+  ClaimIntake,
+  Escalation,
+  OutboxEvent,
+  TranscriptLineRow,
+} from "@/lib/types";
 
 const api = {
   fetchCall: vi.fn(),
@@ -15,8 +24,10 @@ const api = {
   fetchCallEmails: vi.fn(),
   fetchCallOutbox: vi.fn(),
   fetchCallContact: vi.fn(),
+  fetchCallIntake: vi.fn(),
 };
 const invoke = vi.fn();
+const buildEnv = vi.hoisted(() => ({ ghlLocationId: "Loc123abc" as string | null }));
 const useRealtimeRows = vi.fn((..._args: unknown[]) => ({ status: "SUBSCRIBED", isLive: true }));
 
 vi.mock("@/lib/supabase", () => ({ supabase: { functions: { invoke: (...a: unknown[]) => invoke(...a) } }, supabaseConfigured: true }));
@@ -30,7 +41,20 @@ vi.mock("@/lib/queries", async (importOriginal) => ({
   fetchCallEmails: (id: string) => api.fetchCallEmails(id),
   fetchCallOutbox: (id: string) => api.fetchCallOutbox(id),
   fetchCallContact: (id: string) => api.fetchCallContact(id),
+  fetchCallIntake: (id: string) => api.fetchCallIntake(id),
 }));
+vi.mock("@/lib/env", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/env")>();
+  return {
+    ...actual,
+    env: {
+      ...actual.env,
+      get ghlLocationId() {
+        return buildEnv.ghlLocationId;
+      },
+    },
+  };
+});
 vi.mock("@/lib/realtime", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/realtime")>()),
   useRealtimeRows: (...args: unknown[]) => useRealtimeRows(...args),
@@ -99,6 +123,23 @@ function contact(over: Partial<CallerContact> = {}): CallerContact {
   };
 }
 
+function intake(over: Partial<ClaimIntake> = {}): ClaimIntake {
+  return {
+    call_key: ID,
+    kind: "claim",
+    claim_type: "auto",
+    loss_date: "2026-10-10",
+    summary: "cracked windshield",
+    description: "A rock hit my windshield on the highway.",
+    claim_number: "CLM-104472",
+    confirmed: true,
+    confirmed_at: "2026-10-12T15:02:30Z",
+    created_at: "2026-10-12T15:02:00Z",
+    updated_at: "2026-10-12T15:02:30Z",
+    ...over,
+  };
+}
+
 /** The header's caller type badge (the only CallerTypeBadge on the page). */
 function headerCallerType(): Element | null {
   return document.querySelector("[data-caller-type]");
@@ -142,6 +183,8 @@ beforeEach(() => {
   api.fetchCallEmails.mockResolvedValue([]);
   api.fetchCallOutbox.mockResolvedValue([]);
   api.fetchCallContact.mockResolvedValue(null);
+  api.fetchCallIntake.mockResolvedValue(null);
+  buildEnv.ghlLocationId = "Loc123abc";
 });
 
 describe("CallDetail after hangup", () => {
@@ -204,8 +247,8 @@ describe("CallDetail after hangup", () => {
   it("lists the call's outbox deliveries with attempts and the last error", async () => {
     const base = { kind: "interaction.completed", ref_id: ID, destination: "airtable", created_at: "2026-10-12T15:03:10Z", updated_at: "2026-10-12T15:04:00Z" };
     const events: OutboxEvent[] = [
-      { ...base, id: "o1", delivered_at: "2026-10-12T15:03:12Z", attempts: 1, last_error: null },
-      { ...base, id: "o2", delivered_at: null, attempts: 5, last_error: "airtable: 422 INVALID_VALUE_FOR_COLUMN" },
+      { ...base, id: "o1", delivered_at: "2026-10-12T15:03:12Z", attempts: 1, last_error: null, external_id: "recAAA" },
+      { ...base, id: "o2", delivered_at: null, attempts: 5, last_error: "airtable: 422 INVALID_VALUE_FOR_COLUMN", external_id: null },
     ];
     api.fetchCall.mockResolvedValue(call());
     api.fetchCallOutbox.mockResolvedValue(events);
@@ -218,6 +261,88 @@ describe("CallDetail after hangup", () => {
     expect(items[1]).toHaveTextContent("Gave up");
     expect(items[1]).toHaveTextContent("Last error: airtable: 422 INVALID_VALUE_FOR_COLUMN");
     expect(useRealtimeRows.mock.calls.map((c) => `${c[0]} ${c[1]}`)).toContain(`outbox_events ref_id=eq.${ID}`);
+  });
+
+  it("shows the reported claim, the call reason and the claim number the call filed", async () => {
+    api.fetchCall.mockResolvedValue(call({ call_reason: "file_claim", call_reason_source: "server", claim_number: "CLM-104472" }));
+    api.fetchCallIntake.mockResolvedValue(intake());
+    renderDetail();
+
+    const card = await screen.findByRole("region", { name: "Claim reported" });
+    expect(within(card).getByText("Filed")).toBeInTheDocument();
+    expect(within(card).getByText("CLM-104472")).toBeInTheDocument();
+    expect(within(card).getByText("Sat, Oct 10, 2026")).toBeInTheDocument();
+    expect(within(card).getByText("A rock hit my windshield on the highway.")).toBeInTheDocument();
+
+    const badge = document.querySelector("[data-call-reason]");
+    expect(badge).toHaveAttribute("data-call-reason", "file_claim");
+    expect(badge).toHaveTextContent("File a claim");
+
+    const facts = screen.getByRole("region", { name: "Call details" });
+    expect(within(facts).getByText("File a claim (Server facts)")).toBeInTheDocument();
+    expect(within(facts).getByText("Claim filed").nextElementSibling).toHaveTextContent("CLM-104472");
+
+    expect(api.fetchCallIntake).toHaveBeenCalledWith(ID);
+    const sub = useRealtimeRows.mock.calls.find((c) => c[0] === "claim_intakes")!;
+    expect(sub[1]).toBe(`call_key=eq.${ID}`);
+    expect(sub[2]).toEqual([["call", ID, "intake"]]);
+  });
+
+  it("shows no claim card for a call that reported no loss, and says it has no reason yet", async () => {
+    api.fetchCall.mockResolvedValue(call({ call_reason: null, call_reason_source: null, claim_number: null }));
+    renderDetail();
+    await screen.findByRole("heading", { level: 1, name: "Tobias Halvorsen" });
+    await screen.findByRole("region", { name: "Caller contact" });
+    expect(screen.queryByRole("region", { name: "Claim reported" })).not.toBeInTheDocument();
+    expect(document.querySelector("[data-call-reason]")).toBeNull();
+    const facts = screen.getByRole("region", { name: "Call details" });
+    expect(within(facts).getByText("Not tagged")).toBeInTheDocument();
+    expect(within(facts).queryByText("Claim filed")).not.toBeInTheDocument();
+  });
+
+  it("says the reported claim could not be read instead of hiding it", async () => {
+    api.fetchCall.mockResolvedValue(call());
+    api.fetchCallIntake.mockRejectedValue(new Error("claim_intakes: permission denied"));
+    renderDetail();
+    const card = await screen.findByRole("region", { name: "Claim reported" });
+    expect(await within(card).findByText("Could not load the reported claim")).toBeInTheDocument();
+  });
+
+  it("links the GoHighLevel contact once its delivery recorded one", async () => {
+    const base = { kind: "interaction.completed", ref_id: ID, created_at: "2026-10-12T15:03:10Z", updated_at: "2026-10-12T15:05:00Z" };
+    api.fetchCall.mockResolvedValue(call());
+    api.fetchCallOutbox.mockResolvedValue([
+      { ...base, id: "o1", destination: "airtable", delivered_at: "2026-10-12T15:03:12Z", attempts: 1, last_error: null, external_id: "recAAA" },
+      { ...base, id: "o2", destination: "ghl", delivered_at: "2026-10-12T15:04:40Z", attempts: 1, last_error: null, external_id: "pXq7Contact01" },
+    ] satisfies OutboxEvent[]);
+    renderDetail();
+
+    const link = await screen.findByRole("link", { name: /Open in GoHighLevel/ });
+    expect(link).toHaveAttribute("href", "https://app.gohighlevel.com/v2/location/Loc123abc/contacts/detail/pXq7Contact01");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
+    const outbox = screen.getByRole("region", { name: /Outbox events/ });
+    expect(within(outbox).getByText("GoHighLevel CRM")).toBeInTheDocument();
+  });
+
+  it("shows no GoHighLevel link before delivery or without a location id", async () => {
+    const ghl: OutboxEvent = {
+      id: "o2", kind: "interaction.completed", ref_id: ID, destination: "ghl", delivered_at: null, attempts: 0, last_error: null,
+      external_id: null, created_at: "2026-10-12T15:03:10Z", updated_at: "2026-10-12T15:03:10Z",
+    };
+    api.fetchCall.mockResolvedValue(call());
+    api.fetchCallOutbox.mockResolvedValue([ghl]);
+    const { unmount } = renderDetail();
+    const outbox = await screen.findByRole("region", { name: /Outbox events/ });
+    expect(await within(outbox).findByText("GoHighLevel CRM")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Open in GoHighLevel/ })).not.toBeInTheDocument();
+    unmount();
+
+    buildEnv.ghlLocationId = null;
+    api.fetchCallOutbox.mockResolvedValue([{ ...ghl, delivered_at: "2026-10-12T15:04:40Z", attempts: 1, external_id: "pXq7Contact01" }]);
+    renderDetail();
+    expect(await screen.findByText("GoHighLevel CRM")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Open in GoHighLevel/ })).not.toBeInTheDocument();
   });
 
   it("shows a new caller's type in the header and their confirmed contact details in a card", async () => {
@@ -345,6 +470,7 @@ describe("CallDetail while live", () => {
         `escalations call_key=eq.${ID}`,
         `emails call_key=eq.${ID}`,
         `caller_contacts call_key=eq.${ID}`,
+        `claim_intakes call_key=eq.${ID}`,
       ]),
     );
   });

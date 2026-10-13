@@ -43,6 +43,9 @@ function fakeDb(store: FakeStore): SmokeDb {
       Promise.resolve(t.transcript_lines.filter((r) => r.call_key === k).sort((a, b) => a.ts_ms - b.ts_ms)),
     contact: (k) => Promise.resolve(t.caller_contacts.find((r) => r.call_key === k) ?? null),
     emails: (k) => Promise.resolve(t.emails.filter((r) => r.call_key === k)),
+    intake: (k) => Promise.resolve(t.claim_intakes.find((r) => r.call_key === k) ?? null),
+    phoneClaims: (k) =>
+      Promise.resolve(store.claims.filter((c) => (c as { reported_call_key?: string }).reported_call_key === k)),
   };
 }
 
@@ -100,15 +103,26 @@ Deno.test("every call key a smoke run writes starts with the cleanup prefix", as
     ...store.tables.transcript_lines.map((r) => r.call_key),
     ...store.tables.call_interactions.map((r) => r.vapi_call_id),
     ...store.tables.caller_contacts.map((r) => r.call_key),
+    ...store.tables.claim_intakes.map((r) => r.call_key),
+    ...store.claims.flatMap((c) => {
+      const key = (c as { reported_call_key?: string }).reported_call_key;
+      return key ? [key] : [];
+    }),
   ];
   assert(keys.length > 0);
   for (const k of keys) assert(k.startsWith(SMOKE_PREFIX), k);
-  // no delivered alert: a smoke run never pages anyone, and its one email is the new caller's
-  // steps to start a claim, to the OWNER_EMAIL address
-  assertEquals(store.tables.emails.map((e) => [e.kind, e.to_masked]), [[
-    "how_to_start_claim",
-    "o***@example.com",
-  ]]);
+  // one claim filed (the verified case) and one new caller's intake, on smoke call keys only
+  assertEquals(store.tables.claim_intakes.map((r) => [r.kind, r.confirmed]).sort(), [
+    ["claim", true],
+    ["lead_intake", true],
+  ]);
+  // no delivered alert: a smoke run never pages anyone, and its emails all go to the OWNER_EMAIL
+  // address: the new caller's steps to start a claim and both claim confirmations
+  assertEquals(store.tables.emails.map((e) => [e.kind, e.to_masked]).sort(), [
+    ["claim_received", "o***@example.com"],
+    ["claim_received", "o***@example.com"],
+    ["how_to_start_claim", "o***@example.com"],
+  ]);
   assert(store.tables.escalations.every((e) => e.alert_status === "skipped"));
 });
 
@@ -121,7 +135,7 @@ Deno.test("without OWNER_EMAIL the new-caller email case checks the gates and se
     db: fakeDb(store),
     now: () => NOW,
     rowWaitMs: 0,
-  }, ["new-caller-contact", "new-caller-email", "email-update"]);
+  }, ["new-caller-contact", "new-caller-email", "email-update", "fnol-lead"]);
   await Promise.allSettled(background);
   assertEquals(results.filter((r) => !r.pass).map((r) => r.problems), []);
   assertEquals(store.tables.emails.length, 0);
@@ -130,8 +144,11 @@ Deno.test("without OWNER_EMAIL the new-caller email case checks the gates and se
     [
       ["email_update", true],
       ["new_customer", true],
+      ["new_customer", true],
     ],
   );
+  // the new caller's loss is taken all the same, with nothing sent
+  assertEquals(store.tables.claim_intakes.map((r) => [r.kind, r.confirmed]), [["lead_intake", true]]);
 });
 
 Deno.test("a wrong expectation is reported as a failure, not thrown", async () => {
@@ -162,11 +179,14 @@ Deno.test("cleanup SQL covers every call table and only the smoke prefix", () =>
       "call_interactions",
       "webhook_captures",
       "caller_contacts",
+      "claim_intakes",
     ]
   ) {
     assertStringIncludes(sql, `delete from ${table} where`);
   }
-  assertEquals(sql.match(/like 'smoke-%'/g)?.length, 8);
+  // only the claims a smoke call filed; a seeded claim has no reported_call_key
+  assertStringIncludes(sql, "delete from claims where reported_call_key like 'smoke-%'");
+  assertEquals(sql.match(/like 'smoke-%'/g)?.length, 10);
   assert(!/delete from \w+ returning/.test(sql), "an unfiltered delete");
   assertThrows(() => cleanupSql("%"));
   assertThrows(() => cleanupSql("smoke"));

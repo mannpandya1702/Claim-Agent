@@ -11,7 +11,8 @@
 //                         closed as abandoned when VAPI has no such call (or after a day of no
 //                         answer); ended calls missing from the call log queued again; old live
 //                         lines, captures and frequent job runs pruned. Never notifies.
-//   outbox  every minute  undelivered outbox_events to the Airtable call log
+//   outbox  every minute  undelivered outbox_events to the Airtable call log, then to GoHighLevel
+//                         (each destination in its own loop, so one's outage never blocks the other)
 //
 // pg_net gives up on the request after 10 s, so each run works to an 8 s deadline (measured on
 // deps.now) and leaves the rest to its next run rather than finishing after nobody is listening.
@@ -27,7 +28,8 @@ import {
   writtenDate,
 } from "./email.ts";
 import { type Channel, CHANNELS, JOB_NAMES, type JobName, TIMEZONE } from "./enums.ts";
-import { deliverOutbox, enqueueInteraction } from "./outbox.ts";
+import { ghlConfigured } from "./ghl.ts";
+import { deliverOutboxRun, enqueueGap, enqueueInteraction } from "./outbox.ts";
 import { recoverFromCall } from "./post_call.ts";
 import { redactPII } from "./redact.ts";
 import type { Deps, StaleEscalation } from "./types.ts";
@@ -231,7 +233,13 @@ async function realertEmail(deps: Deps, row: StaleEscalation, now: Date): Promis
         sent.ok ? null : sent.error,
       );
     } catch (e) {
-      safeLog(deps, { event: "job_error", job: "sla", step: "finishEmail", call_key: row.call_key, error: errorText(e) });
+      safeLog(deps, {
+        event: "job_error",
+        job: "sla",
+        step: "finishEmail",
+        call_key: row.call_key,
+        error: errorText(e),
+      });
     }
     return sent.ok ? "sent" : "failed";
   } catch (e) {
@@ -270,7 +278,13 @@ async function slaJob(deps: Deps, now: Date): Promise<JobRun> {
       marked = await deps.store.markRealerted(row.id);
     } catch (e) {
       result.errors++;
-      safeLog(deps, { event: "job_error", job: "sla", step: "markRealerted", call_key: row.call_key, error: errorText(e) });
+      safeLog(deps, {
+        event: "job_error",
+        job: "sla",
+        step: "markRealerted",
+        call_key: row.call_key,
+        error: errorText(e),
+      });
       continue;
     }
     if (!marked) {
@@ -416,6 +430,35 @@ async function reaperJob(deps: Deps, now: Date): Promise<JobRun> {
     safeLog(deps, { event: "job_error", job: "reaper", step: "listOutboxGaps", error: errorText(e) });
   }
 
+  // The same for GoHighLevel: its enqueue is a separate write, and when it alone failed the call log
+  // has its row and the pass above finds nothing. Only a missing row counts (GHL never posts twice).
+  if (ghlConfigured(env)) {
+    try {
+      const gaps = await store.listOutboxGaps(
+        new Date(now.getTime() - REQUEUE_WINDOW_HOURS * HOUR_MS).toISOString(),
+        new Date(now.getTime() - REQUEUE_SETTLE_MS).toISOString(),
+        "ghl",
+      );
+      for (const callKey of gaps) {
+        if (msLeft(deps, deadline) < PRUNE_RESERVE_MS) break;
+        if (!(await enqueueGap(deps, callKey, "ghl"))) {
+          result.errors++;
+          break;
+        }
+        result.requeued++;
+      }
+    } catch (e) {
+      result.errors++;
+      safeLog(deps, {
+        event: "job_error",
+        job: "reaper",
+        step: "listOutboxGaps",
+        destination: "ghl",
+        error: errorText(e),
+      });
+    }
+  }
+
   // The pruning runs after the calls whatever happened to them, and a failure here is counted
   // instead of losing the record of the work above.
   const cutoff = new Date(now.getTime() - RETENTION_DAYS * DAY_MS).toISOString();
@@ -443,11 +486,15 @@ async function reaperJob(deps: Deps, now: Date): Promise<JobRun> {
 // ---------------------------------------------------------------------------------------------
 // outbox
 // ---------------------------------------------------------------------------------------------
+// The call log's counts keep their plain keys; GoHighLevel's, present only when it is configured,
+// carry a ghl_ prefix (job_runs.result stays one flat object of counts for the Ops page).
 async function outboxJob(deps: Deps): Promise<JobRun> {
-  const { skipped, config_error, ...numbers } = await deliverOutbox(deps, { deadlineMs: JOB_DEADLINE_MS });
-  const result: JobResult = { ...numbers };
-  if (skipped) result.skipped = skipped;
-  if (config_error) result.config_error = config_error;
+  const { airtable, ghl } = await deliverOutboxRun(deps, JOB_DEADLINE_MS);
+  const result: JobResult = {};
+  for (const [prefix, counts] of [["", airtable], ["ghl_", ghl]] as const) {
+    if (!counts) continue;
+    for (const [k, v] of Object.entries(counts)) if (v !== undefined) result[`${prefix}${k}`] = v;
+  }
   return { result };
 }
 

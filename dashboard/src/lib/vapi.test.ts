@@ -29,6 +29,7 @@ const baseEnv: Env = {
   assistantSoloId: "asst-solo",
   squadId: "squad-1",
   phoneNumber: null,
+  ghlLocationId: null,
   buildSha: null,
 };
 

@@ -18,6 +18,7 @@
     "deploy": "supabase functions deploy vapi-webhook --no-verify-jwt --use-api && supabase functions deploy recording-url --use-api",
     "voice": "deno run --allow-env --allow-net --allow-read --allow-write --allow-run=python3 scripts/voice_call.ts",
     "airtable:setup": "deno run --allow-env --allow-net --allow-read scripts/airtable_setup.ts",
+    "ghl:check": "deno run --allow-env --allow-net --allow-read scripts/ghl_check.ts",
     "clean-room": "deno run --allow-read --allow-run=git --allow-env scripts/clean_room_check.ts"
   },
   "imports": {

@@ -3,7 +3,7 @@
 // renderAlert accepts and assert none of it reaches the text the team's phone displays.
 import { assert, assertEquals, assertFalse, assertMatch } from "@std/assert";
 import { CHANNELS, ESCALATION_KINDS, ESCALATION_REASONS } from "./enums.ts";
-import { dashboardLink, type EscalationAlert, renderAlert, shortCallId } from "./alert.ts";
+import { type ClaimIntakeAlert, dashboardLink, type EscalationAlert, renderAlert, shortCallId } from "./alert.ts";
 
 const CALL_KEY = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
 const DASHBOARD = "https://ops.observe.test/claims/";
@@ -300,4 +300,57 @@ Deno.test("alert PII: an id-shaped call key only ever fills the short-id slot an
     const withoutLink = [...text.split("\n").slice(0, -1), slots.slice(0, 5).join(" | ")].join("\n");
     if (key.length > 8 && shortCallId(key) !== "unknown") assertFalse(withoutLink.includes(key));
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The claim-intake card (confirm_claim): ids, enums and at most three digits of a claim number.
+// ---------------------------------------------------------------------------------------------
+const intakeAlert = (over: Partial<ClaimIntakeAlert> = {}): ClaimIntakeAlert => ({
+  kind: "claim_intake",
+  intakeKind: "claim",
+  claimType: "auto",
+  callKey: CALL_KEY,
+  channel: "webCall",
+  verified: true,
+  claimLast3: "472",
+  ...over,
+});
+
+Deno.test("renderAlert claim_intake: a verified customer's filed claim, with the last three digits only", () => {
+  assertEquals(
+    renderAlert(intakeAlert(), DASHBOARD),
+    "NEW CLAIM REPORTED BY PHONE\n" +
+      `[Observe Claims] claim_intake | claim | auto | normal | call 1a2b3c4d | webCall | claim ending 472 | ${DASHBOARD}#/calls/${CALL_KEY}`,
+  );
+});
+
+Deno.test("renderAlert claim_intake: a new caller's lead intake has no number and says to call back", () => {
+  assertEquals(
+    renderAlert(
+      intakeAlert({ intakeKind: "lead_intake", claimType: "property", verified: false, claimLast3: null }),
+      DASHBOARD,
+    ),
+    "NEW CALLER: call back to set up the claim\nUNVERIFIED: do not disclose claim details\n" +
+      `[Observe Claims] claim_intake | lead_intake | property | normal | call 1a2b3c4d | webCall | ${DASHBOARD}#/calls/${CALL_KEY}`,
+  );
+});
+
+Deno.test("alert PII: a claim-intake card refuses anything but three digits and the closed enums", () => {
+  for (const pii of [...PII, "4721", "47", "4 7 2", "CLM-482472", "482472"]) {
+    const text = renderAlert(
+      intakeAlert({
+        claimLast3: pii,
+        intakeKind: pii as ClaimIntakeAlert["intakeKind"],
+        claimType: pii as ClaimIntakeAlert["claimType"],
+        channel: pii as ClaimIntakeAlert["channel"],
+      }),
+      DASHBOARD,
+    );
+    assertNoPII(text, pii);
+    assertFalse(text.includes("claim ending"), pii);
+    assertMatch(text, /claim_intake \| unknown \| unknown \| normal \| call 1a2b3c4d \| unknown/);
+  }
+  // extra properties never render
+  const smuggled = { ...intakeAlert(), name: "Tobias Halvorsen", phone: "602-555-0101", claimNumber: "CLM-240198" };
+  assertNoPII(renderAlert(smuggled as ClaimIntakeAlert, DASHBOARD), "extra properties");
 });

@@ -16,6 +16,7 @@ function row(over: Partial<CallListRow>): CallListRow {
     caller_type: "existing",
     caller_email_masked: null,
     outcome: "resolved",
+    call_reason: "claim_status",
     sentiment: "positive",
     escalated: false,
     emergency: false,
@@ -35,7 +36,7 @@ function row(over: Partial<CallListRow>): CallListRow {
 }
 
 const ROWS: CallListRow[] = [
-  row({ vapi_call_id: "live-1", caller_name: null, caller_phone_masked: null, ended_at: null, outcome: "in_progress", duration_seconds: null, cost: null, sentiment: null, started_at: "2026-10-12T15:00:00Z", created_at: "2026-10-12T15:00:00Z" }),
+  row({ vapi_call_id: "live-1", caller_name: null, caller_phone_masked: null, ended_at: null, outcome: "in_progress", call_reason: null, duration_seconds: null, cost: null, sentiment: null, started_at: "2026-10-12T15:00:00Z", created_at: "2026-10-12T15:00:00Z" }),
   row({ vapi_call_id: "flagged-1", flags: ["promised_callback_without_escalation", "tool_markup_spoken"], escalated: true, emergency: true, emailed: true, outcome: "escalated", sentiment: "negative" }),
   row({ vapi_call_id: "clean-1", cost: null }),
 ];
@@ -125,6 +126,24 @@ describe("CallTable", () => {
     // a live row's type is still the stub's default, so it is not shown as a fact
     expect(rowFor("live-1").querySelector("[data-caller-type]")).toBeNull();
     expect(within(rowFor("live-1")).getByTitle("Decided when the call ends")).toBeInTheDocument();
+  });
+
+  it("shows the call reason as a badge, a dash until it is tagged, and nothing before reasons existed", () => {
+    renderTable([
+      ...ROWS,
+      row({ vapi_call_id: "fnol-1", call_reason: "file_claim" }),
+      row({ vapi_call_id: "untagged-1", call_reason: null }),
+      row({ vapi_call_id: "old-1", call_reason: undefined }),
+    ]);
+    expect(screen.getByRole("columnheader", { name: "Reason" })).toBeInTheDocument();
+    expect(rowFor("clean-1").querySelector("[data-call-reason]")).toHaveTextContent("Claim status");
+    expect(rowFor("fnol-1").querySelector("[data-call-reason]")).toHaveTextContent("File a claim");
+
+    expect(rowFor("live-1").querySelector("[data-call-reason]")).toBeNull();
+    expect(within(rowFor("live-1")).getByTitle("Tagged when the call ends")).toBeInTheDocument();
+    expect(within(rowFor("untagged-1")).getByTitle("No reason recorded yet")).toBeInTheDocument();
+    expect(rowFor("old-1").querySelector("[data-call-reason]")).toBeNull();
+    expect(within(rowFor("old-1")).getByText("Not recorded")).toHaveClass("sr-only");
   });
 
   it("shows the masked email under the masked phone, never the full address", () => {

@@ -1,8 +1,9 @@
 // Resets the demo project before a demo or a re-run of the flows: every per-call row goes
-// (sessions, attempts, escalations, emails, caller contacts, live transcript lines, interactions
-// and their queued call-log deliveries, which would otherwise be given up as "record missing") and the seeded
-// customers get OWNER_EMAIL as their address on file, except Teague Ashdown, who keeps none (the
-// no_email_on_file branch). Identity counters are per call, so a clean slate means the next F1
+// (sessions, attempts, escalations, emails, caller contacts, claim intakes, live transcript lines,
+// interactions and their queued call-log deliveries, which would otherwise be given up as "record
+// missing"), every claim filed by phone goes (claims.reported_call_key is set only on those), and
+// the seeded customers get OWNER_EMAIL as their address on file, except Teague Ashdown, who keeps
+// none (the no_email_on_file branch). Identity counters are per call, so a clean slate means the next F1
 // hears the plain verified sentence and F2 can lock and then F1 verify again.
 //
 //   deno task reset            show what would be deleted
@@ -10,7 +11,8 @@
 //
 // The demo project is the sandbox (the plan has one project), so the per-call tables are emptied
 // whole rather than filtered by number: every row in them belongs to a demo, smoke, battery or DB
-// test call. customers and claims are never deleted.
+// test call. customers are never deleted, and the seeded claims are kept: only a claim a call filed
+// (reported_call_key not null) is removed.
 
 import { maskEmail } from "../supabase/functions/vapi-webhook/email.ts";
 import { loadEnv, need } from "./lib/env.ts";
@@ -26,15 +28,21 @@ export const CALL_TABLES = [
   { table: "emails", key: "call_key" },
   // 0006_contacts.sql: the names, emails and callback numbers callers gave on demo calls.
   { table: "caller_contacts", key: "call_key" },
+  // 0007_fnol_reasons.sql: the losses callers reported on demo calls.
+  { table: "claim_intakes", key: "call_key" },
   { table: "transcript_lines", key: "call_key" },
   { table: "call_interactions", key: "vapi_call_id" },
   { table: "outbox_events", key: "ref_id" },
 ] as const;
 
+// The claims calls filed (0007_fnol_reasons.sql); the seeded claims have no reported_call_key.
+export const PHONE_CLAIMS = { label: "phone_claims", where: "reported_call_key is not null" } as const;
+
 const EMAIL_RE = /^[^\s@'"]+@[^\s@'"]+\.[^\s@'"]+$/;
 
 export function countSql(): string {
-  return `select ${CALL_TABLES.map(({ table }) => `(select count(*) from ${table})::int as ${table}`).join(", ")}`;
+  return `select ${CALL_TABLES.map(({ table }) => `(select count(*) from ${table})::int as ${table}`).join(", ")}, ` +
+    `(select count(*) from claims where ${PHONE_CLAIMS.where})::int as ${PHONE_CLAIMS.label}`;
 }
 
 /** One statement, so the reset is atomic: every delete and the email update commit together. */
@@ -44,6 +52,7 @@ export function resetSql(ownerEmail: string): string {
   const deletes = CALL_TABLES.map(({ table }) => `  d_${table} as (delete from ${table} returning 1)`);
   return `with
 ${deletes.join(",\n")},
+  d_${PHONE_CLAIMS.label} as (delete from claims where ${PHONE_CLAIMS.where} returning 1),
   u_customers as (
     update customers
        set email = case when phone_e164 = ${lit(NO_EMAIL_PHONE)} then null else ${lit(ownerEmail)} end
@@ -52,12 +61,14 @@ ${deletes.join(",\n")},
   )
 select
 ${CALL_TABLES.map(({ table }) => `  (select count(*) from d_${table})::int as ${table}`).join(",\n")},
+  (select count(*) from d_${PHONE_CLAIMS.label})::int as ${PHONE_CLAIMS.label},
   (select count(*) from u_customers)::int as customers_updated,
   (select count(*) from u_customers where has_email)::int as customers_with_email`;
 }
 
 function table(counts: Record<string, number>): string {
-  return CALL_TABLES.map(({ table }) => `  ${table.padEnd(18)} ${counts[table] ?? 0}`).join("\n");
+  return [...CALL_TABLES.map(({ table }) => table), PHONE_CLAIMS.label]
+    .map((name) => `  ${name.padEnd(18)} ${counts[name] ?? 0}`).join("\n");
 }
 
 async function main(): Promise<number> {
@@ -73,7 +84,7 @@ async function main(): Promise<number> {
   if (!args.includes("--yes")) {
     const [counts] = await sql<Record<string, number>>(countSql());
     console.log(`rows a reset would delete:\n${table(counts ?? {})}`);
-    console.log("customers and claims are kept. Run again with --yes to reset.");
+    console.log("customers and the seeded claims are kept. Run again with --yes to reset.");
     return 1;
   }
 

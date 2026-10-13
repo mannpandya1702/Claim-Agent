@@ -2,12 +2,16 @@
 // unit tests run against fakes (fake_store.ts, a recording fetch, a fixed clock) with no network.
 
 import type { InteractionForMirror } from "./airtable.ts";
+import type { InteractionForGhl } from "./ghl.ts";
 import type {
   AlertStatus,
   AttemptKind,
   CallbackSource,
-  Channel,
   CallerType,
+  CallReason,
+  CallReasonSource,
+  Channel,
+  ClaimIntakeKind,
   ClaimStatus,
   ClaimType,
   Code,
@@ -46,6 +50,10 @@ export interface Env {
   AIRTABLE_TOKEN?: string; // personal access token: data.records:read/write on the call-log base
   AIRTABLE_BASE_ID?: string; // appXXXXXXXXXXXXXX
   AIRTABLE_TABLE?: string; // default "Call Log"
+  GHL_TOKEN?: string; // GoHighLevel location-level Private Integration Token (contacts read/write)
+  GHL_LOCATION_ID?: string; // the one sub-account every contact, note and task goes to
+  GHL_ASSIGNEE_USER_ID?: string; // GHL user the follow-up tasks are assigned to (optional)
+  GHL_EMERGENCY_USER_ID?: string; // GHL user for the emergency task (optional; default the assignee)
 }
 
 export interface Logger {
@@ -147,6 +155,22 @@ export interface CallerContact {
   confirmed_at: string | null;
 }
 
+/** One claim_intakes row (0007_fnol_reasons.sql): the loss a caller reported on this call, one row
+ *  per call, replaced by a corrected read-back until confirm_claim files it; never rewritten after. */
+export interface ClaimIntake {
+  call_key: string;
+  kind: ClaimIntakeKind;
+  claim_type: ClaimType;
+  loss_date: string; // YYYY-MM-DD
+  summary: string; // the short read-back phrase, sanitised
+  description: string; // the caller's words, redacted, at most 500 characters
+  customer_id: string | null; // the verified customer of a claim; null for a lead intake
+  claim_id: string | null; // the claims row filing wrote (claim kind only)
+  claim_number: string | null; // CLM-NNNNNN, set when a claim is filed
+  confirmed: boolean; // filed
+  confirmed_at: string | null;
+}
+
 export interface PriorInteraction {
   vapi_call_id: string;
   started_at: string; // ISO timestamp
@@ -184,6 +208,9 @@ export interface InteractionRow {
   analysis_status?: string;
   caller_type?: CallerType | null; // the merge keeps existing/new over unknown
   caller_email?: string | null; // the confirmed captured email only, never the account's
+  call_reason?: CallReason | null; // the merge keeps a reason from a higher-ranked source
+  call_reason_source?: CallReasonSource | null;
+  claim_number?: string | null; // the claim this call filed (a verified customer's intake only)
 }
 
 export interface TranscriptLine {
@@ -193,7 +220,7 @@ export interface TranscriptLine {
   ts_ms: number;
 }
 
-/** One outbox_events row (0005_outbox.sql) as a claim returns it. */
+/** One outbox_events row (0005_outbox.sql, 0008_ghl.sql) as a claim returns it. */
 export interface OutboxRow {
   id: string;
   kind: OutboxKind;
@@ -202,7 +229,9 @@ export interface OutboxRow {
   attempts: number; // already bumped by the claim that returned the row
   delivered_at: string | null;
   last_error: string | null;
-  external_id: string | null;
+  external_id: string | null; // Airtable record id, or the GoHighLevel contact id
+  progress: Record<string, unknown>; // what a step-wise delivery (GoHighLevel) has done so far
+  next_attempt_at: string; // not claimed before this (an enqueue delay, a retry-after or a backoff)
   created_at: string;
   updated_at: string; // the claim's own write time: unique to this claim
 }
@@ -228,6 +257,14 @@ export interface OutboxFinish {
   refund?: boolean;
   attempt?: number;
   claimedAt?: string;
+  retryAfterS?: number; // a failure that is not dead: the row is not claimed again for this long
+}
+
+/** The claim a progress save is made under: the attempts and write time the claim (or the previous
+ *  save) returned. */
+export interface OutboxGuard {
+  attempt: number;
+  claimedAt: string;
 }
 
 /** An open escalation past the SLA that has not been re-alerted (ids and enums only). */
@@ -309,12 +346,19 @@ export interface Store {
   claimEmail(callKey: string, kind: EmailKind, toMasked: string): Promise<
     { claimed: true } | { claimed: false; status: EmailStatus; resendId: string | null }
   >;
-  finishEmail(callKey: string, kind: EmailKind, status: "sent" | "failed", resendId: string | null, error: string | null): Promise<void>;
+  finishEmail(
+    callKey: string,
+    kind: EmailKind,
+    status: "sent" | "failed",
+    resendId: string | null,
+    error: string | null,
+  ): Promise<void>;
   listEmails(callKey: string): Promise<EmailRow[]>;
 
-  // caller_contacts (0006_contacts.sql, upsert_caller_contact / set_caller_contact_confirmed).
+  // caller_contacts (0006_contacts.sql, upsert_caller_contact / set_caller_contact_confirmed; 0009).
   // upsertContact stores or replaces the call's row unconfirmed; a capture identical to the stored
-  // row keeps its confirmation, so a retried delivery never undoes a confirm.
+  // row (callback number and its source included) keeps its confirmation, so a retried delivery never
+  // undoes a confirm, and a new number always needs one.
   upsertContact(p: {
     callKey: string;
     kind: ContactKind;
@@ -330,6 +374,25 @@ export interface Store {
   // null when the call has no row.
   setContactConfirmed(callKey: string, confirmed: boolean): Promise<CallerContact | null>;
 
+  // claim_intakes (0007_fnol_reasons.sql). upsertClaimIntake stores or replaces the call's unconfirmed
+  // intake and returns a filed one unchanged; fileClaimIntake files it once (a claims row with a new
+  // claim number for the claim kind) and returns it, filed already or now, with filedNow true only for
+  // the call that filed it (0009 file_claim_intake_once: a parallel delivery waits on the row lock and
+  // reads false); rejectClaimIntake leaves it unconfirmed (a filed one is returned as it is). Both are
+  // null when the call has no intake.
+  upsertClaimIntake(p: {
+    callKey: string;
+    kind: ClaimIntakeKind;
+    claimType: ClaimType;
+    lossDate: string; // YYYY-MM-DD
+    summary: string;
+    description: string; // already redacted
+    customerId: string | null;
+  }): Promise<ClaimIntake>;
+  fileClaimIntake(callKey: string): Promise<{ intake: ClaimIntake; filedNow: boolean } | null>;
+  rejectClaimIntake(callKey: string): Promise<ClaimIntake | null>;
+  getClaimIntake(callKey: string): Promise<ClaimIntake | null>;
+
   // last 3 completed interactions for this customer, excluding this call, newest first
   priorInteractions(customerId: string, excludeCallKey: string, limit: number): Promise<PriorInteraction[]>;
 
@@ -340,15 +403,27 @@ export interface Store {
   deleteTranscriptLines(callKey: string): Promise<void>;
   captureWebhook(messageType: string | null, callKey: string | null, body: unknown): Promise<void>;
 
-  // Outbox (0005_outbox.sql): completed calls mirrored to Airtable, capped at-least-once.
-  enqueueOutbox(kind: OutboxKind, refId: string, destination?: OutboxDestination): Promise<void>; // enqueue or re-arm
-  // Bumps attempts with a compare-and-set; oldest first, or only the ref's row; never a delivered or
-  // spent row, nor one written within the lease (store_rules.ts outboxClaimable).
-  claimOutbox(limit: number, ref?: OutboxRef): Promise<OutboxRow[]>;
+  // Outbox (0005_outbox.sql, 0008_ghl.sql): completed calls mirrored to Airtable and GoHighLevel,
+  // capped at-least-once. enqueueOutbox enqueues or re-arms; delayS (default 0) sets next_attempt_at
+  // and a re-arm never touches progress.
+  enqueueOutbox(kind: OutboxKind, refId: string, destination?: OutboxDestination, delayS?: number): Promise<void>;
+  // Bumps attempts with a compare-and-set; oldest first, or only the ref's row (else only the
+  // destination's rows, when given); never a delivered or spent row, one not yet due
+  // (next_attempt_at), nor one written within the lease (store_rules.ts outboxClaimable).
+  claimOutbox(limit: number, ref?: OutboxRef, destination?: OutboxDestination): Promise<OutboxRow[]>;
   finishOutbox(id: string, result: OutboxFinish): Promise<boolean>; // false when no row matched
+  // save_outbox_progress: merges patch into progress (always, it records what the receiver did) and
+  // says whether the guard's claim still holds; savedAt is the next guard's claimedAt. null: no row.
+  saveOutboxProgress(
+    id: string,
+    patch: Record<string, unknown>,
+    guard: OutboxGuard,
+  ): Promise<{ savedAt: string; held: boolean } | null>;
   getInteractionForMirror(vapiCallId: string): Promise<InteractionForMirror | null>;
-  // Ended in [from, to) and missing from the call log (store_rules.ts outboxGap); oldest end first, capped
-  listOutboxGaps(fromIso: string, toIso: string): Promise<string[]>;
+  getInteractionForGhl(vapiCallId: string): Promise<InteractionForGhl | null>;
+  // Ended in [from, to) and missing from the destination (store_rules.ts outboxGap; default the call
+  // log); oldest end first, capped
+  listOutboxGaps(fromIso: string, toIso: string, destination?: OutboxDestination): Promise<string[]>;
 
   // Scheduled jobs (0004_automation.sql). claimJobRun inserts (job, period_key) once: true for
   // the first caller of the period, false for any re-fire. releaseJobRun deletes the period's run

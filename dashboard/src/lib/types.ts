@@ -24,8 +24,29 @@ export const FLAGS = [
   "status_read_without_verified_identity",
   "tool_markup_spoken",
   "email_promised_without_send",
+  "claim_promised_without_filing",
 ] as const;
 export type Flag = (typeof FLAGS)[number];
+
+/**
+ * Why the caller called, one primary reason per call (0007_fnol_reasons.sql). Set from server
+ * facts first (an emergency, a filed claim), then the call analysis, then what the tools did;
+ * null until one of them knows, never a guess.
+ */
+export const CALL_REASONS = [
+  "claim_status",
+  "file_claim",
+  "documents",
+  "general_question",
+  "speak_to_agent",
+  "update_details",
+  "emergency",
+  "other",
+] as const;
+export type CallReason = (typeof CALL_REASONS)[number];
+
+/** Which evidence set call_reason: server facts outrank the analysis, which outranks tool results. */
+export type CallReasonSource = "server" | "structured_output" | "derived";
 
 /**
  * Who called, as the end-of-call writer records it (0006_contacts.sql): existing = the session
@@ -55,7 +76,9 @@ export type EmailKind =
   | "sla_realert"
   | "document_checklist"
   | "claim_summary"
-  | "how_to_start_claim";
+  | "how_to_start_claim"
+  | "claim_received"
+  | "claim_intake";
 export type EmailStatus = "pending" | "sending" | "sent" | "failed";
 export type AnalysisStatus = "pending" | "ok" | "backfilled" | "missing";
 
@@ -104,6 +127,11 @@ export interface CallInteraction {
   caller_type?: CallerType;
   /** The address a caller confirmed on the read-back (never the account's own email). Detail page only. */
   caller_email?: string | null;
+  /** 0007_fnol_reasons.sql; absent before it is applied. Null until a source knows why they called. */
+  call_reason?: CallReason | null;
+  call_reason_source?: CallReasonSource | null;
+  /** The claim this call filed (a verified customer's phone claim). */
+  claim_number?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -122,6 +150,8 @@ export interface CallListRow {
   /** "j***@gmail.com", masked in SQL; the full address stays on the detail page. Absent before 0006. */
   caller_email_masked?: string | null;
   outcome: Outcome | null;
+  /** 0007_fnol_reasons.sql; absent before it is applied. */
+  call_reason?: CallReason | null;
   sentiment: Sentiment | null;
   escalated: boolean;
   emergency: boolean;
@@ -237,6 +267,32 @@ export interface CallerContact {
   updated_at: string;
 }
 
+export type ClaimType = "auto" | "home" | "property";
+/** claim: a verified customer's claim, filed as a claims row; lead_intake: a new caller's loss for a specialist. */
+export type ClaimIntakeKind = "claim" | "lead_intake";
+
+/**
+ * claim_intakes (0007_fnol_reasons.sql): the loss a caller reported on this call, one row per
+ * call. Unconfirmed while Ava reads it back; confirmed once the caller said yes, which files it
+ * (a claim gets a claim number; a lead intake waits for a specialist's callback). The description
+ * is the caller's words with personal details redacted before storage.
+ */
+export interface ClaimIntake {
+  call_key: string;
+  kind: ClaimIntakeKind;
+  claim_type: ClaimType;
+  /** A calendar date ("2026-10-10"), not an instant. */
+  loss_date: string;
+  summary: string;
+  description: string;
+  claim_number: string | null;
+  /** The caller said yes to the read-back, and the intake was filed. */
+  confirmed: boolean;
+  confirmed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface TranscriptLineRow {
   id: number;
   call_key: string;
@@ -252,10 +308,13 @@ export interface OutboxEvent {
   kind: string;
   /** call_interactions.vapi_call_id */
   ref_id: string;
+  /** "airtable", or "ghl" from 0008_ghl.sql. */
   destination: string;
   delivered_at: string | null;
   attempts: number;
   last_error: string | null;
+  /** The receiver's id once delivered: the Airtable record, or the GoHighLevel contact (null when skipped). */
+  external_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -287,6 +346,10 @@ export interface OpsHealth {
   outbox_pending?: number;
   outbox_dead?: number;
   outbox_delivered_24h?: number;
+  /** GoHighLevel's outbox counts arrive with 0008_ghl.sql (the outbox_* ones are then Airtable's only). */
+  ghl_pending?: number;
+  ghl_dead?: number;
+  ghl_delivered_24h?: number;
 }
 
 /** dashboard_metrics(p_from, p_to). Rates are 0..1 and null when nothing completed in range. */
@@ -321,6 +384,12 @@ export interface CallsByDayRow {
   n: number;
 }
 
+/** call_reason_counts(p_from, p_to): calls per reason in range, most first; untagged calls are left out. */
+export interface CallReasonCount {
+  call_reason: string;
+  calls: number;
+}
+
 export interface DeliveryGapRow {
   channel: "telegram" | "email";
   owed: number;
@@ -328,10 +397,10 @@ export interface DeliveryGapRow {
   failed: number;
 }
 
-/** Alert channels from escalation_delivery_gap, plus the Airtable call log from the outbox. */
-export type DeliveryChannel = "telegram" | "email" | "airtable";
+/** Alert channels from escalation_delivery_gap, plus the outbox destinations (Airtable, GoHighLevel). */
+export type DeliveryChannel = "telegram" | "email" | "airtable" | "ghl";
 
-/** Tables published to supabase_realtime (0003_dashboard.sql, 0005_outbox.sql, 0006_contacts.sql). */
+/** Tables published to supabase_realtime (0003_dashboard.sql, 0005_outbox.sql, 0006_contacts.sql, 0007_fnol_reasons.sql). */
 export type RealtimeTable =
   | "call_interactions"
   | "call_sessions"
@@ -340,4 +409,5 @@ export type RealtimeTable =
   | "transcript_lines"
   | "attempts"
   | "outbox_events"
-  | "caller_contacts";
+  | "caller_contacts"
+  | "claim_intakes";

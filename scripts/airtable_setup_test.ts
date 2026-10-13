@@ -2,7 +2,7 @@
 // select options the enums allow, or a delivery fails with a 422 on the first new value.
 import { assert, assertEquals } from "@std/assert";
 import { interactionToFields, MERGE_FIELD } from "../supabase/functions/vapi-webhook/airtable.ts";
-import { CALLER_TYPES } from "../supabase/functions/vapi-webhook/enums.ts";
+import { CALL_REASONS, CALLER_TYPES } from "../supabase/functions/vapi-webhook/enums.ts";
 import { FIELDS } from "./airtable_setup.ts";
 
 Deno.test("airtable setup: every field the mirror writes exists, the merge key first", () => {
@@ -28,10 +28,14 @@ Deno.test("airtable setup: every field the mirror writes exists, the merge key f
       analysis_status: "ok",
       caller_type: "new",
       caller_email: "jane.doe@gmail.com",
+      call_reason: "file_claim",
+      claim_number: "CLM-104472",
     },
     new Date("2026-10-12T15:03:00Z"),
     "https://staff.example.com/",
   );
+  // the row sets every column, so the newest fields are checked against setup too
+  for (const key of ["Call Reason", "Claim Number"]) assert(key in written, `the row never writes "${key}"`);
   for (const key of Object.keys(written)) {
     assert(
       names.has(key),
@@ -48,4 +52,14 @@ Deno.test("airtable setup: Caller Type offers exactly the caller types and Email
     [...CALLER_TYPES],
   );
   assertEquals(FIELDS.find((f) => f.name === "Email")?.type, "email");
+});
+
+Deno.test("airtable setup: Call Reason offers exactly the call reasons and Claim Number is text", () => {
+  const reason = FIELDS.find((f) => f.name === "Call Reason");
+  assertEquals(reason?.type, "singleSelect");
+  assertEquals(
+    (reason?.options as { choices: { name: string }[] }).choices.map((c) => c.name),
+    [...CALL_REASONS],
+  );
+  assertEquals(FIELDS.find((f) => f.name === "Claim Number")?.type, "singleLineText");
 });

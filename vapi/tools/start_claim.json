@@ -1,0 +1,54 @@
+{
+  "type": "function",
+  "async": false,
+  "function": {
+    "name": "start_claim",
+    "strict": false,
+    "description": "Take down a new loss the caller is reporting, for a verified caller or a new caller whose details were confirmed on this call. Call it once you know what happened and when, and again with every detail, corrected, after the caller says the read-back was wrong. Its result is a sentence that has already been spoken to the caller: it reads the claim back and asks whether it is correct, or asks for what is still missing.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "claim_type": {
+          "type": "string",
+          "enum": ["auto", "home", "property"],
+          "description": "auto for a car or another vehicle; home for the caller's own home; property for anything else, such as a rental property, a boat or their belongings."
+        },
+        "loss_date": {
+          "type": "string",
+          "description": "When it happened, exactly as the caller said it, such as \"yesterday\", \"on Sunday\" or \"October tenth\", including a day they mentioned in passing while telling what happened. Never work out, convert or guess the date yourself."
+        },
+        "description": {
+          "type": "string",
+          "description": "What happened, in the caller's own words. Never a date of birth, a phone number or a policy number."
+        },
+        "summary": {
+          "type": "string",
+          "description": "A few plain words for the read-back, at most eight, that fit after \"a claim for\", in the third person, never \"I\", \"my\" or \"we\", such as \"a cracked windshield\" or \"a tree on the roof\"."
+        }
+      },
+      "required": ["claim_type", "loss_date", "description"],
+      "additionalProperties": false
+    }
+  },
+  "server": {
+    "url": "<<SERVER_URL>>",
+    "credentialId": "<<CREDENTIAL_ID>>",
+    "timeoutSeconds": 10
+  },
+  "messages": [
+    {
+      "type": "request-start",
+      "blocking": false,
+      "content": "Alright, one moment."
+    },
+    {
+      "type": "request-response-delayed",
+      "timingMilliseconds": 3000,
+      "content": "Thanks for bearing with me, almost there."
+    },
+    {
+      "type": "request-failed",
+      "content": "I'm sorry, I couldn't take down those details just now. I can have a claims specialist call you back to help. Would you like that?"
+    }
+  ]
+}

@@ -12,10 +12,20 @@
 
 import { airtableConfigured } from "./airtable.ts";
 import { alertSinks, type EscalationAlert, sendAlert } from "./alert.ts";
-import { callbackRequestEmail, maskEmail, sendEmail, type TeamCaller, teamCallerOf, UNKNOWN_TEAM_CALLER } from "./email.ts";
+import {
+  callbackRequestEmail,
+  maskEmail,
+  sendEmail,
+  type TeamCaller,
+  teamCallerOf,
+  UNKNOWN_TEAM_CALLER,
+} from "./email.ts";
 import {
   ANALYSIS_OUTCOMES,
+  CALL_REASONS,
   type CallerType,
+  type CallReason,
+  type CallReasonSource,
   type Channel,
   CHANNELS,
   CODES,
@@ -34,6 +44,7 @@ import type { StoreExtras } from "./store.ts";
 import type {
   AttemptRow,
   CallerContact,
+  ClaimIntake,
   Customer,
   Deps,
   Env,
@@ -43,8 +54,9 @@ import type {
   VapiMessage,
 } from "./types.ts";
 
-/** The server facts plus the call's captured contact (caller_contacts), when the caller gave one. */
-export type PostCallFacts = CallFacts & { contact?: CallerContact | null };
+/** The server facts plus the call's captured contact (caller_contacts) and the loss it reported
+ *  (claim_intakes), when there are any. */
+export type PostCallFacts = CallFacts & { contact?: CallerContact | null; intake?: ClaimIntake | null };
 
 /** Backfill schedule: GET /call/{id} this many ms apart until the analysis shows up. */
 export const BACKFILL_DELAYS_MS: readonly number[] = [5000, 15000, 45000];
@@ -77,6 +89,7 @@ const CODE_SET: ReadonlySet<string> = new Set(CODES);
 const CHANNEL_SET: ReadonlySet<string> = new Set(CHANNELS);
 const SENTIMENT_SET: ReadonlySet<string> = new Set(SENTIMENTS);
 const OUTCOME_SET: ReadonlySet<string> = new Set(ANALYSIS_OUTCOMES);
+const CALL_REASON_SET: ReadonlySet<string> = new Set(CALL_REASONS);
 
 // ISO 8601 with a time and an explicit zone: anything else would be read in the database's zone,
 // or reject the whole upsert with 22007.
@@ -370,6 +383,16 @@ function llmOutcome(message: VapiMessage): Outcome | null {
   return firstOf(values, analysisOutcomeOf);
 }
 
+function callReasonValue(v: unknown): CallReason | null {
+  const s = str(v)?.toLowerCase();
+  return s && CALL_REASON_SET.has(s) ? s as CallReason : null;
+}
+
+function structuredCallReason(message: VapiMessage): CallReason | null {
+  const values = [obj(obj(message.analysis).structuredData).call_reason, ...outputValues(message, "call_reason")];
+  return firstOf(values, callReasonValue);
+}
+
 function structuredCallerName(message: VapiMessage): string | null {
   const values = [obj(obj(message.analysis).structuredData).caller_name, ...outputValues(message, "caller_name")];
   return firstOf(values, callerNameOf);
@@ -434,11 +457,14 @@ function transferred(message: VapiMessage, raw: unknown[] | null): boolean {
   return raw?.some((m) => isObj(m) && m.role === "tool_call_result" && m.name === "transferCall") ?? false;
 }
 
-function serverOutcome(facts: CallFacts, escalatedByTransfer: boolean, everVerified: boolean): Outcome | null {
+function serverOutcome(facts: PostCallFacts, escalatedByTransfer: boolean, everVerified: boolean): Outcome | null {
   const escalations = facts.escalations ?? [];
   const attempts = facts.attempts ?? [];
   if (escalations.some((e) => e.kind === "emergency")) return "emergency";
   if (escalatedByTransfer || escalations.some((e) => e.kind === "representative")) return "escalated";
+  // A claim taken on the call (either kind) resolved it, a new caller's lead intake included: they
+  // were not found, and that was handled.
+  if (facts.intake?.confirmed === true) return "resolved";
   if (facts.session?.level === "locked") return "auth_failed";
   if (!everVerified && attempts.some((a) => a.kind === "lookup_miss")) return "not_found";
   const statusRead = attempts.some((a) =>
@@ -453,6 +479,33 @@ function serverOutcome(facts: CallFacts, escalatedByTransfer: boolean, everVerif
 function callerTypeOf(session: Session | null, attempts: AttemptRow[], contact: CallerContact | null): CallerType {
   if ((session?.level ?? "none") !== "none" || attempts.some((a) => a.kind === "lookup_hit")) return "existing";
   return contact?.kind === "new_customer" ? "new" : "unknown";
+}
+
+/** Pure: why the caller called, and who says so. Server facts first (an emergency row, then a claim
+ *  filed on the call), then the structured output when it names a known reason, then a reason
+ *  derived from what the tools did (a status read, a document checklist sent, a representative
+ *  request, an email update, the steps to start a claim sent); otherwise null, left for the
+ *  backfill. Never invented. */
+export function callReasonOf(
+  message: VapiMessage,
+  facts: PostCallFacts,
+): { reason: CallReason; source: CallReasonSource } | null {
+  const escalations = facts.escalations ?? [];
+  if (escalations.some((e) => e.kind === "emergency")) return { reason: "emergency", source: "server" };
+  if (facts.intake?.confirmed === true) return { reason: "file_claim", source: "server" };
+  const structured = structuredCallReason(message);
+  if (structured) return { reason: structured, source: "structured_output" };
+  const attempts = facts.attempts ?? [];
+  const sent = (kind: string) => (facts.emails ?? []).some((e) => e.kind === kind && e.status === "sent");
+  // verify_identity's chained read is recorded as a get_claim_status of its own, so it counts here
+  if (attempts.some((a) => a.tool_name === "get_claim_status" && (a.code === "ok" || a.code === "no_claims"))) {
+    return { reason: "claim_status", source: "derived" };
+  }
+  if (sent("document_checklist")) return { reason: "documents", source: "derived" };
+  if (escalations.some((e) => e.kind === "representative")) return { reason: "speak_to_agent", source: "derived" };
+  if (facts.contact?.kind === "email_update") return { reason: "update_details", source: "derived" };
+  if (sent("how_to_start_claim")) return { reason: "file_claim", source: "derived" };
+  return null;
 }
 
 /** Pure: the interaction row from an end-of-call-report plus server facts. */
@@ -500,6 +553,8 @@ export function buildInteractionRow(
     attempts.some((a) => a.tool_name === "verify_identity" && a.code === "verified");
   const outcome = serverOutcome(facts, byTransfer, everVerified) ?? idleOutcome(message) ?? llmOutcome(message) ??
     (hasUserTurn(raw, transcriptText) ? "resolved" : "abandoned");
+  const reason = callReasonOf(message, facts);
+  const intake = facts.intake ?? null;
 
   const startedAt = isoOrNull(message.startedAt);
   const endedAt = isoOrNull(message.endedAt);
@@ -527,6 +582,7 @@ export function buildInteractionRow(
       attempts,
       escalations: facts.escalations ?? [],
       emails: facts.emails ?? [],
+      intake,
     }),
     started_at: startedAt,
     ended_at: endedAt,
@@ -550,6 +606,10 @@ export function buildInteractionRow(
     // Only an address the caller confirmed, and never next to an account the caller did not verify
     // (the name's guard); the account's own email never lands in the call record.
     caller_email: confirmed && !candidateUnverified ? confirmed.email ?? null : null,
+    call_reason: reason?.reason ?? null,
+    call_reason_source: reason?.source ?? null,
+    // The claim this call filed: a verified customer's intake only (a lead intake has no number).
+    claim_number: intake?.confirmed === true && intake.kind === "claim" ? intake.claim_number ?? null : null,
   };
 }
 
@@ -557,17 +617,18 @@ export function buildInteractionRow(
 // end-of-call-report.
 // ---------------------------------------------------------------------------------------------
 async function readCallFacts(store: Store, callKey: string): Promise<PostCallFacts> {
-  const [session, attempts, escalations, emails, contact] = await Promise.all([
+  const [session, attempts, escalations, emails, contact, intake] = await Promise.all([
     store.getSession(callKey),
     store.listAttempts(callKey),
     store.listEscalations(callKey),
     store.listEmails(callKey),
     store.getContact(callKey),
+    store.getClaimIntake(callKey),
   ]);
   const verifiedCustomer = session?.level === "verified" && session.verified_customer_id
     ? await store.getCustomer(session.verified_customer_id)
     : null;
-  return { session, verifiedCustomer, attempts, escalations, emails, contact };
+  return { session, verifiedCustomer, attempts, escalations, emails, contact, intake };
 }
 
 /** The report's analysis inputs with the fetched call's filling the gaps. The report stays the

@@ -66,10 +66,19 @@ function daysFor(preset: "7d" | "30d") {
   ];
 }
 
-function mockRpc(metrics: unknown = METRICS, days: unknown = daysFor("7d")) {
+const REASONS = [
+  { call_reason: "claim_status", calls: "18" },
+  { call_reason: "file_claim", calls: "9" },
+  { call_reason: "speak_to_agent", calls: "6" },
+  { call_reason: "documents", calls: "4" },
+  { call_reason: "emergency", calls: "1" },
+];
+
+function mockRpc(metrics: unknown = METRICS, days: unknown = daysFor("7d"), reasons: unknown = REASONS) {
   rpc.mockImplementation(async (fn: string) => {
     if (fn === "dashboard_metrics") return { data: metrics, error: null };
     if (fn === "calls_by_day") return { data: days, error: null };
+    if (fn === "call_reason_counts") return { data: reasons, error: null };
     return { data: null, error: { message: `unexpected rpc ${fn}` } };
   });
 }
@@ -124,6 +133,7 @@ describe("Overview", () => {
     const range = presetRange("7d");
     expect(rpc).toHaveBeenCalledWith("dashboard_metrics", { p_from: range.from, p_to: range.to });
     expect(rpc).toHaveBeenCalledWith("calls_by_day", { p_from: range.from, p_to: range.to });
+    expect(rpc).toHaveBeenCalledWith("call_reason_counts", { p_from: range.from, p_to: range.to });
   });
 
   it("turns flagged calls and SLA breaches red with words, not color alone", async () => {
@@ -166,6 +176,54 @@ describe("Overview", () => {
     await waitFor(() => expect(daily.querySelector("svg [data-peak-label]")?.textContent).toBe("7"));
   });
 
+  it("draws the top call reasons as ranked bars with words, counts and shares", async () => {
+    mockRpc();
+    renderOverview();
+
+    const card = await screen.findByRole("region", { name: "Top call reasons" });
+    const list = await within(card).findByRole("list", { name: "Call reasons" });
+    const rows = within(list).getAllByRole("listitem");
+    expect(rows.map((r) => r.getAttribute("data-call-reason"))).toEqual(["claim_status", "file_claim", "speak_to_agent", "documents", "emergency"]);
+    expect(rows[0]).toHaveTextContent("Claim status");
+    expect(rows[2]).toHaveTextContent("Speak to an agent");
+    expect(within(rows[0]!).getByRole("img", { name: "Claim status: 18 calls, 47% of tagged calls" })).toBeInTheDocument();
+    expect(within(card).getByText("Main reason for 38 tagged calls")).toBeInTheDocument();
+    // 42 calls in range, 38 tagged
+    expect(within(card).getByText(/4 calls have no reason yet/)).toBeInTheDocument();
+
+    // one hue for every bar (one measure across categories), scaled to the largest reason
+    const bars = Array.from(card.querySelectorAll<HTMLElement>("[role='img'] > .viz-mark"));
+    expect(new Set(bars.map((b) => b.style.backgroundColor))).toEqual(new Set(["var(--series-1)"]));
+    expect(bars[0]!.style.width).toBe("100%");
+    expect(bars[1]!.style.width).toBe("50%");
+
+    await userEvent.click(within(card).getByRole("tab", { name: /Table/ }));
+    const table = within(card).getByRole("table", { name: "Calls by reason" });
+    const cells = within(table).getAllByRole("row").map((r) => r.textContent);
+    expect(cells).toContain("No reason yet4—");
+    expect(cells[cells.length - 1]).toBe("All calls42");
+  });
+
+  it("says so when calls in range have no reason yet", async () => {
+    mockRpc(METRICS, daysFor("7d"), []);
+    renderOverview();
+    const card = await screen.findByRole("region", { name: "Top call reasons" });
+    expect(await within(card).findByText("No call reasons yet")).toBeInTheDocument();
+    expect(within(card).queryByRole("list", { name: "Call reasons" })).not.toBeInTheDocument();
+  });
+
+  it("shows a reasons read failure in its card, with a retry", async () => {
+    rpc.mockImplementation(async (fn: string) => {
+      if (fn === "call_reason_counts") return { data: null, error: { message: "function call_reason_counts does not exist" } };
+      if (fn === "dashboard_metrics") return { data: METRICS, error: null };
+      return { data: daysFor("7d"), error: null };
+    });
+    renderOverview();
+    const card = await screen.findByRole("region", { name: "Top call reasons" });
+    expect(await within(card).findByText("Could not load call reasons")).toBeInTheDocument();
+    expect(within(card).getByText(/call_reason_counts does not exist/)).toBeInTheDocument();
+  });
+
   it("switches a chart to its table view", async () => {
     mockRpc();
     renderOverview();
@@ -205,7 +263,7 @@ describe("Overview", () => {
     await waitFor(() => expect(tileValue("Calls")).toBe("0"));
     expect(tileValue("Containment")).toBe("n/a");
     expect(tileValue("Average cost")).toBe("n/a");
-    expect(await screen.findAllByText("No calls in this range")).toHaveLength(3);
+    expect(await screen.findAllByText("No calls in this range")).toHaveLength(4);
   });
 
   it("shows an error with a working retry when the metrics call fails", async () => {

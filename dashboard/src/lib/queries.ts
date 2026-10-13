@@ -5,8 +5,10 @@ import type {
   CallerContact,
   CallInteraction,
   CallListRow,
+  CallReasonCount,
   CallsByDayRow,
   CallSession,
+  ClaimIntake,
   DashboardMetrics,
   DeliveryGapRow,
   EmailRow,
@@ -43,9 +45,11 @@ export const qk = {
   callEmails: (id: string) => ["call", id, "emails"] as const,
   callOutbox: (id: string) => ["call", id, "outbox"] as const,
   callContact: (id: string) => ["call", id, "contact"] as const,
+  callIntake: (id: string) => ["call", id, "intake"] as const,
 
   metrics: (range: DateRange) => ["metrics", range.from, range.to] as const,
   callsByDay: (range: DateRange) => ["calls-by-day", range.from, range.to] as const,
+  callReasons: (range: DateRange) => ["call-reasons", range.from, range.to] as const,
 
   escalations: () => ["escalations"] as const,
   escalationList: (status: EscalationStatus | "all") => ["escalations", status] as const,
@@ -97,13 +101,18 @@ const CALL_DETAIL_COLUMNS_BEFORE_0006 = [
   "updated_at",
 ];
 
-/** Detail columns, with 0006_contacts.sql's caller_type and caller_email (the confirmed captured address). */
-export const CALL_DETAIL_COLUMNS = [...CALL_DETAIL_COLUMNS_BEFORE_0006, "caller_type", "caller_email"].join(",");
+/** With 0006_contacts.sql's caller_type and caller_email (the confirmed captured address). */
+const CALL_DETAIL_COLUMNS_BEFORE_0007 = [...CALL_DETAIL_COLUMNS_BEFORE_0006, "caller_type", "caller_email"];
+
+/** Detail columns, with 0007_fnol_reasons.sql's call reason, its source and the claim number the call filed. */
+export const CALL_DETAIL_COLUMNS = [...CALL_DETAIL_COLUMNS_BEFORE_0007, "call_reason", "call_reason_source", "claim_number"].join(",");
 
 /** PostgREST's answer when a selected column does not exist yet (Postgres undefined_column). */
-function isMissingContactColumn(error: { code?: string; message: string } | null): boolean {
-  return !!error && error.code === "42703" && /caller_(type|email)/.test(error.message);
+function isMissingColumn(error: { code?: string; message: string } | null, columns: RegExp): boolean {
+  return !!error && error.code === "42703" && columns.test(error.message);
 }
+const COLUMNS_0006 = /caller_(type|email)/;
+const COLUMNS_0007 = /call_reason|claim_number/;
 
 /**
  * Columns for live cards and other non-detail views: no transcript, messages, raw analysis or
@@ -160,6 +169,13 @@ export async function fetchCallsByDay(range: DateRange): Promise<CallsByDayRow[]
   return ((data ?? []) as CallsByDayRow[]).map((r) => ({ ...r, n: Number(r.n) }));
 }
 
+/** Calls per reason in range, most first (counted in SQL); calls with no reason yet are not in it. */
+export async function fetchCallReasonCounts(range: DateRange): Promise<CallReasonCount[]> {
+  const { data, error } = await supabase.rpc("call_reason_counts", { p_from: range.from, p_to: range.to });
+  fail(error);
+  return ((data ?? []) as CallReasonCount[]).map((r) => ({ call_reason: String(r.call_reason), calls: Number(r.calls) }));
+}
+
 export async function fetchLiveCalls(): Promise<CallSummary[]> {
   // Live is ended_at is null, never the generated status column (Realtime does not carry it).
   const { data, error } = await supabase
@@ -180,8 +196,10 @@ export async function fetchCall(id: string): Promise<CallInteraction | null> {
   const read = (columns: string) => supabase.from("call_interactions").select(columns).eq("vapi_call_id", id).maybeSingle();
   let { data, error } = await read(CALL_DETAIL_COLUMNS);
   // The dashboard deploys on merge and migrations are applied by hand, so for the minutes between
-  // the two the page reads the older columns instead of failing every call (no caller type yet).
-  if (isMissingContactColumn(error)) ({ data, error } = await read(CALL_DETAIL_COLUMNS_BEFORE_0006.join(",")));
+  // the two the page reads the older columns instead of failing every call (no call reason or
+  // caller type yet), one migration at a time.
+  if (isMissingColumn(error, COLUMNS_0007)) ({ data, error } = await read(CALL_DETAIL_COLUMNS_BEFORE_0007.join(",")));
+  if (isMissingColumn(error, COLUMNS_0006)) ({ data, error } = await read(CALL_DETAIL_COLUMNS_BEFORE_0006.join(",")));
   fail(error);
   return (data ?? null) as unknown as CallInteraction | null;
 }
@@ -232,11 +250,14 @@ export async function fetchCallEmails(id: string): Promise<EmailRow[]> {
   return (data ?? []) as EmailRow[];
 }
 
-/** Post-call deliveries for this call (the Airtable call log), keyed by the call id. */
+/**
+ * Post-call deliveries for this call (the Airtable call log, GoHighLevel), keyed by the call id.
+ * external_id is the receiver's record: a delivered GoHighLevel row holds the contact id.
+ */
 export async function fetchCallOutbox(id: string): Promise<OutboxEvent[]> {
   const { data, error } = await supabase
     .from("outbox_events")
-    .select("id,kind,ref_id,destination,delivered_at,attempts,last_error,created_at,updated_at")
+    .select("id,kind,ref_id,destination,delivered_at,attempts,last_error,external_id,created_at,updated_at")
     .eq("ref_id", id)
     .order("created_at");
   fail(error);
@@ -255,6 +276,17 @@ export async function fetchCallContact(id: string): Promise<CallerContact | null
   const { data, error } = await supabase.from("caller_contacts").select(CALLER_CONTACT_COLUMNS).eq("call_key", id).maybeSingle();
   fail(error);
   return (data ?? null) as unknown as CallerContact | null;
+}
+
+/** claim_intakes columns the call page shows (customer_id and claim_id are not needed in the browser). */
+export const CLAIM_INTAKE_COLUMNS =
+  "call_key,kind,claim_type,loss_date,summary,description,claim_number,confirmed,confirmed_at,created_at,updated_at";
+
+/** The loss the caller reported on this call (one row per call, or none). */
+export async function fetchCallIntake(id: string): Promise<ClaimIntake | null> {
+  const { data, error } = await supabase.from("claim_intakes").select(CLAIM_INTAKE_COLUMNS).eq("call_key", id).maybeSingle();
+  fail(error);
+  return (data ?? null) as unknown as ClaimIntake | null;
 }
 
 /**

@@ -9,6 +9,7 @@ interface ImportMetaEnv {
   readonly VITE_SQUAD_ID?: string;
   readonly VITE_BUILD_SHA?: string;
   readonly VITE_PHONE_NUMBER?: string;
+  readonly VITE_GHL_LOCATION_ID?: string;
 }
 
 interface ImportMeta {

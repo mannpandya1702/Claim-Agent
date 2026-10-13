@@ -3,9 +3,11 @@
 // an outcome: identity comes from the session row, the callback target from the caller, the
 // account or the envelope, and a channel counts as delivered only when its transport confirmed it.
 
-import { alertSinks, type EscalationAlert, sendAlert } from "./alert.ts";
+import { alertSinks, type ClaimIntakeAlert, type EscalationAlert, sendAlert, type TeamAlert } from "./alert.ts";
 import {
   callbackRequestEmail,
+  claimIntakeEmail,
+  claimReceivedEmail,
   claimSummaryEmail,
   documentChecklistEmail,
   emergencyEmail,
@@ -16,6 +18,9 @@ import {
 } from "./email.ts";
 import {
   type CallbackSource,
+  CLAIM_DOCUMENTS,
+  CLAIM_TYPES,
+  type ClaimType,
   type Code,
   CODES,
   type ContactCallbackSource,
@@ -28,6 +33,8 @@ import {
   MODEL_ESCALATION_REASONS,
   type ServerTool,
   TIMEZONE,
+  VERIFY_INTENTS,
+  type VerifyIntent,
 } from "./enums.ts";
 import {
   lastFour,
@@ -37,15 +44,27 @@ import {
   parseDobParts,
   usableCallbackNumber,
 } from "./identity.ts";
+import { parseLossDate } from "./loss_date.ts";
 import { parseToolRequest } from "./parse_tool_request.ts";
 import { verifiedSentence } from "./prior_contacts.ts";
 import { redactPII } from "./redact.ts";
-import { assertSpeakable, claimsSentence, sentenceFor, spokenName } from "./speak.ts";
+import {
+  assertSpeakable,
+  claimsSentence,
+  MAX_SPOKEN_CHARS,
+  sentenceFor,
+  spokenName,
+  verifiedFileClaimSentence,
+  verifiedStatusSentence,
+  withoutTrailingQuestion,
+} from "./speak.ts";
 import type {
   AttemptRow,
   CallerContact,
   Claim,
+  ClaimIntake,
   Customer,
+  EmailRow,
   Env,
   EscalationRow,
   ParsedToolCall,
@@ -252,6 +271,75 @@ const VERIFY_CODES: ReadonlySet<Code> = new Set<Code>([
   "dob_give_up",
 ]);
 
+function verifyIntentOf(v: unknown): VerifyIntent {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+  // An intent off the list never refuses a verification; it only loses the shortcut.
+  return (VERIFY_INTENTS as readonly string[]).includes(s) ? s as VerifyIntent : "other";
+}
+
+// start_claim answers that sent the caller to verify (or look up) first, or to give their details first.
+const VERIFY_RESUME_CODES: ReadonlySet<string> = new Set(["claim_needs_verification", "claim_needs_lookup"]);
+const CONTACT_RESUME_CODES: ReadonlySet<string> = new Set([
+  "claim_needs_contact",
+  "claim_needs_lookup",
+  "claim_needs_phone",
+]);
+
+/** Whether a start_claim on this call was answered with one of `codes`: the caller already told the
+ *  loss, and was sent to verify or give their details first. The next sentence then asks whether to
+ *  take it down now instead of asking what happened again. A failed read asks what happened. */
+async function claimWaiting(ctx: Run, codes: ReadonlySet<string>): Promise<boolean> {
+  const attempts = await readOr<AttemptRow[]>(ctx, "listAttempts", () => ctx.deps.store.listAttempts(ctx.callKey), []);
+  return attempts.some((a) => a.tool_name === "start_claim" && a.code !== null && codes.has(a.code));
+}
+
+function claimsData(claims: Claim[]): Record<string, unknown>[] {
+  return claims.map((c) => ({
+    claim_number_last3: String(c.claim_number ?? "").replace(/\D/g, "").slice(-3),
+    status: c.status,
+  }));
+}
+
+/** verify_identity with intent claim_status reads the claims in the same call. The read is recorded in
+ *  the ledger as a get_claim_status of its own (toolCallId "<id>:status"), so the post-call outcome
+ *  and the flags see a status read exactly as they would for the separate tool. A replay finds that
+ *  row and records nothing again (the claims are simply read again, as a get_claim_status replay
+ *  does); a failed read gives the plain verified answer. */
+async function chainedStatus(
+  ctx: Run,
+  customerId: string,
+  verified: string,
+): Promise<{ sentence: string; claims: Claim[] } | null> {
+  const { store } = ctx.deps;
+  const statusId = `${ctx.toolCallId}:status`;
+  let holds = false;
+  try {
+    holds = (await store.claimAttempt(ctx.callKey, statusId, "get_claim_status")) === null;
+  } catch (e) {
+    // the answer still goes out; only the timeline entry (and the resolved outcome) is lost
+    logError(ctx, "claimAttempt", e);
+  }
+  const record = (code: Code) => {
+    if (holds) writeBack(ctx, "setAttemptCode", () => store.setAttemptCode(ctx.callKey, statusId, code));
+  };
+  try {
+    const claims = await store.getClaims(customerId);
+    // The status read follows the verified opening, so it gets what is left of VAPI's limit.
+    const room = MAX_SPOKEN_CHARS - withoutTrailingQuestion(verified).length - 1;
+    const status = claims.length === 0
+      ? sentenceFor("no_claims")
+      : claimsSentence(claims, todayInNewYork(ctx.deps.now()), room);
+    const sentence = verifiedStatusSentence(verified, status);
+    if (!isSpeakable(sentence) || sentence.length > MAX_SPOKEN_CHARS) throw new Error("chained status not speakable");
+    record(claims.length === 0 ? "no_claims" : "ok");
+    return { sentence, claims };
+  } catch (e) {
+    logError(ctx, "chainedStatus", e);
+    record("system_error");
+    return null;
+  }
+}
+
 async function verifyIdentity(args: Args, ctx: Run): Promise<ToolResult> {
   const { store, env } = ctx.deps;
   const now = ctx.deps.now();
@@ -281,7 +369,25 @@ async function verifyIdentity(args: Args, ctx: Run): Promise<ToolResult> {
     : [];
   let sentence = verifiedSentence(firstName, rows, enabled, now);
   if (!isSpeakable(sentence)) sentence = sentenceFor("verified", { first_name: firstName });
-  return firstName ? { code: "verified", sentence, data: { first_name: firstName } } : { code: "verified", sentence };
+  const data: Record<string, unknown> = firstName ? { first_name: firstName } : {};
+  const verified = (text: string): ToolResult =>
+    Object.keys(data).length > 0 ? { code: "verified", sentence: text, data } : { code: "verified", sentence: text };
+
+  // The caller usually said why they called before verifying; the verified answer leads straight on.
+  const intent = verifyIntentOf(args.intent);
+  if (intent === "file_claim") {
+    const resume = await claimWaiting(ctx, VERIFY_RESUME_CODES);
+    return verified(verifiedFileClaimSentence(sentence, resume));
+  }
+  if (intent === "claim_status" && customerId) {
+    const chained = await chainedStatus(ctx, customerId, sentence);
+    if (chained) {
+      data.status_read = true;
+      data.claims = claimsData(chained.claims);
+      return verified(chained.sentence);
+    }
+  }
+  return verified(sentence);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -298,12 +404,7 @@ async function getClaimStatus(_args: Args, ctx: Run): Promise<ToolResult> {
   return {
     code: "ok",
     sentence: claimsSentence(claims, todayInNewYork(ctx.deps.now())),
-    data: {
-      claims: claims.map((c) => ({
-        claim_number_last3: String(c.claim_number ?? "").replace(/\D/g, "").slice(-3),
-        status: c.status,
-      })),
-    },
+    data: { claims: claimsData(claims) },
   };
 }
 
@@ -338,9 +439,12 @@ async function sendClaimed(
   return sent.ok ? sent : { ok: false, error: sent.error };
 }
 
+// The team emails a tool sends through the ledger (each at most once per call).
+type TeamEmailKind = "callback_request" | "emergency_alert" | "claim_intake";
+
 async function sendTeamEmail(
   ctx: Run,
-  kind: "callback_request" | "emergency_alert",
+  kind: TeamEmailKind,
   render: () => { subject: string; html: string },
   deadline: number,
 ): Promise<Delivery> {
@@ -360,7 +464,7 @@ async function sendTeamEmail(
   }
 }
 
-async function sendTelegramAlert(ctx: Run, alert: EscalationAlert): Promise<Delivery> {
+async function sendTelegramAlert(ctx: Run, alert: TeamAlert): Promise<Delivery> {
   try {
     const result = await sendAlert(ctx.deps, alert);
     return result.ok ? { ok: true } : { ok: false, error: result.error ?? "not delivered" };
@@ -372,8 +476,8 @@ async function sendTelegramAlert(ctx: Run, alert: EscalationAlert): Promise<Deli
 /** Telegram and the team email in parallel, each under its own budget. Notified = either confirmed. */
 async function notifyTeam(
   ctx: Run,
-  alert: EscalationAlert,
-  kind: "callback_request" | "emergency_alert",
+  alert: TeamAlert,
+  kind: TeamEmailKind,
   render: () => { subject: string; html: string },
 ): Promise<{ notified: boolean; error: string | null }> {
   const budget = channelBudget(ctx);
@@ -689,7 +793,12 @@ async function sendTopicEmail(
     // At most one send per topic per call: a failed one is not retried on this call either.
     return answer(claim.status === "failed" ? "email_failed" : "email_already_sent");
   }
-  const sent = await sendClaimed(ctx, topic, { to, subject: rendered.subject, html: rendered.html }, ctx.deadline - ANSWER_MARGIN_MS);
+  const sent = await sendClaimed(
+    ctx,
+    topic,
+    { to, subject: rendered.subject, html: rendered.html },
+    ctx.deadline - ANSWER_MARGIN_MS,
+  );
   return sent.ok ? answer("email_sent", sentData) : answer("email_failed");
 }
 
@@ -768,7 +877,11 @@ function readback(
   if (c.email) data.email = c.email;
   if (c.callback_source === "argument" && c.callback_phone) data.callback_phone = c.callback_phone;
   // The address and number are in the sentence, spelled; the result's data carries only the first name.
-  return { code: "contact_readback", sentence: sentenceFor("contact_readback", data), data: { first_name: c.first_name } };
+  return {
+    code: "contact_readback",
+    sentence: sentenceFor("contact_readback", data),
+    data: { first_name: c.first_name },
+  };
 }
 
 /** Both name parts, or null. A full name in first_name with no last_name is split at its last space. */
@@ -792,7 +905,10 @@ function callerNames(first: unknown, last: unknown): { first: string; last: stri
  *  which needs an address and is only for an account with none on file; anyone else is a
  *  new_customer, whose name is required and email optional. A correction that leaves the callback
  *  number out keeps the number the caller said earlier on this call. */
-async function contactInput(args: Args, ctx: Run): Promise<{ ok: true; input: ContactInput } | { ok: false; code: Code }> {
+async function contactInput(
+  args: Args,
+  ctx: Run,
+): Promise<{ ok: true; input: ContactInput } | { ok: false; code: Code }> {
   const { store, env } = ctx.deps;
   const session = await store.getSession(ctx.callKey);
   let names: { first: string; last: string } | null;
@@ -851,7 +967,12 @@ async function needsCallbackNumber(input: ContactInput, ctx: Run): Promise<boole
     return false;
   }
   // A failed read never asks: asking twice is worse than storing no number.
-  const attempts = await readOr<AttemptRow[] | null>(ctx, "listAttempts", () => ctx.deps.store.listAttempts(ctx.callKey), null);
+  const attempts = await readOr<AttemptRow[] | null>(
+    ctx,
+    "listAttempts",
+    () => ctx.deps.store.listAttempts(ctx.callKey),
+    null,
+  );
   return attempts !== null &&
     !attempts.some((a) => a.tool_name === "capture_contact" && a.code === "contact_needs_phone");
 }
@@ -893,15 +1014,25 @@ function correctOf(v: unknown): boolean | null {
 }
 
 /** The answer to the caller's yes or no on the read-back, from the row it was given on. A "no" asks
- *  which part was wrong among those read back (an email_update read back only the address). */
-function confirmedAnswer(row: CallerContact, correct: boolean): ToolResult {
+ *  which part was wrong among those read back (an email_update read back only the address). A new
+ *  caller's yes offers to take the loss down now; when a start_claim already asked for these details
+ *  (resume), it asks whether to take that claim down. */
+function confirmedAnswer(row: CallerContact, correct: boolean, resume: boolean): ToolResult {
   if (!correct) {
     return row.kind === "email_update"
       ? answer("contact_retry", { part: "email" })
       : answer("contact_retry", { has_email: row.email !== null, has_phone: row.callback_source === "argument" });
   }
   if (row.kind === "email_update") return answer("contact_saved_existing", { first_name: row.first_name });
-  return answer("contact_saved_new", row.email ? { first_name: row.first_name } : { first_name: row.first_name, has_email: false });
+  const data: Record<string, unknown> = { first_name: row.first_name };
+  if (!row.email) data.has_email = false;
+  if (resume) data.resume_claim = true;
+  return answer("contact_saved_new", data);
+}
+
+async function contactAnswer(row: CallerContact, correct: boolean, ctx: Run): Promise<ToolResult> {
+  const resume = correct && row.kind === "new_customer" && await claimWaiting(ctx, CONTACT_RESUME_CODES);
+  return confirmedAnswer(row, correct, resume);
 }
 
 /** Nothing to confirm: a verified caller is asked for the address again (their name is the
@@ -918,7 +1049,7 @@ async function confirmContact(args: Args, ctx: Run): Promise<ToolResult> {
   const correct = correctOf(args.correct) === true;
   // A "no" leaves the row unconfirmed (and takes back an earlier "yes"); nothing is deleted.
   const row = await ctx.deps.store.setContactConfirmed(ctx.callKey, correct);
-  return row ? confirmedAnswer(row, correct) : await notPending(ctx);
+  return row ? await contactAnswer(row, correct, ctx) : await notPending(ctx);
 }
 
 async function replayConfirm(code: Code, _args: Args, ctx: Run): Promise<ToolResult> {
@@ -929,8 +1060,307 @@ async function replayConfirm(code: Code, _args: Args, ctx: Run): Promise<ToolRes
   // Reading the row is not a side effect; the first delivery already wrote what it answered.
   const row = await readOr<CallerContact | null>(ctx, "getContact", () => ctx.deps.store.getContact(ctx.callKey), null);
   if (!row) return answer(code);
-  const replayed = confirmedAnswer(row, code !== "contact_retry");
+  const replayed = await contactAnswer(row, code !== "contact_retry", ctx);
   return replayed.code === code ? replayed : answer(code);
+}
+
+// ---------------------------------------------------------------------------------------------
+// start_claim {claim_type, loss_date, description, summary?}
+// ---------------------------------------------------------------------------------------------
+const MIN_DESCRIPTION_WORDS = 3;
+const MAX_SUMMARY_WORDS = 8;
+const MAX_SUMMARY_CHARS = 80;
+
+type ClaimGate =
+  | { ok: true; kind: ClaimIntake["kind"]; customerId: string | null; contact: CallerContact | null }
+  | { ok: false; code: Code };
+
+function claimTypeOf(v: unknown): ClaimType | null {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+  return (CLAIM_TYPES as readonly string[]).includes(s) ? s as ClaimType : null;
+}
+
+/** The caller's words for storage (redacted, one line, at most 500 characters), or null when they
+ *  hold fewer than three words: not enough for anyone to act on. */
+function cleanDescription(raw: unknown): string | null {
+  const words = typeof raw === "string" ? raw.split(/\s+/).filter((w) => /[A-Za-z]/.test(w)).length : 0;
+  return words >= MIN_DESCRIPTION_WORDS ? cleanDetails(raw) : null;
+}
+
+// The caller's own words in the first person: Ava would say them as if they were hers ("for i hit a
+// deer"). "my" and "our" read as "your"; anything else first-person drops the phrase ("I-95" is a road).
+const FIRST_PERSON = /\b(?:i(?!-\d)|me|we|us|mine|myself|ours|ourselves|i'm|i've|i'd|i'll|we're|we've|we'd|we'll)\b/i;
+
+/** The read-back phrase for storage: redacted, accents folded, letters, digits, spaces and ' - ,
+ *  only, "my" and "our" said as "your", at most eight words and 80 characters, and speakable; null
+ *  when it is missing, longer, in the first person, or nothing speakable is left (the read-back then
+ *  leaves it out). */
+function cleanSummary(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const text = redactPII(raw.slice(0, MAX_DETAILS_SCAN)).normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u2018\u2019]/g, "'").replace(/[^A-Za-z0-9 ',-]+/g, " ").replace(/\s+/g, " ")
+    .replace(/^[\s,'-]+|[\s,'-]+$/g, "")
+    .replace(/\b(?:my|our)\b/gi, (w) => (w[0] === "M" || w[0] === "O" ? "Your" : "your"));
+  if (!text || text.split(" ").length > MAX_SUMMARY_WORDS || text.length > MAX_SUMMARY_CHARS) return null;
+  if (FIRST_PERSON.test(text)) return null;
+  return /[A-Za-z]/.test(text) && isSpeakable(text) ? text : null;
+}
+
+/** What the summary column holds when the caller's summary is unusable: the type's own label, which
+ *  the read-back never says (it would only repeat the type). */
+function fallbackSummary(type: ClaimType): string {
+  return `${type.charAt(0).toUpperCase()}${type.slice(1)} claim`;
+}
+
+function claimLast3Of(row: Pick<ClaimIntake, "claim_number"> | null): string | null {
+  const digits = String(row?.claim_number ?? "").replace(/\D/g, "");
+  return digits.length >= 3 ? digits.slice(-3) : null;
+}
+
+/** The read-back of the stored intake: what confirm_claim will file. */
+function intakeReadback(row: ClaimIntake, now: Date): ToolResult {
+  const spoken: Record<string, unknown> = {
+    claim_type: row.claim_type,
+    loss_date: row.loss_date,
+    today: todayInNewYork(now),
+  };
+  if (row.summary !== fallbackSummary(row.claim_type)) spoken.summary = row.summary;
+  return {
+    code: "claim_readback",
+    sentence: sentenceFor("claim_readback", spoken),
+    data: { claim_type: row.claim_type, loss_date: row.loss_date },
+  };
+}
+
+function alreadyFiled(row: ClaimIntake): ToolResult {
+  const last3 = claimLast3Of(row);
+  return last3 ? answer("claim_already_filed", { claim_last3: last3 }) : answer("claim_already_filed");
+}
+
+/** Who may report a loss on this call, from server state only: a locked caller cannot; a caller whose
+ *  number matched verifies first; a verified customer files a claim on the session's account (never
+ *  one named in the arguments); anyone else is a new caller whose details must be confirmed first
+ *  (capture_contact), after the lookup that showed they have no account. */
+async function claimGate(ctx: Run): Promise<ClaimGate> {
+  const { store } = ctx.deps;
+  const session = await store.getSession(ctx.callKey);
+  const level: Level = session?.level ?? "none";
+  if (level === "locked") return { ok: false, code: "claim_locked" };
+  if (level === "phone_found") return { ok: false, code: "claim_needs_verification" };
+  if (level === "verified") {
+    if (!session?.verified_customer_id) throw new Error("verified session without a verified customer");
+    return { ok: true, kind: "claim", customerId: session.verified_customer_id, contact: null };
+  }
+  const contact = await store.getContact(ctx.callKey);
+  if (contact?.kind === "new_customer" && contact.confirmed) {
+    return { ok: true, kind: "lead_intake", customerId: null, contact };
+  }
+  // An unreadable number was never a lookup; a hit or a miss was.
+  const attempts = await store.listAttempts(ctx.callKey);
+  const looked = attempts.some((a) => a.kind === "lookup_miss" || a.kind === "lookup_hit");
+  return { ok: false, code: looked ? "claim_needs_contact" : "claim_needs_lookup" };
+}
+
+/** A date the server could not read a second time on this call is not asked for a third time: a
+ *  specialist helps instead. A failed read asks again. */
+async function badDate(ctx: Run): Promise<ToolResult> {
+  const attempts = await readOr<AttemptRow[]>(ctx, "listAttempts", () => ctx.deps.store.listAttempts(ctx.callKey), []);
+  const before = attempts.some((a) => a.tool_name === "start_claim" && a.code === "claim_bad_date");
+  return answer(before ? "claim_date_help" : "claim_bad_date");
+}
+
+async function startClaim(args: Args, ctx: Run): Promise<ToolResult> {
+  const { store, env } = ctx.deps;
+  const gate = await claimGate(ctx);
+  if (!gate.ok) return answer(gate.code);
+  const existing = await store.getClaimIntake(ctx.callKey);
+  if (existing?.confirmed) return alreadyFiled(existing);
+  // A new caller's intake promises a call from a specialist, so it needs a number to call (a capture
+  // with the number they say then needs its own read-back, which confirms it).
+  const own = ownNumbers(env);
+  if (
+    gate.kind === "lead_intake" && !usableCallbackNumber(gate.contact?.callback_phone, own) &&
+    !usableCallbackNumber(ctx.callerNumber, own)
+  ) {
+    return answer("claim_needs_phone");
+  }
+
+  const claimType = claimTypeOf(args.claim_type);
+  if (!claimType) return answer("bad_args");
+  const description = cleanDescription(args.description);
+  if (!description) return answer("claim_needs_description");
+  // The caller's words for the date, read by the server; the model does no date arithmetic.
+  const loss = parseLossDate(args.loss_date, ctx.deps.now());
+  if ("error" in loss) return loss.error === "too_old" ? answer("claim_too_old") : await badDate(ctx);
+
+  const row = await store.upsertClaimIntake({
+    callKey: ctx.callKey,
+    kind: gate.kind,
+    claimType,
+    lossDate: loss.date,
+    summary: cleanSummary(args.summary) ?? fallbackSummary(claimType),
+    description,
+    customerId: gate.customerId,
+  });
+  // Filed in the meantime (a parallel confirm): the filed claim stands and is never rewritten.
+  return row.confirmed ? alreadyFiled(row) : intakeReadback(row, ctx.deps.now());
+}
+
+async function replayStart(code: Code, _args: Args, ctx: Run): Promise<ToolResult> {
+  if (code !== "claim_readback" && code !== "claim_already_filed") return answer(code);
+  // confirm_claim files whatever intake is stored, so the read-back is of that row: a later
+  // start_claim may have replaced what this delivery's arguments said. Reading is not a side effect.
+  const row = await readOr<ClaimIntake | null>(
+    ctx,
+    "getClaimIntake",
+    () => ctx.deps.store.getClaimIntake(ctx.callKey),
+    null,
+  );
+  if (!row) return answer(code);
+  return code === "claim_already_filed" ? alreadyFiled(row) : intakeReadback(row, ctx.deps.now());
+}
+
+// ---------------------------------------------------------------------------------------------
+// confirm_claim {correct}
+// ---------------------------------------------------------------------------------------------
+/** The customer's confirmation (claim_received) through the at-most-once ledger, to the address the
+ *  caller may be sent to: true only when Resend returned an id (now, or for an earlier delivery). */
+async function sendClaimReceived(ctx: Run, row: ClaimIntake, firstName: string, to: string): Promise<boolean> {
+  const budget = channelBudget(ctx);
+  if (budget <= 0) return false;
+  const deadline = Date.now() + budget;
+  const work = (async (): Promise<boolean> => {
+    // Rendered before the claim, so a template fault cannot strand a 'sending' row.
+    const rendered = claimReceivedEmail({
+      customer: { first_name: firstName },
+      intakeKind: row.kind,
+      claimType: row.claim_type,
+      lossDate: row.loss_date,
+      claimNumber: row.kind === "claim" ? row.claim_number : null,
+      documents: CLAIM_DOCUMENTS[row.claim_type] ?? [],
+    });
+    const claim = await ctx.deps.store.claimEmail(ctx.callKey, "claim_received", maskEmail(to));
+    if (!claim.claimed) return claim.status === "sent";
+    const sent = await sendClaimed(ctx, "claim_received", { to, ...rendered }, deadline);
+    return sent.ok;
+  })().catch((e) => {
+    logError(ctx, "claimReceived", e);
+    return false;
+  });
+  return await withinBudget(work, budget, () => false);
+}
+
+/** After filing: the customer's confirmation and the team's notice (Telegram and the team email) run
+ *  in parallel, each within its own budget. The sentence says "emailed" only when Resend returned an
+ *  id for the confirmation; the team's channels never change what the caller hears. A chat session
+ *  sends the confirmation but skips the team alerts, as escalate does. */
+async function announceFiled(row: ClaimIntake, ctx: Run): Promise<ToolResult> {
+  const { store, env } = ctx.deps;
+  const lead = row.kind === "lead_intake";
+  const customerId = lead ? null : row.customer_id;
+  const [session, customer, contact] = await Promise.all([
+    readOr<Session | null>(ctx, "getSession", () => store.getSession(ctx.callKey), null),
+    customerId ? readOr<Customer | null>(ctx, "getCustomer", () => store.getCustomer(customerId), null) : null,
+    capturedContact(ctx),
+  ]);
+  const verified = !lead && session?.level === "verified";
+  // A new caller's confirmation goes only to the address they spelled and confirmed as a new caller
+  // (an email_update address is never a recipient); a customer's only to the address on file.
+  const newCaller = contact?.kind === "new_customer" && contact.confirmed ? contact : null;
+  const to = (lead ? newCaller?.email : customer?.email)?.trim() ?? "";
+  const firstName = (lead ? newCaller?.first_name : customer?.first_name)?.trim() ?? "";
+  const last3 = lead ? null : claimLast3Of(row);
+  const own = ownNumbers(env);
+  const phone = lead
+    ? usableCallbackNumber(newCaller?.callback_phone, own) ?? usableCallbackNumber(ctx.callerNumber, own)
+    : customer?.phone_e164 ?? usableCallbackNumber(ctx.callerNumber, own);
+
+  const alert: ClaimIntakeAlert = {
+    kind: "claim_intake",
+    intakeKind: row.kind,
+    claimType: row.claim_type,
+    callKey: ctx.callKey,
+    channel: ctx.channel,
+    verified,
+    claimLast3: last3,
+  };
+  const [emailed, team] = await Promise.all([
+    to ? sendClaimReceived(ctx, row, firstName, to) : Promise.resolve(false),
+    ctx.isChat ? Promise.resolve(null) : notifyTeam(ctx, alert, "claim_intake", () =>
+      claimIntakeEmail({
+        callKey: ctx.callKey,
+        intakeKind: row.kind,
+        claimType: row.claim_type,
+        lossDate: row.loss_date,
+        description: row.description,
+        claimNumber: lead ? null : row.claim_number,
+        verified,
+        callbackPhone: phone,
+        channel: ctx.channel,
+        dashboardUrl: env.DASHBOARD_URL,
+        caller: teamCallerOf(verified ? customer : null, contact),
+      })),
+  ]);
+  if (team && !team.notified) safeLog(ctx, { event: "claim_intake_alert_failed", error: team.error });
+  if (lead) return answer("claim_intake_saved", { first_name: firstName, emailed });
+  return answer("claim_filed", last3 ? { claim_last3: last3, emailed } : { emailed });
+}
+
+async function confirmClaim(args: Args, ctx: Run): Promise<ToolResult> {
+  const { store } = ctx.deps;
+  if (correctOf(args.correct) !== true) {
+    // A "no" leaves the intake unconfirmed for the corrected start_claim; a filed one stays filed.
+    const row = await store.rejectClaimIntake(ctx.callKey);
+    if (!row) return answer("claim_not_pending");
+    return row.confirmed ? alreadyFiled(row) : answer("claim_retry");
+  }
+  const before = await store.getClaimIntake(ctx.callKey);
+  if (!before) return answer("claim_not_pending");
+  // Filed by an earlier confirm: nothing is filed, sent or paged again.
+  if (before.confirmed) return alreadyFiled(before);
+  const filed = await store.fileClaimIntake(ctx.callKey);
+  if (!filed) return answer("claim_not_pending");
+  if (!filed.intake.confirmed) throw new Error("file_claim_intake returned an unfiled intake");
+  // Filed by a parallel delivery while this one waited on the row lock (a redelivery of the same
+  // confirm): that delivery sends and pages, so this one only answers, as a replay would.
+  if (!filed.filedNow) {
+    const code = filed.intake.kind === "lead_intake" ? "claim_intake_saved" : "claim_filed";
+    return await filedAnswer(code, filed.intake, ctx);
+  }
+  return await announceFiled(filed.intake, ctx);
+}
+
+/** claim_filed or claim_intake_saved for an intake another delivery filed, rebuilt from what it left
+ *  behind: nothing is filed, sent or paged again, and "emailed" stands only on a ledger row Resend
+ *  confirmed (one still sending is not). */
+async function filedAnswer(
+  code: "claim_filed" | "claim_intake_saved",
+  row: ClaimIntake | null,
+  ctx: Run,
+): Promise<ToolResult> {
+  const [emails, contact] = await Promise.all([
+    readOr<EmailRow[]>(ctx, "listEmails", () => ctx.deps.store.listEmails(ctx.callKey), []),
+    code === "claim_intake_saved" ? capturedContact(ctx) : Promise.resolve(null),
+  ]);
+  const emailed = emails.some((e) => e.kind === "claim_received" && e.status === "sent");
+  if (code === "claim_intake_saved") {
+    const firstName = contact?.kind === "new_customer" && contact.confirmed ? contact.first_name : "";
+    return answer(code, { first_name: firstName, emailed });
+  }
+  const last3 = claimLast3Of(row);
+  return answer(code, last3 ? { claim_last3: last3, emailed } : { emailed });
+}
+
+async function replayConfirmClaim(code: Code, _args: Args, ctx: Run): Promise<ToolResult> {
+  if (code !== "claim_filed" && code !== "claim_intake_saved" && code !== "claim_already_filed") return answer(code);
+  const row = await readOr<ClaimIntake | null>(
+    ctx,
+    "getClaimIntake",
+    () => ctx.deps.store.getClaimIntake(ctx.callKey),
+    null,
+  );
+  if (code === "claim_already_filed") return row ? alreadyFiled(row) : answer(code);
+  return await filedAnswer(code, row, ctx);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -988,6 +1418,21 @@ const TOOLS: ReadonlyMap<string, ToolSpec> = new Map<string, ToolSpec>([
       run: confirmContact,
       fallback: systemError,
       replay: replayConfirm,
+      valid: (args) => correctOf(args.correct) !== null,
+    },
+  ],
+  [
+    "start_claim",
+    // Replays read back the stored intake (what confirm_claim will file); the row is written once.
+    { name: "start_claim", run: startClaim, fallback: systemError, replay: replayStart },
+  ],
+  [
+    "confirm_claim",
+    {
+      name: "confirm_claim",
+      run: confirmClaim,
+      fallback: systemError,
+      replay: replayConfirmClaim,
       valid: (args) => correctOf(args.correct) !== null,
     },
   ],

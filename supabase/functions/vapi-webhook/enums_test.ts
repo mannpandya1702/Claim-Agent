@@ -8,8 +8,12 @@ import {
   ANALYSIS_OUTCOMES,
   ANALYSIS_STATUSES,
   ATTEMPT_KINDS,
+  CALL_REASON_SOURCES,
+  CALL_REASONS,
   CALLBACK_SOURCES,
   CALLER_TYPES,
+  CLAIM_DOCUMENTS,
+  CLAIM_INTAKE_KINDS,
   CLAIM_STATUSES,
   CLAIM_TYPES,
   CODES,
@@ -20,6 +24,7 @@ import {
   ESCALATION_KINDS,
   ESCALATION_REASONS,
   ESCALATION_STATUSES,
+  GHL_TAGS,
   INFO_EMAIL_TOPICS,
   JOB_NAMES,
   LEVELS,
@@ -30,6 +35,7 @@ import {
   SENTIMENT_SOURCES,
   SENTIMENTS,
   SERVER_TOOLS,
+  VERIFY_INTENTS,
 } from "./enums.ts";
 
 const SQL = await Deno.readTextFile(new URL("../../migrations/0001_init.sql", import.meta.url));
@@ -37,6 +43,8 @@ const SQL = await Deno.readTextFile(new URL("../../migrations/0001_init.sql", im
 const OUTBOX_SQL = await Deno.readTextFile(new URL("../../migrations/0005_outbox.sql", import.meta.url));
 const AUTOMATION_SQL = await Deno.readTextFile(new URL("../../migrations/0004_automation.sql", import.meta.url));
 const CONTACTS_SQL = await Deno.readTextFile(new URL("../../migrations/0006_contacts.sql", import.meta.url));
+const FNOL_SQL = await Deno.readTextFile(new URL("../../migrations/0007_fnol_reasons.sql", import.meta.url));
+const GHL_SQL = await Deno.readTextFile(new URL("../../migrations/0008_ghl.sql", import.meta.url));
 
 function tableBody(table: string, sql = SQL): string {
   const start = sql.indexOf(`create table ${table} (`);
@@ -64,7 +72,6 @@ const PAIRS: [string, string, readonly string[]][] = [
   ["escalations", "callback_source", CALLBACK_SOURCES],
   ["escalations", "alert_status", ALERT_STATUSES],
   ["escalations", "status", ESCALATION_STATUSES],
-  ["emails", "kind", EMAIL_KINDS],
   ["emails", "status", EMAIL_STATUSES],
   ["call_interactions", "sentiment", SENTIMENTS],
   ["call_interactions", "sentiment_source", SENTIMENT_SOURCES],
@@ -78,9 +85,50 @@ Deno.test("every enums.ts list equals its CHECK constraint in 0001_init.sql, in 
   }
 });
 
-Deno.test("the outbox lists equal the CHECK constraints in 0005_outbox.sql", () => {
+Deno.test("the outbox kinds equal 0005_outbox.sql; the destinations equal the CHECK 0008_ghl.sql puts back", () => {
   assertEquals(checkList("outbox_events", "kind", OUTBOX_SQL), [...OUTBOX_KINDS]);
-  assertEquals(checkList("outbox_events", "destination", OUTBOX_SQL), [...OUTBOX_DESTINATIONS]);
+  const original = checkList("outbox_events", "destination", OUTBOX_SQL);
+  const widened = /add constraint outbox_events_destination_check check \(destination in \(([^)]*)\)\)/.exec(GHL_SQL);
+  assert(widened, "the destination CHECK 0008 adds was found");
+  assert(
+    /alter table outbox_events drop constraint outbox_events_destination_check;/.test(GHL_SQL),
+    "the old constraint is dropped first",
+  );
+  const destinations = [...widened[1].matchAll(/'([^']*)'/g)].map((m) => m[1]);
+  assertEquals(destinations, [...OUTBOX_DESTINATIONS]);
+  // nothing 0005 accepted is refused now (rows already stored stay valid)
+  assertEquals(destinations.slice(0, original.length), original);
+});
+
+Deno.test("GHL_TAGS: lowercase, one oi- prefix, an outcome tag per outcome and a reason tag per call reason", () => {
+  for (const tag of GHL_TAGS) {
+    assert(/^oi-[a-z0-9_-]+$/.test(tag), tag);
+    assert(!tag.slice(3).startsWith("oi-"), `${tag}: one prefix`);
+    assert(tag.length <= 40, `${tag}: short enough for a CRM tag`);
+  }
+  assertEquals(GHL_TAGS.filter((t) => t.startsWith("oi-outcome-")), OUTCOMES.map((o) => `oi-outcome-${o}`));
+  assertEquals(GHL_TAGS.filter((t) => t.startsWith("oi-reason-")), CALL_REASONS.map((r) => `oi-reason-${r}`));
+  for (
+    const fixed of [
+      "oi-voice",
+      "oi-caller-existing",
+      "oi-caller-new",
+      "oi-verified",
+      "oi-unverified",
+      "oi-verify-locked",
+      "oi-lead-new",
+      "oi-phone-matched",
+      "oi-channel-phone",
+      "oi-channel-web",
+      "oi-callback",
+      "oi-emergency",
+      "oi-claim-filed",
+      "oi-claim-intake",
+    ]
+  ) {
+    assert((GHL_TAGS as readonly string[]).includes(fixed), fixed);
+  }
+  assertEquals(GHL_TAGS.length, 14 + OUTCOMES.length + CALL_REASONS.length);
 });
 
 Deno.test("the contact lists equal the CHECK constraints in 0006_contacts.sql", () => {
@@ -107,6 +155,59 @@ Deno.test("the contact lists equal the CHECK constraints in 0006_contacts.sql", 
       `${source} is also an escalation source`,
     );
   }
+});
+
+/** The quoted values inside the first match's group (a CHECK list that may span lines). */
+function quoted(re: RegExp, sql: string, what: string): string[] {
+  const match = re.exec(sql);
+  assert(match, `${what} was found`);
+  return [...match[1].matchAll(/'([^']*)'/g)].map((m) => m[1]);
+}
+
+Deno.test("the email kinds equal the CHECK constraint 0007_fnol_reasons.sql puts back, which extends 0001's", () => {
+  const widened = quoted(
+    /add constraint emails_kind_check check \(kind in\s*\(([^)]*)\)\)/,
+    FNOL_SQL,
+    "the emails kind CHECK",
+  );
+  assertEquals(widened, [...EMAIL_KINDS]);
+  assert(/alter table emails drop constraint emails_kind_check;/.test(FNOL_SQL), "the old constraint is dropped first");
+  // nothing 0001 accepted is refused now (rows already stored stay valid)
+  const original = checkList("emails", "kind");
+  assertEquals(widened.slice(0, original.length), original);
+  assertEquals(widened.slice(original.length), ["claim_received", "claim_intake"]);
+});
+
+Deno.test("the claim intake and call reason lists equal the CHECK constraints in 0007_fnol_reasons.sql", () => {
+  assertEquals(checkList("claim_intakes", "kind", FNOL_SQL), [...CLAIM_INTAKE_KINDS]);
+  assertEquals(checkList("claim_intakes", "claim_type", FNOL_SQL), [...CLAIM_TYPES]);
+  assertEquals(
+    quoted(/add column call_reason text check \(call_reason in\s*\(([^)]*)\)\)/, FNOL_SQL, "call_reason's CHECK"),
+    [...CALL_REASONS],
+  );
+  assertEquals(
+    quoted(
+      /add column call_reason_source text check \(call_reason_source in\s*\(([^)]*)\)\)/,
+      FNOL_SQL,
+      "call_reason_source's CHECK",
+    ),
+    [...CALL_REASON_SOURCES],
+  );
+  // upsert_interaction ranks exactly these sources, highest first
+  const ranks = [...FNOL_SQL.matchAll(/when '([a-z_]+)' then (\d)/g)].map((m) => `${m[1]}:${m[2]}`);
+  assertEquals([...new Set(ranks)], ["server:3", "structured_output:2", "derived:1"]);
+});
+
+Deno.test("CLAIM_DOCUMENTS equals the lists file_claim_intake writes into claims.documents_required", () => {
+  const auto = quoted(/when 'auto' then array\[([^\]]*)\]/, FNOL_SQL, "the auto documents");
+  const other = quoted(/else array\[([^\]]*)\]/, FNOL_SQL, "the home and property documents");
+  assertEquals(auto, [...CLAIM_DOCUMENTS.auto]);
+  assertEquals(other, [...CLAIM_DOCUMENTS.home]);
+  assertEquals(other, [...CLAIM_DOCUMENTS.property]);
+  assertEquals(Object.keys(CLAIM_DOCUMENTS).sort(), [...CLAIM_TYPES].sort());
+  // the home and property wording is the seeded claim's (0002_seed.sql), so both read the same
+  const seed = Deno.readTextFileSync(new URL("../../migrations/0002_seed.sql", import.meta.url));
+  for (const doc of CLAIM_DOCUMENTS.home) assert(seed.includes(`"${doc}"`), doc);
 });
 
 Deno.test("JOB_NAMES are exactly the jobs invoke_job accepts and pg_cron schedules (0004_automation.sql)", () => {
@@ -144,6 +245,8 @@ Deno.test("the model-facing lists are subsets of the stored lists", () => {
   for (const derived of ["emergency", "auth_locked", "not_found"]) {
     assert(!(MODEL_ESCALATION_REASONS as readonly string[]).includes(derived), derived);
   }
+  // the verify intents name reasons a caller can have; each but "other" is also a call reason
+  for (const intent of VERIFY_INTENTS) assert((CALL_REASONS as readonly string[]).includes(intent), intent);
 });
 
 Deno.test("no list has duplicates", () => {
@@ -157,6 +260,13 @@ Deno.test("no list has duplicates", () => {
       CONTACT_KINDS,
       CONTACT_CALLBACK_SOURCES,
       CALLER_TYPES,
+      EMAIL_KINDS,
+      CALL_REASONS,
+      CALL_REASON_SOURCES,
+      CLAIM_INTAKE_KINDS,
+      VERIFY_INTENTS,
+      OUTBOX_DESTINATIONS,
+      GHL_TAGS,
     ]
   ) {
     assertEquals(new Set(list).size, list.length);

@@ -94,6 +94,34 @@ const EMAIL_ON_FILE =
 const CONTACT_RETRY_EMAIL = "Sorry about that. Could you spell your email for me one more time, slowly?";
 const CONTACT_RETRY_NAME = "Sorry about that. Could you tell me your first and last name one more time?";
 const CONTACT_READBACK_PLAIN = "Just to confirm, did I get your details right?";
+// start_claim / confirm_claim (first notice of loss).
+const ANYTHING_ELSE_SHORT = "Is there anything else I can help with?";
+// The caller has usually said what happened already (the greeting asks how Ava can help), so this asks
+// for more rather than for the story again.
+const START_CLAIM_QUESTION = "Let's get your claim started. Can you tell me a little more about what happened?";
+// A start_claim earlier on the call was sent to verification or to the caller's details first: the loss
+// was told then, so on a yes the model files it from what it already has.
+const RESUME_CLAIM_QUESTION = "Shall I go ahead and take down that claim now?";
+const CLAIM_NEEDS_LOOKUP = "I can help you start a claim. First, what's the phone number on your account?";
+const CLAIM_NEEDS_CONTACT =
+  "I can take down the details for our claims team. First, can I get your first and last name?";
+const CLAIM_NEEDS_VERIFICATION = "I'll just need to verify you first. What's the date of birth on the account?";
+const CLAIM_LOCKED =
+  "Since I wasn't able to verify your identity, I can't file a claim on this call. I can have a claims specialist call you back to help. Would you like that?";
+const CLAIM_NEEDS_DESCRIPTION = "Can you tell me briefly what happened?";
+const CLAIM_BAD_DATE = "Sorry, I didn't catch the date. What day did it happen?";
+// The second date on the call the server could not read: a specialist helps rather than a third try.
+const CLAIM_DATE_HELP = "No problem. A claims specialist can help pin down the date. Would you like a callback?";
+// A new caller's confirmed details hold no number to call back on: the intake promises a call.
+const CLAIM_NEEDS_PHONE = "Before I take this down, what's the best number for our claims team to reach you?";
+const CLAIM_TOO_OLD =
+  "Since that was more than a year ago, a claims specialist will need to help with this one. Would you like a callback?";
+const CLAIM_NOT_PENDING = "I don't have the claim details yet. Can you tell me what happened?";
+const CLAIM_RETRY = "No problem. What should I change?";
+// Only when the read-back has nothing it can say (the tool never stores such an intake).
+const CLAIM_READBACK_PLAIN = "Let me make sure I have this right. Did I get the details of your claim correct?";
+const WEEKDAY_NAMES = "Sunday Monday Tuesday Wednesday Thursday Friday Saturday".split(" ");
+const MAX_READBACK_SUMMARY_CHARS = 80;
 const DOCUMENT_INSTRUCTIONS =
   `You can upload them at ${CLAIMS_URL_SPOKEN}, email them to claims docs at observeinsurance dot com, or mail them to our claims department, and please include your claim number.`;
 
@@ -186,6 +214,23 @@ export function speakDate(isoDate: string, refYear?: number): string {
   return refYear !== undefined && refYear !== year ? `${spoken}, ${yearWords(year)}` : spoken;
 }
 
+// Day of the week of a proleptic Gregorian date, 0 = Sunday (Sakamoto's method): arithmetic only,
+// like the rest of the speaker, so no zone can move it.
+const WEEKDAY_MONTH_OFFSETS = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+function weekdayOf(year: number, month: number, day: number): number {
+  const y = month < 3 ? year - 1 : year;
+  return (y + Math.floor(y / 4) - Math.floor(y / 100) + Math.floor(y / 400) + WEEKDAY_MONTH_OFFSETS[month - 1] + day) %
+    7;
+}
+
+/** "2026-10-10" -> "Saturday, October tenth" (the year added as speakDate adds it). The weekday is
+ *  computed from the calendar date alone, so it is the same in every zone. */
+export function speakLossDate(isoDate: string, refYear?: number): string {
+  const spoken = speakDate(isoDate, refYear); // throws on anything but a calendar date
+  const [y, m, d] = isoDate.trim().split("-").map(Number);
+  return `${WEEKDAY_NAMES[weekdayOf(y, m, d)]}, ${spoken}`;
+}
+
 /** 4820 -> "four thousand eight hundred twenty dollars"; 12.5 -> "twelve dollars and fifty cents". */
 export function speakMoney(amount: number): string {
   if (typeof amount !== "number" || !Number.isFinite(amount) || amount < 0) {
@@ -203,7 +248,12 @@ export function speakMoney(amount: number): string {
 // ---------------------------------------------------------------------------------------------
 // Email read-back.
 // ---------------------------------------------------------------------------------------------
-const EMAIL_SYMBOL_WORDS: Readonly<Record<string, string>> = { ".": "dot", "_": "underscore", "-": "dash", "+": "plus" };
+const EMAIL_SYMBOL_WORDS: Readonly<Record<string, string>> = {
+  ".": "dot",
+  "_": "underscore",
+  "-": "dash",
+  "+": "plus",
+};
 // Mail providers callers name as words; any other domain label is spelled out.
 const KNOWN_EMAIL_DOMAINS: Readonly<Record<string, string>> = {
   gmail: "gmail",
@@ -421,8 +471,10 @@ function readingOrder(claims: Claim[]): number[] {
   );
 }
 
-/** The full get_claim_status sentence for a verified caller's claims (non-empty list). refDate = today (YYYY-MM-DD) in America/New_York. */
-export function claimsSentence(claims: Claim[], refDate: string): string {
+/** The full get_claim_status sentence for a verified caller's claims (non-empty list). refDate = today
+ *  (YYYY-MM-DD) in America/New_York. maxChars bounds the sentence (verify_identity's chained read
+ *  leaves room for the verified opening in front of it). */
+export function claimsSentence(claims: Claim[], refDate: string, maxChars: number = MAX_SPOKEN_CHARS): string {
   if (!Array.isArray(claims) || claims.length === 0) throw new Error("claimsSentence: no claims");
   const refMatch = typeof refDate === "string" ? ISO_DATE.exec(refDate.trim()) : null;
   const refYear = refMatch ? Number(refMatch[1]) : undefined;
@@ -445,13 +497,13 @@ export function claimsSentence(claims: Claim[], refDate: string): string {
   };
   const all = claims.map((_, i) => i);
   let text = compose(all);
-  if (text.length > MAX_SPOKEN_CHARS) {
+  if (text.length > maxChars) {
     // VAPI refuses a longer spoken tool message, so the claims that matter most are read (in filing
     // order) and the caller is told the rest are on file.
     const picked: number[] = [];
     for (const i of readingOrder(claims)) {
       const next = [...picked, i].sort((a, b) => a - b);
-      if (picked.length > 0 && compose(next).length > MAX_SPOKEN_CHARS) break;
+      if (picked.length > 0 && compose(next).length > maxChars) break;
       picked.splice(0, picked.length, ...next);
     }
     text = compose(picked);
@@ -485,6 +537,72 @@ export function verifiedThanks(firstName: unknown): string {
   return name ? `Thank you, ${name}, you're verified.` : "Thank you, you're verified.";
 }
 
+/** The verified sentence without its closing question: "Thank you, Tobias, you're verified." (the
+ *  welcome-back variant keeps its "Welcome back. I see you called on ..." part). */
+export function withoutTrailingQuestion(sentence: string): string {
+  const text = typeof sentence === "string" ? sentence.trim() : "";
+  return text.endsWith("?") ? text.replace(/\s*[^.!?]*\?$/, "").trim() : text;
+}
+
+/** verify_identity with intent file_claim: the verified opening, then straight into the loss; or, when
+ *  the loss was already told to a start_claim that asked for verification first (resume), whether to
+ *  take it down now. */
+export function verifiedFileClaimSentence(verified: string, resume = false): string {
+  const opening = withoutTrailingQuestion(verified);
+  const question = resume ? RESUME_CLAIM_QUESTION : START_CLAIM_QUESTION;
+  return opening ? `${opening} ${question}` : question;
+}
+
+/** verify_identity with intent claim_status: the verified opening, then the status read itself. */
+export function verifiedStatusSentence(verified: string, status: string): string {
+  const opening = withoutTrailingQuestion(verified);
+  return opening ? `${opening} ${status}` : status;
+}
+
+/** The last three digits of a claim number for speech, or "" when there are not three. */
+function claimLast3(v: unknown): string {
+  const d = digitsOf(v);
+  return d.length >= 3 ? d.slice(-3) : "";
+}
+
+/** A short summary the read-back may say ("for a cracked windshield"): made speakable, first letter
+ *  lower-cased (an acronym is kept), and left out when it is empty, too long or unsafe. */
+function readbackSummary(raw: unknown): string {
+  // template or markup characters mean the text is not the caller's phrase: say nothing of it
+  if (typeof raw !== "string" || /[{}<>[\]]/.test(raw) || !/[A-Za-z]/.test(raw)) return "";
+  const t = speakableText(raw);
+  if (!t || t.length > MAX_READBACK_SUMMARY_CHARS) return "";
+  const phrase = /^[A-Z][A-Z]/.test(t) ? t : t.charAt(0).toLowerCase() + t.slice(1);
+  return phrase.replace(/[\s.,:;!?-]+$/, "");
+}
+
+/** start_claim's read-back from {claim_type, loss_date, summary?, today?}: "Let me make sure I have
+ *  this right. An auto claim, for a cracked windshield, from Saturday, October tenth. Is that
+ *  correct?" The year is said only when it is not this year (today's). */
+function claimReadback(d: Record<string, unknown>): string {
+  const type = typeof d.claim_type === "string" && (CLAIM_TYPES as readonly string[]).includes(d.claim_type)
+    ? d.claim_type
+    : "";
+  const refMatch = typeof d.today === "string" ? ISO_DATE.exec(d.today.trim()) : null;
+  let when = "";
+  try {
+    when = typeof d.loss_date === "string"
+      ? speakLossDate(d.loss_date, refMatch ? Number(refMatch[1]) : undefined)
+      : "";
+  } catch {
+    when = "";
+  }
+  if (!type || !when) return CLAIM_READBACK_PLAIN;
+  const article = type === "auto" ? "An" : "A";
+  const summary = readbackSummary(d.summary);
+  const full = `Let me make sure I have this right. ${article} ${type} claim${
+    summary ? `, for ${summary},` : ""
+  } from ${when}. Is that correct?`;
+  if (isSpeakable(full)) return full;
+  const plain = `Let me make sure I have this right. ${article} ${type} claim from ${when}. Is that correct?`;
+  return isSpeakable(plain) ? plain : CLAIM_READBACK_PLAIN;
+}
+
 function nationalDigits(v: unknown): string | null {
   let d = digitsOf(v);
   if (d.length === 11 && d[0] === "1") d = d.slice(1);
@@ -498,9 +616,9 @@ function nationalDigits(v: unknown): string | null {
  *  in (the tool never stores such a name). */
 function contactReadback(d: Record<string, unknown>): string {
   const first = speakableName(d.first_name);
-  const full = speakableName(`${typeof d.first_name === "string" ? d.first_name : ""} ${
-    typeof d.last_name === "string" ? d.last_name : ""
-  }`);
+  const full = speakableName(
+    `${typeof d.first_name === "string" ? d.first_name : ""} ${typeof d.last_name === "string" ? d.last_name : ""}`,
+  );
   if (!first || !full) return CONTACT_READBACK_PLAIN;
   let email = "";
   if (typeof d.email === "string" && d.email) {
@@ -514,7 +632,8 @@ function contactReadback(d: Record<string, unknown>): string {
   const number = digits ? `the best number is ${speakPhone(digits)}` : "";
   let text: string;
   if (email && number) {
-    text = `Thanks, ${first}. Let me read that back. ${full}, your email is ${email}, and ${number}. Did I get that right?`;
+    text =
+      `Thanks, ${first}. Let me read that back. ${full}, your email is ${email}, and ${number}. Did I get that right?`;
   } else if (email) {
     text = `Thanks, ${first}. Let me read that back. ${full}, and your email is ${email}. Did I get that right?`;
   } else if (number) {
@@ -629,15 +748,64 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>): string 
     case "contact_saved_new": {
       const name = speakableName(d.first_name);
       const thanks = name ? `Perfect, thanks ${name}.` : "Perfect, thanks.";
-      // Without an address there is nothing to email the steps to, so the website stands in.
-      const offer = d.has_email === false
-        ? `I can have someone from our claims team call you back, or you can find the steps to start a claim at ${CLAIMS_URL_SPOKEN}. Which would you like?`
-        : "I can email you the steps to start a new claim, or have someone from our claims team call you back. Which would you like?";
+      // A start_claim already asked for these details first: the loss was told, so it is taken down now.
+      // Otherwise taking it down on this call comes first; without an address there is nothing to email
+      // the steps to, so the website stands in.
+      const offer = d.resume_claim === true
+        ? RESUME_CLAIM_QUESTION
+        : d.has_email === false
+        ? `I can take down what happened now, have someone from our claims team call you back, or you can find the steps to start a claim at ${CLAIMS_URL_SPOKEN}. Which would you like?`
+        : "I can take down what happened now, email you the steps to start a claim, or have someone from our claims team call you back. Which would you like?";
       return `${thanks} I've saved your details. ${offer}`;
     }
     case "contact_saved_existing": {
       const name = speakableName(d.first_name);
-      return `${name ? `Thanks, ${name}.` : "Thanks."} I've passed that email to our team to add to your account. Is there anything else I can help with?`;
+      return `${
+        name ? `Thanks, ${name}.` : "Thanks."
+      } I've passed that email to our team to add to your account. Is there anything else I can help with?`;
+    }
+    case "claim_readback":
+      return claimReadback(d);
+    case "claim_needs_lookup":
+      return CLAIM_NEEDS_LOOKUP;
+    case "claim_needs_contact":
+      return CLAIM_NEEDS_CONTACT;
+    case "claim_needs_verification":
+      return CLAIM_NEEDS_VERIFICATION;
+    case "claim_locked":
+      return CLAIM_LOCKED;
+    case "claim_needs_description":
+      return CLAIM_NEEDS_DESCRIPTION;
+    case "claim_bad_date":
+      return CLAIM_BAD_DATE;
+    case "claim_too_old":
+      return CLAIM_TOO_OLD;
+    case "claim_date_help":
+      return CLAIM_DATE_HELP;
+    case "claim_needs_phone":
+      return CLAIM_NEEDS_PHONE;
+    case "claim_already_filed": {
+      const last3 = claimLast3(d.claim_last3);
+      return `Your claim is already filed${
+        last3 ? `, number ending in ${speakDigits(last3)}` : ""
+      }. ${ANYTHING_ELSE_SHORT}`;
+    }
+    case "claim_not_pending":
+      return CLAIM_NOT_PENDING;
+    case "claim_retry":
+      return CLAIM_RETRY;
+    case "claim_filed": {
+      const last3 = claimLast3(d.claim_last3);
+      const number = last3 ? `Your claim number ends in ${speakDigits(last3)}` : "Your claim is filed";
+      // "emailed" only when Resend returned an id for the confirmation (the honest-result rule)
+      const mail = d.emailed === true ? ", and I've emailed the details to the email on file" : "";
+      return `You're all set. ${number}${mail}. An adjuster will reach out within one business day. ${ANYTHING_ELSE_SHORT}`;
+    }
+    case "claim_intake_saved": {
+      const name = speakableName(d.first_name);
+      const mail = d.emailed === true ? ", and sent a confirmation to your email" : "";
+      return `${name ? `Thanks, ${name}.` : "Thanks."} I've passed your claim details to our claims team${mail}. ` +
+        `A specialist will call you within one business day to finish setting it up. ${ANYTHING_ELSE_SHORT}`;
     }
     default: {
       // Exhaustive over CODES at compile time; an off-list code at runtime gets the trouble line.

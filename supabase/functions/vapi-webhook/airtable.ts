@@ -9,7 +9,8 @@
 // Only already-redacted, slim fields cross the boundary: no transcript, no messages, no DOB, and
 // the caller's number as its last four digits only. The one address that crosses is the email a new
 // caller spelled and confirmed (caller_email), which the claims team needs to follow up; the
-// account's own email is never in the record.
+// account's own email is never in the record. Why the caller called (call_reason) and the claim a
+// phone claim filed (claim_number) cross as they are stored; a call without them leaves the cells.
 
 import { dashboardLink } from "./alert.ts";
 import type { Deps } from "./types.ts";
@@ -36,6 +37,10 @@ export interface InteractionForMirror {
   analysis_status: string | null;
   caller_type: string | null;
   caller_email: string | null;
+  // 0007_fnol_reasons.sql. Optional so a record built without them (a test fixture, a caller older
+  // than the columns) still maps; store.ts always selects them.
+  call_reason?: string | null;
+  claim_number?: string | null;
 }
 
 /** Exactly the InteractionForMirror columns, in the select list store.ts sends. */
@@ -57,6 +62,8 @@ export const MIRROR_COLUMNS = [
   "analysis_status",
   "caller_type",
   "caller_email",
+  "call_reason",
+  "claim_number",
 ] as const satisfies readonly (keyof InteractionForMirror)[];
 // A column added to the interface but not to the list fails the type check here.
 const _everyMirrorColumn: Exclude<keyof InteractionForMirror, typeof MIRROR_COLUMNS[number]> extends never ? true
@@ -86,7 +93,11 @@ function truncate(text: string | null, max: number): string | null {
 }
 
 /** Pure mapping from the stored record to Airtable fields (field names are the table's schema). */
-export function interactionToFields(row: InteractionForMirror, syncedAt: Date, dashboardUrl?: string): Record<string, unknown> {
+export function interactionToFields(
+  row: InteractionForMirror,
+  syncedAt: Date,
+  dashboardUrl?: string,
+): Record<string, unknown> {
   const cost = row.cost === null || row.cost === undefined ? null : Number(row.cost);
   const fields: Record<string, unknown> = {
     [MERGE_FIELD]: row.vapi_call_id,
@@ -106,6 +117,8 @@ export function interactionToFields(row: InteractionForMirror, syncedAt: Date, d
     "Duration (s)": row.duration_seconds,
     "Cost (USD)": Number.isFinite(cost) ? cost : null,
     "Analysis Status": row.analysis_status,
+    "Call Reason": row.call_reason,
+    "Claim Number": typeof row.claim_number === "string" && row.claim_number.trim() ? row.claim_number.trim() : null,
     "Synced At": syncedAt.toISOString(),
   };
   // The alerts' link builder: a URL with credentials, another scheme or a malformed id gives no link.
@@ -118,7 +131,11 @@ export function interactionToFields(row: InteractionForMirror, syncedAt: Date, d
 
 /** Upsert one record, merged on "Call ID". Never throws; classifies each failure as retryable, a
  *  configuration error, or neither. */
-export async function upsertCallRecord(deps: Deps, fields: Record<string, unknown>, timeoutMs = 5000): Promise<AirtableResult> {
+export async function upsertCallRecord(
+  deps: Deps,
+  fields: Record<string, unknown>,
+  timeoutMs = 5000,
+): Promise<AirtableResult> {
   const { AIRTABLE_TOKEN: token, AIRTABLE_BASE_ID: baseId } = deps.env;
   if (!token || !baseId) return { ok: false, error: "airtable not configured", retryable: false, config: true };
   const table = deps.env.AIRTABLE_TABLE || DEFAULT_TABLE;
@@ -129,7 +146,11 @@ export async function upsertCallRecord(deps: Deps, fields: Record<string, unknow
       method: "PATCH",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       // typecast lets a new outcome or flag value become a select option instead of a 422
-      body: JSON.stringify({ performUpsert: { fieldsToMergeOn: [MERGE_FIELD] }, records: [{ fields }], typecast: true }),
+      body: JSON.stringify({
+        performUpsert: { fieldsToMergeOn: [MERGE_FIELD] },
+        records: [{ fields }],
+        typecast: true,
+      }),
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (e) {
@@ -143,7 +164,11 @@ export async function upsertCallRecord(deps: Deps, fields: Record<string, unknow
   if (res.ok) {
     const rec = body?.records?.[0];
     if (!rec?.id) return { ok: false, status: res.status, error: "airtable: no record in response", retryable: true };
-    return { ok: true, recordId: rec.id, created: Array.isArray(body?.createdRecords) && body.createdRecords.includes(rec.id) };
+    return {
+      ok: true,
+      recordId: rec.id,
+      created: Array.isArray(body?.createdRecords) && body.createdRecords.includes(rec.id),
+    };
   }
   const message = body?.error?.message ?? body?.error?.type ?? body?.error ?? res.statusText;
   const error = `airtable ${res.status}: ${String(message).slice(0, 200)}`;

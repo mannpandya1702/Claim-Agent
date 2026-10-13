@@ -10,6 +10,7 @@
     "branches",
     "branches-identity",
     "contact",
+    "claim-intake",
     "faq",
     "knowledge-handoff",
     "errors",
@@ -31,6 +32,8 @@
     "send_info_email",
     "capture_contact",
     "confirm_contact",
+    "start_claim",
+    "confirm_claim",
     "handoff_to_knowledge",
     "endCall"
   ],

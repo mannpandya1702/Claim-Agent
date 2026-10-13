@@ -8,16 +8,19 @@
 //   deno task smoke --only a,b      run only the named cases (the post-call cases share one call)
 //   deno task smoke --keep          leave the rows in place for inspection
 //
-// Chat envelopes send no Telegram and no email (alert_status 'skipped'), and no case reaches an
-// alerting branch, so a smoke run never pages anyone. The one email a run can send is the new-caller
-// case's steps to start a claim, and only to OWNER_EMAIL (the address every seeded customer uses);
-// without it that case checks the gates and sends nothing.
+// Chat envelopes send no Telegram and no team email (alert_status 'skipped'), and no case reaches an
+// alerting branch, so a smoke run never pages anyone. The emails a run can send all go to OWNER_EMAIL
+// (the address every seeded customer uses): the new-caller case's steps to start a claim, the new
+// caller's claim confirmation (both only when OWNER_EMAIL is set; without it those cases check the
+// gates and send nothing), and the verified claim's confirmation to the seeded customer's address on file.
+// The claims and claim intakes the claim cases file are deleted with everything else.
 
 import { maskEmail } from "../supabase/functions/vapi-webhook/email.ts";
-import type { Code, Level } from "../supabase/functions/vapi-webhook/enums.ts";
+import { CLAIM_DOCUMENTS, type Code, type Level, TIMEZONE } from "../supabase/functions/vapi-webhook/enums.ts";
 import { normaliseEmail } from "../supabase/functions/vapi-webhook/identity.ts";
+import { parseLossDate } from "../supabase/functions/vapi-webhook/loss_date.ts";
 import { MASKED_ANSWER } from "../supabase/functions/vapi-webhook/redact.ts";
-import { assertSpeakable, sentenceFor } from "../supabase/functions/vapi-webhook/speak.ts";
+import { assertSpeakable, sentenceFor, verifiedFileClaimSentence } from "../supabase/functions/vapi-webhook/speak.ts";
 import {
   endOfCallReportEnvelope,
   type EnvelopeRef,
@@ -49,6 +52,12 @@ const TEAGUE = {
   phone: "6025550104",
   dob: { dob_month: 1, dob_day: 30, dob_year: 1965 },
 }; // no email on file
+// The claim cases file for Sloane, whose one claim no other case reads.
+const SLOANE = {
+  id: "6b0d6f0e-1c11-4c7a-9a01-000000000103",
+  phone: "6025550103",
+  dob: { dob_month: 7, dob_day: 21, dob_year: 1992 },
+};
 const UNKNOWN_PHONE = "6025550199";
 const CALLBACK_PHONE = "6025550177";
 const FIRST_MESSAGE =
@@ -58,6 +67,19 @@ const NEW_CALLER = { first_name: "smoke", last_name: "tester" };
 // Spelled the way a caller says it, so the server's spoken-form reading is exercised end to end.
 const SPOKEN_EMAIL = "s m o k e dot t e s t at example dot com";
 const VERIFIED_PREFIX = "Thank you, Tobias, you're verified.";
+// A loss as a caller reports it; loss_date is replaced per step.
+const BUMPER = {
+  claim_type: "auto",
+  description: "Someone backed into my parked car at the grocery store and dented the rear bumper.",
+  summary: "a dented rear bumper",
+};
+const TREE = {
+  claim_type: "home",
+  loss_date: "yesterday",
+  description: "A tree branch came down on the roof in the storm and cracked some shingles.",
+  summary: "a branch on the roof",
+};
+const PHONE_CLAIM_DETAIL = "Reported by phone. An adjuster will be assigned within one business day.";
 const SETTLE_MS = 2000;
 const ROW_WAIT_MS = 3000;
 const ROW_POLL_MS = 250;
@@ -97,6 +119,27 @@ export interface SmokeDb {
   emails(
     callKey: string,
   ): Promise<{ kind: string; to_masked: string; status: string }[]>;
+  intake(callKey: string): Promise<
+    {
+      kind: string;
+      claim_type: string;
+      loss_date: string;
+      claim_number: string | null;
+      confirmed: boolean;
+      customer_id: string | null;
+    } | null
+  >;
+  /** The claims a call filed (claims.reported_call_key). */
+  phoneClaims(callKey: string): Promise<
+    {
+      customer_id: string;
+      claim_number: string;
+      claim_type: string;
+      status: string;
+      status_detail: string | null;
+      documents_required: string[];
+    }[]
+  >;
 }
 
 export interface SmokeConfig {
@@ -224,6 +267,31 @@ const contains = (...parts: string[]) => (s: string) => {
 };
 
 const notVerified = (level: Level) => sentenceFor("not_verified", { level });
+
+/** Today in New York (the day loss dates are read against), as YYYY-MM-DD. */
+function newYorkToday(now: Date): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+/** The read-back start_claim gives for these arguments today. */
+function claimReadback(c: CaseCtx, args: { claim_type: string; loss_date: string; summary: string }): string {
+  const now = c.cfg.now?.() ?? new Date();
+  const read = parseLossDate(args.loss_date, now);
+  if (!("date" in read)) throw new Error(`smoke loss_date ${args.loss_date} is not a date the server reads`);
+  return sentenceFor("claim_readback", {
+    claim_type: args.claim_type,
+    loss_date: read.date,
+    summary: args.summary,
+    today: newYorkToday(now),
+  });
+}
 
 interface SmokeCase {
   name: string;
@@ -783,6 +851,292 @@ export function smokeCases(): SmokeCase[] {
       },
     },
     {
+      name: "verify-intent-status",
+      async run(c) {
+        // The caller asked about their claims before verifying: the verified answer reads them too.
+        const ref = c.ref();
+        await c.tool(ref, { name: "lookup_customer", args: { phone: TOBIAS.phone }, code: "needs_dob" });
+        const verifyId = `${ref.callKey}-verify`;
+        const args = { ...TOBIAS.dob, intent: "claim_status" };
+        const first = await c.tool(ref, {
+          name: "verify_identity",
+          id: verifyId,
+          args,
+          code: "verified",
+          // with PRIOR_CONTACTS_ENABLED the welcome-back opening may come first
+          sentence: (s) =>
+            s.startsWith(VERIFIED_PREFIX)
+              ? contains("four thousand eight hundred twenty dollars", "ending in one one five", "contractor estimate")(
+                s,
+              )
+              : `sentence was "${s}"`,
+          check: (r) => {
+            const claims = r.data?.claims;
+            if (r.data?.status_read !== true || !Array.isArray(claims) || claims.length !== 2) {
+              return `data should carry status_read and both claims, was ${JSON.stringify(r.data)}`;
+            }
+            return /4820|Halvorsen|Fairbanks/.test(JSON.stringify(r.data))
+              ? "data carries more than last3 + status"
+              : null;
+          },
+        });
+        // A VAPI retry of the same toolCallId replays the answer and records no second read.
+        await c.tool(ref, {
+          name: "verify_identity",
+          id: verifyId,
+          args,
+          code: "verified",
+          sentence: (s) => first?.sentence === s ? null : "replayed sentence differs from the first answer",
+        });
+        const db = c.cfg.db;
+        if (db) {
+          const problem = await c.rows(() => db.attempts(ref.callKey), (rows) => {
+            const trail = rows.map((r) => `${r.tool_name}:${r.code}`).join(",");
+            return trail === "lookup_customer:needs_dob,verify_identity:verified,get_claim_status:ok"
+              ? null
+              : `attempts ledger was [${trail}] (the chained read is one get_claim_status row)`;
+          });
+          if (problem) c.fail(problem);
+        }
+      },
+    },
+    {
+      name: "fnol-verified",
+      async run(c) {
+        // A chat, so no team alert is paged; the customer's confirmation goes to the address on file.
+        const ref = c.ref("", "chat");
+        await c.tool(ref, { name: "lookup_customer", args: { phone: SLOANE.phone }, code: "needs_dob" });
+        const opening = verifiedFileClaimSentence(sentenceFor("verified", { first_name: "Sloane" }));
+        await c.tool(ref, {
+          name: "verify_identity",
+          args: { ...SLOANE.dob, intent: "file_claim" },
+          code: "verified",
+          // the welcome-back variant keeps its opening and ends the same way
+          sentence: (s) =>
+            s.startsWith("Thank you, Sloane, you're verified.") &&
+              s.endsWith(opening.slice("Thank you, Sloane, you're verified.".length))
+              ? null
+              : `sentence was "${s}"`,
+        });
+        await c.tool(ref, {
+          name: "start_claim",
+          args: { ...BUMPER, loss_date: "yesterday", description: "car dented" },
+          code: "claim_needs_description",
+        });
+        await c.tool(ref, {
+          name: "start_claim",
+          args: { ...BUMPER, loss_date: "next Tuesday" },
+          code: "claim_bad_date",
+        });
+        const earlier = { ...BUMPER, loss_date: "the day before yesterday" };
+        await c.tool(ref, {
+          name: "start_claim",
+          args: earlier,
+          code: "claim_readback",
+          sentence: claimReadback(c, earlier),
+        });
+        await c.tool(ref, { name: "confirm_claim", args: { correct: false }, code: "claim_retry" });
+        const corrected = { ...BUMPER, loss_date: "yesterday" };
+        await c.tool(ref, {
+          name: "start_claim",
+          args: corrected,
+          code: "claim_readback",
+          sentence: claimReadback(c, corrected),
+        });
+        const confirmId = `${ref.callKey}-confirm`;
+        const filedShape =
+          /^You're all set\. Your claim number ends in [a-z]+ [a-z]+ [a-z]+(, and I've emailed the details to the email on file)?\. An adjuster will reach out within one business day\. Is there anything else I can help with\?$/;
+        const filed = await c.tool(ref, {
+          name: "confirm_claim",
+          id: confirmId,
+          args: { correct: true },
+          code: "claim_filed",
+          sentence: filedShape,
+          // "emailed" only when Resend returned an id: either answer is honest, and the sentence matches it
+          check: (r) =>
+            /^\d{3}$/.test(String(r.data?.claim_last3 ?? "")) && r.sentence === sentenceFor("claim_filed", r.data ?? {})
+              ? null
+              : `data ${JSON.stringify(r.data)} does not match the sentence`,
+        });
+        // A VAPI retry repeats the answer; nothing is filed or sent twice.
+        await c.tool(ref, {
+          name: "confirm_claim",
+          id: confirmId,
+          args: { correct: true },
+          code: "claim_filed",
+          sentence: (s) => filed?.sentence === s ? null : "replayed sentence differs from the first answer",
+        });
+        const last3 = String(filed?.data?.claim_last3 ?? "");
+        await c.tool(ref, {
+          name: "start_claim",
+          args: corrected,
+          code: "claim_already_filed",
+          sentence: sentenceFor("claim_already_filed", last3 ? { claim_last3: last3 } : {}),
+        });
+        const db = c.cfg.db;
+        if (db) {
+          const yesterday = parseLossDate("yesterday", c.cfg.now?.() ?? new Date());
+          const problem = await c.rows(
+            async () => ({
+              intake: await db.intake(ref.callKey),
+              claims: await db.phoneClaims(ref.callKey),
+              emails: await db.emails(ref.callKey),
+            }),
+            ({ intake, claims, emails }) => {
+              if (!intake) return "no claim_intakes row";
+              const got = [intake.kind, intake.claim_type, intake.loss_date, intake.confirmed, intake.customer_id].join(
+                "|",
+              );
+              const want = ["claim", "auto", "date" in yesterday ? yesterday.date : "", true, SLOANE.id].join("|");
+              if (got !== want) return `claim_intakes row was ${got}, expected ${want}`;
+              if (!/^CLM-\d{6}$/.test(intake.claim_number ?? "") || !intake.claim_number!.endsWith(last3)) {
+                return `claim number ${intake.claim_number} does not end in the spoken ${last3}`;
+              }
+              if (claims.length !== 1) return `${claims.length} claims rows filed by the call, expected one`;
+              const claim = claims[0];
+              const row = [claim.customer_id, claim.claim_number, claim.claim_type, claim.status, claim.status_detail];
+              const wantRow = [SLOANE.id, intake.claim_number, "auto", "received", PHONE_CLAIM_DETAIL];
+              if (row.join("|") !== wantRow.join("|")) return `claims row was ${row.join("|")}`;
+              if (JSON.stringify(claim.documents_required) !== JSON.stringify(CLAIM_DOCUMENTS.auto)) {
+                return `documents_required was ${JSON.stringify(claim.documents_required)}`;
+              }
+              // the customer's confirmation once (the ledger is per call and kind); the team's email is
+              // skipped on a chat, like its Telegram card
+              const kinds = emails.map((e) => e.kind).join(",");
+              return kinds === "claim_received" ? null : `email ledger was [${kinds}], expected [claim_received]`;
+            },
+          );
+          if (problem) c.fail(problem);
+        }
+      },
+    },
+    {
+      name: "fnol-lead",
+      async run(c) {
+        // A new caller's loss, taken once their details are confirmed; a lead for a specialist, never a
+        // claims row. The confirmation goes only to the OWNER_EMAIL address, and only when it is set.
+        const owner = normaliseEmail(c.cfg.ownerEmail ?? "");
+        const ref = c.ref("", "chat");
+        await c.tool(ref, {
+          name: "lookup_customer",
+          args: { phone: UNKNOWN_PHONE },
+          code: "not_found",
+          sentence: sentenceFor("not_found", { digits: UNKNOWN_PHONE }),
+        });
+        await c.tool(ref, { name: "lookup_customer", args: { phone: UNKNOWN_PHONE }, code: "not_found_final" });
+        // no details yet, and then unconfirmed details: the way in is the caller's name
+        await c.tool(ref, { name: "start_claim", args: TREE, code: "claim_needs_contact" });
+        // a chat has no caller id: without a number said, the intake would ask for one first
+        const details = owner
+          ? { ...NEW_CALLER, email: owner, callback_phone: CALLBACK_PHONE }
+          : { ...NEW_CALLER, callback_phone: CALLBACK_PHONE };
+        await c.tool(ref, {
+          name: "capture_contact",
+          args: details,
+          code: "contact_readback",
+          sentence: sentenceFor("contact_readback", {
+            first_name: "Smoke",
+            last_name: "Tester",
+            ...(owner ? { email: owner } : {}),
+            callback_phone: CALLBACK_PHONE,
+          }),
+        });
+        await c.tool(ref, { name: "start_claim", args: TREE, code: "claim_needs_contact" });
+        // the loss was told before the details, so the yes asks to take that claim down now
+        await c.tool(ref, {
+          name: "confirm_contact",
+          args: { correct: true },
+          code: "contact_saved_new",
+          sentence: sentenceFor(
+            "contact_saved_new",
+            owner ? { first_name: "Smoke", resume_claim: true } : {
+              first_name: "Smoke",
+              has_email: false,
+              resume_claim: true,
+            },
+          ),
+        });
+        await c.tool(ref, {
+          name: "start_claim",
+          args: TREE,
+          code: "claim_readback",
+          sentence: claimReadback(c, TREE),
+        });
+        const confirmId = `${ref.callKey}-confirm`;
+        const plain = sentenceFor("claim_intake_saved", { first_name: "Smoke", emailed: false });
+        const emailed = sentenceFor("claim_intake_saved", { first_name: "Smoke", emailed: true });
+        const saved = await c.tool(ref, {
+          name: "confirm_claim",
+          id: confirmId,
+          args: { correct: true },
+          code: "claim_intake_saved",
+          // with an address, Resend may refuse (its sandbox, or no key in a test): the honest answer passes too
+          sentence: (s) => s === plain || (owner && s === emailed) ? null : `sentence was "${s}"`,
+        });
+        await c.tool(ref, {
+          name: "confirm_claim",
+          id: confirmId,
+          args: { correct: true },
+          code: "claim_intake_saved",
+          sentence: (s) => saved?.sentence === s ? null : "replayed sentence differs from the first answer",
+        });
+        const db = c.cfg.db;
+        if (db) {
+          const problem = await c.rows(
+            async () => ({
+              intake: await db.intake(ref.callKey),
+              claims: await db.phoneClaims(ref.callKey),
+              emails: await db.emails(ref.callKey),
+            }),
+            ({ intake, claims, emails }) => {
+              if (!intake) return "no claim_intakes row";
+              const got = [intake.kind, intake.claim_type, intake.confirmed, intake.claim_number, intake.customer_id];
+              if (got.join("|") !== "lead_intake|home|true||") return `claim_intakes row was ${got.join("|")}`;
+              if (claims.length !== 0) return `a new caller's intake filed ${claims.length} claims rows`;
+              const want = owner ? `claim_received|${maskEmail(owner)}` : "";
+              const ledger = emails.map((e) => `${e.kind}|${e.to_masked}`).join(",");
+              return ledger === want ? null : `email ledger was [${ledger}], expected [${want}]`;
+            },
+          );
+          if (problem) c.fail(problem);
+        }
+      },
+    },
+    {
+      name: "fnol-locked",
+      async run(c) {
+        // Who may report a loss is decided before any argument is read.
+        const args = { ...BUMPER, loss_date: "yesterday" };
+        await c.tool(c.ref("fresh"), { name: "start_claim", args, code: "claim_needs_lookup" });
+        const ref = c.ref();
+        await c.tool(ref, { name: "lookup_customer", args: { phone: TOBIAS.phone }, code: "needs_dob" });
+        await c.tool(ref, { name: "start_claim", args, code: "claim_needs_verification" });
+        await c.tool(ref, {
+          name: "verify_identity",
+          args: { dob_month: 3, dob_day: 14, dob_year: 1985, intent: "file_claim" },
+          code: "auth_failed",
+        });
+        await c.tool(ref, {
+          name: "verify_identity",
+          args: { dob_month: 4, dob_day: 14, dob_year: 1986, intent: "file_claim" },
+          code: "locked",
+        });
+        await c.tool(ref, { name: "start_claim", args, code: "claim_locked" });
+        // a locked call is refused with no details at all
+        await c.tool(ref, { name: "start_claim", args: {}, code: "claim_locked" });
+        await c.tool(ref, { name: "confirm_claim", args: { correct: true }, code: "claim_not_pending" });
+        const db = c.cfg.db;
+        if (db) {
+          const problem = await c.rows(
+            async () => ({ intake: await db.intake(ref.callKey), claims: await db.phoneClaims(ref.callKey) }),
+            ({ intake, claims }) =>
+              intake === null && claims.length === 0 ? null : "a locked call stored an intake or filed a claim",
+          );
+          if (problem) c.fail(problem);
+        }
+      },
+    },
+    {
       name: "status-update",
       async run(c) {
         const ref = { ...c.ref(), callKey: lifecycleKey(c) };
@@ -905,10 +1259,23 @@ export function sqlDb(sql: ReturnType<typeof sqlClient>): SmokeDb {
         `select kind, first_name, last_name, email, confirmed from caller_contacts where call_key = ${lit(k)}`,
       ))[0] ?? null,
     emails: (k) => sql(`select kind, to_masked, status from emails where call_key = ${lit(k)} order by created_at`),
+    intake: async (k) =>
+      (await sql<any>(
+        `select kind, claim_type, loss_date::text as loss_date, claim_number, confirmed, customer_id from claim_intakes where call_key = ${
+          lit(k)
+        }`,
+      ))[0] ?? null,
+    phoneClaims: (k) =>
+      sql(
+        `select customer_id, claim_number, claim_type, status, status_detail, documents_required from claims where reported_call_key = ${
+          lit(k)
+        }`,
+      ),
   };
 }
 
-/** Deletes every row any smoke run wrote (this run's and any interrupted earlier run's). */
+/** Deletes every row any smoke run wrote (this run's and any interrupted earlier run's), the claims
+ *  a smoke call filed included; seeded claims have no reported_call_key, so they are never touched. */
 export function cleanupSql(prefix = SMOKE_PREFIX): string {
   if (!/^[a-z]+-$/.test(prefix)) throw new Error("cleanup prefix must be a plain word and a dash");
   const like = lit(`${prefix}%`);
@@ -920,7 +1287,9 @@ export function cleanupSql(prefix = SMOKE_PREFIX): string {
   d_lines as (delete from transcript_lines where call_key like ${like} returning 1),
   d_interactions as (delete from call_interactions where vapi_call_id like ${like} returning 1),
   d_captures as (delete from webhook_captures where call_key like ${like} returning 1),
-  d_contacts as (delete from caller_contacts where call_key like ${like} returning 1)
+  d_contacts as (delete from caller_contacts where call_key like ${like} returning 1),
+  d_intakes as (delete from claim_intakes where call_key like ${like} returning 1),
+  d_claims as (delete from claims where reported_call_key like ${like} returning 1)
 select
   (select count(*) from d_attempts)::int as attempts,
   (select count(*) from d_sessions)::int as call_sessions,
@@ -929,7 +1298,9 @@ select
   (select count(*) from d_lines)::int as transcript_lines,
   (select count(*) from d_interactions)::int as call_interactions,
   (select count(*) from d_captures)::int as webhook_captures,
-  (select count(*) from d_contacts)::int as caller_contacts`;
+  (select count(*) from d_contacts)::int as caller_contacts,
+  (select count(*) from d_intakes)::int as claim_intakes,
+  (select count(*) from d_claims)::int as phone_claims`;
 }
 
 /** A captured report from fixtures/eocr/full.json, if it is one that needs no backfill (a backfill
@@ -984,7 +1355,9 @@ async function main(): Promise<number> {
 
   let results: CaseResult[] = [];
   try {
-    const ownerEmail = typeof env.OWNER_EMAIL === "string" && env.OWNER_EMAIL.trim() ? env.OWNER_EMAIL.trim() : undefined;
+    const ownerEmail = typeof env.OWNER_EMAIL === "string" && env.OWNER_EMAIL.trim()
+      ? env.OWNER_EMAIL.trim()
+      : undefined;
     results = await runSmoke({ target: { url, secret }, orgId, runId, db: sqlDb(sql), eocrFixture, ownerEmail }, only);
   } finally {
     if (keep) {

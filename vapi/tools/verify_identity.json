@@ -4,7 +4,7 @@
   "function": {
     "name": "verify_identity",
     "strict": false,
-    "description": "Check the caller's date of birth against the account found by lookup_customer. Call only after lookup_customer's sentence asked for the date of birth. Its result is a sentence that has already been spoken to the caller.",
+    "description": "Check the caller's date of birth against the account found by lookup_customer. Call only after lookup_customer's sentence asked for the date of birth. Its result is a sentence that has already been spoken to the caller; with intent claim_status it also reads every claim on the account when it can; when that read fails, its sentence only says the caller is verified.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -19,6 +19,11 @@
         "dob_year": {
           "type": "integer",
           "description": "Year of birth as four digits, as the caller said it."
+        },
+        "intent": {
+          "type": "string",
+          "enum": ["claim_status", "file_claim", "other"],
+          "description": "What the caller has said they want: claim_status to hear where their claims stand or what they still need; file_claim to report a new loss or start a claim; other for anything else, such as having something emailed, or when they have not said."
         }
       },
       "required": ["dob_month", "dob_day", "dob_year"],
