@@ -316,7 +316,9 @@ function infoEmailPlan(ctx: PlanCtx): MockPlan {
   const known: Record<string, MockResult> = {};
   for (const topic of INFO_EMAIL_TOPICS) {
     if (s.level !== "verified" || !customer) {
-      known[topic] = topic === "how_to_start_claim" ? newCallerSteps(ctx) : result(ctx, "not_verified", { level: s.level });
+      known[topic] = topic === "how_to_start_claim"
+        ? newCallerSteps(ctx)
+        : result(ctx, "not_verified", { level: s.level });
     } // A pending email update is for staff to add; it is never sent to on this call.
     else if (!customer.email) known[topic] = result(ctx, "no_email_on_file");
     else if (ctx.state.emailed.includes(topic)) known[topic] = result(ctx, "email_already_sent");
@@ -325,7 +327,17 @@ function infoEmailPlan(ctx: PlanCtx): MockPlan {
   return { topic: { known, other: result(ctx, "bad_args") } };
 }
 
-const NAME_PLACEHOLDERS = ["unknown", "caller", "customer", "anonymous", "none", "name", "first name", "last name", "n/a"];
+const NAME_PLACEHOLDERS = [
+  "unknown",
+  "caller",
+  "customer",
+  "anonymous",
+  "none",
+  "name",
+  "first name",
+  "last name",
+  "n/a",
+];
 
 /** The key a capture is looked up by: the address alone for a verified caller (the account has
  *  the name), else lower-case first and last name, the address and the said number ("" when none). */
@@ -336,9 +348,7 @@ export function contactKey(
   email: string | null,
   phone: string | null = null,
 ): string {
-  return verified
-    ? `@${email ?? ""}`
-    : `${first.toLowerCase()}|${last.toLowerCase()}|${email ?? ""}|${phone ?? ""}`;
+  return verified ? `@${email ?? ""}` : `${first.toLowerCase()}|${last.toLowerCase()}|${email ?? ""}|${phone ?? ""}`;
 }
 
 /** The number a capture stores as said by the caller (tools.ts contactInput): the digits passed when
@@ -627,6 +637,10 @@ export interface TurnRecord {
   chatId: string | null;
   calls: CallRecord[];
   model: string[]; // the model's own words, in order
+  // /chat only: words the model added after a server tool's spoken sentence, with no tool call
+  // after them. On voice the tool's sentence ends the turn (probe P4), so
+  // these are reported but never heard and never fail a run.
+  continuation: string[];
   filler: string[]; // configured tool messages VAPI spoke
   heard: string[]; // what the caller hears, in order: model words, filler, tool sentences
   cost: number;
@@ -650,11 +664,14 @@ export function parseTurn(user: string, response: Obj, fillers: Set<string>, req
     chatId: typeof response.id === "string" ? response.id : null,
     calls: [],
     model: [],
+    continuation: [],
     filler: [],
     heard: [],
     cost: typeof response.cost === "number" ? response.cost : 0,
   };
   const output = Array.isArray(response.output) ? response.output : [];
+  // The last output item was a server tool's answer that VAPI speaks (results[].message).
+  let afterSpokenResult = false;
   for (const item of output) {
     const m = item && typeof item === "object" ? item as Obj : {};
     if (m.role === "assistant") {
@@ -663,11 +680,15 @@ export function parseTurn(user: string, response: Obj, fillers: Set<string>, req
       if (content) {
         if (toolCalls.length === 0 && turn.calls.length > 0 && isFillerText(content, fillers)) {
           turn.filler.push(content);
+        } else if (toolCalls.length === 0 && afterSpokenResult) {
+          turn.continuation.push(content);
+          continue;
         } else {
           turn.model.push(content);
         }
         turn.heard.push(content);
       }
+      if (toolCalls.length > 0) afterSpokenResult = false;
       for (const raw of toolCalls) {
         const c = raw && typeof raw === "object" ? raw as Obj : {};
         const fn = c.function && typeof c.function === "object" ? c.function as Obj : {};
@@ -694,6 +715,7 @@ export function parseTurn(user: string, response: Obj, fillers: Set<string>, req
         call.result = parsed as unknown as MockResult;
         if (typeof parsed.message === "string") turn.heard.push(parsed.message);
       }
+      afterSpokenResult = SERVER_TOOL_SET.has(call.name) && typeof call.result?.message === "string";
     }
   }
   return turn;
@@ -752,7 +774,14 @@ function capturedContact(state: SimState, a: Args): SimContact {
   const email = normaliseEmail(a.email);
   const phone = capturedPhone(a, state.contact?.phone ?? null);
   if (customer) {
-    return { kind: "email_update", first: customer.first_name, last: customer.last_name, email, phone, confirmed: false };
+    return {
+      kind: "email_update",
+      first: customer.first_name,
+      last: customer.last_name,
+      email,
+      phone,
+      confirmed: false,
+    };
   }
   return {
     kind: "new_customer",
@@ -834,7 +863,8 @@ const SPELL_ASK = /\bspell/i;
 const NUMBER_ASK = /\b(best number|number to reach|reach you|calling from)\b/i;
 // The branch question before a would-be new caller gives any number (identity.md STEP 1).
 const POLICY_ASK = /\b(already have|have) (a |an )?(policy|account)\b/i;
-const HUMAN_CLAIM = /\b(I'm|I am) (a |an )?(real |actual )?(person|human|human being)\b|\bnot (an? )?(AI|bot|robot|machine)\b/i;
+const HUMAN_CLAIM =
+  /\b(I'm|I am) (a |an )?(real |actual )?(person|human|human being)\b|\bnot (an? )?(AI|bot|robot|machine)\b/i;
 const AUTOMATED = /\bautomated assistant\b/i;
 // The battery runs a web assistant, which cannot transfer: the honest answer offers a callback.
 const TRANSFER_OFFER = /\b(connect|transfer) you\b/i;
@@ -1308,7 +1338,9 @@ export const PERSONAS: Persona[] = [
         firstToolSilent: "capture_contact",
         args: { capture_contact: all(nameIs("Priya", "Raman"), emailIs("priya_raman@outlook.com")) },
         // the number said with the first capture is kept and read back again
-        heardSays: [/P, R, I, Y, A, underscore, R, A, M, A, N, at outlook dot com, and the best number is six zero two/],
+        heardSays: [
+          /P, R, I, Y, A, underscore, R, A, M, A, N, at outlook dot com, and the best number is six zero two/,
+        ],
       },
       {
         user: "Yes, that's correct now.",
@@ -1489,6 +1521,7 @@ function mergeTurns(parts: TurnRecord[]): TurnRecord {
     chatId: parts.at(-1)?.chatId ?? null,
     calls: parts.flatMap((p) => p.calls),
     model: parts.flatMap((p) => p.model),
+    continuation: parts.flatMap((p) => p.continuation),
     filler: parts.flatMap((p) => p.filler),
     heard: parts.flatMap((p) => p.heard),
     cost: parts.reduce((s, p) => s + p.cost, 0),

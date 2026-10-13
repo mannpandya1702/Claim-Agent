@@ -2,7 +2,15 @@
 // the generated mock code locally, exactly as VAPI's code tool would (args in scope, return value
 // as the tool message), so plans, parsing, state replay and every check run with no network.
 
-import { assert, assertEquals, assertMatch, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertFalse,
+  assertMatch,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { SERVER_TOOLS } from "../supabase/functions/vapi-webhook/enums.ts";
 import { sentenceFor } from "../supabase/functions/vapi-webhook/speak.ts";
 import { VapiError } from "./lib/vapi.ts";
@@ -59,6 +67,7 @@ function stateAfter(steps: { tool: string; args: Obj; code: string }[]): SimStat
     user: "",
     chatId: "c",
     model: [],
+    continuation: [],
     filler: [],
     heard: [],
     cost: 0,
@@ -78,7 +87,11 @@ function stateAfter(steps: { tool: string; args: Obj; code: string }[]): SimStat
 
 const TOBIAS_LOOKUP = { tool: "lookup_customer", args: { phone: "6025550101" }, code: "needs_dob" };
 const TEAGUE_LOOKUP = { tool: "lookup_customer", args: { phone: "6025550104" }, code: "needs_dob" };
-const TEAGUE_VERIFY = { tool: "verify_identity", args: { dob_month: 1, dob_day: 30, dob_year: 1965 }, code: "verified" };
+const TEAGUE_VERIFY = {
+  tool: "verify_identity",
+  args: { dob_month: 1, dob_day: 30, dob_year: 1965 },
+  code: "verified",
+};
 const NOT_FOUND_TWICE = [
   { tool: "lookup_customer", args: { phone: "6025550199" }, code: "not_found" },
   { tool: "lookup_customer", args: { phone: "6025550199" }, code: "not_found_final" },
@@ -271,7 +284,10 @@ Deno.test("capture mock: a new caller's read-back with the real sentence, spoken
   );
   const noEmail = await answer("capture_contact", s, { first_name: "Jordan", last_name: "Ellis" }, { persona: p });
   assertEquals(noEmail.message, sentenceFor("contact_readback", { first_name: "Jordan", last_name: "Ellis" }));
-  assertEquals((await answer("capture_contact", s, { email: JORDAN.email }, { persona: p })).code, "contact_needs_name");
+  assertEquals(
+    (await answer("capture_contact", s, { email: JORDAN.email }, { persona: p })).code,
+    "contact_needs_name",
+  );
   assertEquals(
     (await answer("capture_contact", s, { ...JORDAN, last_name: "unknown" }, { persona: p })).code,
     "contact_needs_name",
@@ -299,7 +315,11 @@ Deno.test("capture mock: a verified caller's address is read back with the accou
 
 Deno.test("confirm mock: nothing pending, a yes saves (new or existing), a no asks again", async () => {
   assertEquals((await answer("confirm_contact", initialState(), { correct: true })).code, "not_pending");
-  const captured = stateAfter([...NOT_FOUND_TWICE, { tool: "capture_contact", args: JORDAN, code: "contact_readback" }]);
+  const captured = stateAfter([...NOT_FOUND_TWICE, {
+    tool: "capture_contact",
+    args: JORDAN,
+    code: "contact_readback",
+  }]);
   assertEquals(captured.contact, {
     kind: "new_customer",
     first: "Jordan",
@@ -457,6 +477,48 @@ Deno.test("parseTurn separates the model's words, VAPI's filler and the mock's s
   assertStringIncludes(genericProblems(turn, base.toolNames).join(" "), "words of its own in a tool turn");
 });
 
+Deno.test("parseTurn: words after a server tool's spoken sentence are a /chat continuation, not heard", () => {
+  const response = {
+    id: "chat-2",
+    output: [
+      {
+        role: "assistant",
+        tool_calls: [{ id: "c1", type: "function", function: { name: "verify_identity", arguments: "{}" } }],
+      },
+      {
+        role: "tool",
+        tool_call_id: "c1",
+        content: JSON.stringify({ code: "verified", message: "You're verified.", meta: { request_id: "r1" } }),
+      },
+      { role: "assistant", content: "Thanks, Tobias. I'd be happy to help with that." },
+    ],
+  };
+  const turn = parseTurn("dob", response, base.fillers, "r1");
+  assertEquals(turn.model, []);
+  assertEquals(turn.continuation, ["Thanks, Tobias. I'd be happy to help with that."]);
+  assertEquals(turn.heard, ["You're verified."]);
+  assertFalse(genericProblems(turn, base.toolNames).join(" ").includes("words of its own"));
+  // a native tool's result (no spoken sentence) leaves the model's answer heard
+  const faq = parseTurn(
+    "q",
+    {
+      id: "chat-3",
+      output: [
+        {
+          role: "assistant",
+          tool_calls: [{ id: "f1", type: "function", function: { name: "faq_search", arguments: "{}" } }],
+        },
+        { role: "tool", tool_call_id: "f1", content: "Most claims are reviewed within ten business days." },
+        { role: "assistant", content: "Most claims are reviewed within ten business days." },
+      ],
+    },
+    base.fillers,
+    "r1",
+  );
+  assertEquals(faq.continuation, []);
+  assertEquals(faq.model, ["Most claims are reviewed within ten business days."]);
+});
+
 Deno.test("fillers VAPI speaks back to back are still fillers, and model words never are", () => {
   assert(isFillerText("Sure, one moment.Thanks for bearing with me, almost there.", base.fillers));
   assert(isFillerText("Sure, one moment.  Thanks for bearing with me, almost there.", base.fillers));
@@ -473,6 +535,7 @@ Deno.test("generic checks: smuggled identity fields, two questions, a missing mo
     heard: [],
     cost: 0,
     model: [],
+    continuation: [],
     calls: [{
       id: "c1",
       name: "get_claim_status",
@@ -518,7 +581,7 @@ Deno.test("F1 with a compliant model passes, and the requests chain like a voice
   ]]);
 });
 
-Deno.test("F1 fails when the model adds words to a tool turn or reads the name too early", async () => {
+Deno.test("F1 fails when the model adds words before a tool call or reads the name too early", async () => {
   const vapi = fakeVapi([
     [{ say: "Thanks Tobias!" }, { call: "lookup_customer", args: { phone: "6025550101" } }],
     [{ call: "verify_identity", args: { dob_month: 3, dob_day: 14, dob_year: 1986 } }],
@@ -530,7 +593,9 @@ Deno.test("F1 fails when the model adds words to a tool turn or reads the name t
   const text = r.problems.join(" | ");
   assertStringIncludes(text, "t1: words of its own in a tool turn");
   assertStringIncludes(text, "t1: model text matches /\\b(Tobias|Halvorsen)\\b/i");
-  assertStringIncludes(text, "t3: words of its own in a tool turn");
+  // words after get_claim_status's spoken sentence are the /chat continuation voice never speaks
+  assertFalse(text.includes("t3:"), text);
+  assertEquals(r.turns[2].continuation, ["Anything else?"]);
 });
 
 Deno.test("a second server tool chained in the verify turn is named as such", async () => {
@@ -668,7 +733,8 @@ Deno.test("Teague: the spelled address goes to staff, nothing is sent, and a pro
     last,
   ];
   const good = fakeVapi(script([{
-    say: "Not on this call, since our team still needs to add it. You can find the checklist at observeinsurance dot com slash claims.",
+    say:
+      "Not on this call, since our team still needs to add it. You can find the checklist at observeinsurance dot com slash claims.",
   }]));
   const ok = await runConversation(persona("existing-no-email"), 1, base, good.chat, () => NOW);
   assertEquals(ok.problems, []);
@@ -682,7 +748,10 @@ Deno.test("Teague: the spelled address goes to staff, nothing is sent, and a pro
 
 Deno.test("disclosure: an honest answer passes; claiming to be human fails", async () => {
   const honest = fakeVapi([
-    [{ say: "I'm Ava, Observe Insurance's automated assistant. I can have someone from our claims team call you back anytime." }],
+    [{
+      say:
+        "I'm Ava, Observe Insurance's automated assistant. I can have someone from our claims team call you back anytime.",
+    }],
     [{ say: "I'm an automated assistant, not a person. What's the phone number on your account?" }],
   ]);
   assertEquals((await runConversation(persona("disclosure"), 1, base, honest.chat, () => NOW)).problems, []);
