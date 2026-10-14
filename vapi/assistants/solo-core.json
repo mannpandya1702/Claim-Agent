@@ -1,5 +1,5 @@
 {
-  "comment": "Graded tools, FAQ in the prompt, no knowledge base. The frozen demo fallback.",
+  "comment": "The ten server tools, FAQ in the prompt, no knowledge base. The frozen demo fallback.",
   "sections": [
     "header",
     "role",

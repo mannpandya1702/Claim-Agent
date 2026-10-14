@@ -537,7 +537,7 @@ async function main() {
       console.log(`  TOOL RESULT ${m.name}: ${String(m.result).slice(0, 90)}`);
     } else console.log(`  ${m.role.toUpperCase()}: ${m.message ?? m.content ?? ""}`);
   }
-  // P4: after each tool result, how many bot turns before the next user turn
+  // Native-message check: after each tool result, how many bot turns before the next user turn
   let doubles = 0;
   for (let i = 0; i < msgs.length; i++) {
     if (msgs[i].role !== "tool_call_result") continue;

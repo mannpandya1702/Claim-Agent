@@ -1164,12 +1164,12 @@ Deno.test("spokenName folds accents and refuses what cannot be spoken", () => {
 
 // The script opens no_lookup_yet and not_verified with "Happy to check that." and "Happy to help
 // with that once ..."; only those openers are allowed, and every other "happy to" stays banned.
-const OWNER_HAPPY_TO = /^Happy to (check that\.|help with that once (you're|I've) )/;
+const HAPPY_TO_OPENERS = /^Happy to (check that\.|help with that once (you're|I've) )/;
 
 Deno.test("no spoken string carries banned words or a double dash", () => {
   for (const [code, spoken] of ALL_SPOKEN) {
     assert(!spoken.includes("--"), `${code} has a double dash`);
-    const s = spoken.replace(OWNER_HAPPY_TO, "");
+    const s = spoken.replace(HAPPY_TO_OPENERS, "");
     for (
       const banned of [
         /\bgotcha\b/i,

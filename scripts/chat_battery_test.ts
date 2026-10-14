@@ -1509,7 +1509,7 @@ Deno.test("vapiChat retries 429 and 5xx, never passes its request ceiling, and h
 });
 
 // ---------------------------------------------------------------------------------------------
-// Line trouble (rules.md rules 25 and 26; call 01a13635).
+// Line trouble (rules.md rules 25 and 26; test call 01a13635).
 // ---------------------------------------------------------------------------------------------
 const STATUS_TOBIAS: Action[][] = [
   [{ call: "lookup_customer", args: { phone: "6025550101" } }],

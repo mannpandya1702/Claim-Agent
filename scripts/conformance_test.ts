@@ -52,9 +52,9 @@ const ENDCALL_GOODBYE = "Thanks for calling Observe Insurance. Take care.";
 const FIRST_MESSAGE =
   "Hey, thanks for calling Observe Insurance claims. This is Ava, and this call may be recorded. How can I help you today?";
 // The ElevenLabs voice every assistant speaks with (field names per the VAPI ElevenLabsVoice schema):
-// the chosen voice and delivery (a calm pace, speed 0.9; a steady read, stability 0.75, style 0) on
-// Turbo v2.5, chosen over Multilingual v2 for speed: first audio about 0.30 s against
-// about 0.84 s on their calls. SSML parsing is off (nothing sends SSML, and it costs latency),
+// Ava's voice and delivery (a calm pace, speed 0.9; a steady read, stability 0.75, style 0) on
+// Turbo v2.5, chosen over Multilingual v2 for lower first-audio latency: about 0.30 s against
+// about 0.84 s on test calls. SSML parsing is off (nothing sends SSML, and it costs latency),
 // optimizeStreamingLatency is VAPI's default 3, and the ChunkPlan sends whole sentences to TTS (at
 // least 80 characters, ending on . ! or ?) so intonation runs across a sentence.
 const VOICE = {
@@ -290,7 +290,7 @@ Deno.test("the FAQ FACTS block in every prompt equals the knowledge-base core", 
   }
 });
 
-Deno.test("greetings: graded assistants greet as Ava and ask for the phone number; Knowledge arrives silently", () => {
+Deno.test("greetings: the claims assistants greet as Ava and ask for the phone number; Knowledge arrives silently", () => {
   for (const key of ASSISTANT_KEYS) {
     const p = withRep.assistants[key].payload;
     if (key === "knowledge") {
@@ -379,7 +379,7 @@ Deno.test("conversation style rules are in every prompt", () => {
   }
 });
 
-// A reference prompt, merged into Ava's own rules: how she sounds, an upset caller, a missed
+// A reference voice-agent prompt, merged into Ava's own rules: how she sounds, an upset caller, a missed
 // word, who counts as verified, numbers she never takes, and the end of the call.
 Deno.test("the reference prompt's ideas are in every prompt, in Ava's own rules", () => {
   for (const key of ASSISTANT_KEYS) {
@@ -450,7 +450,7 @@ Deno.test("the reference prompt's ideas are in every prompt, in Ava's own rules"
   }
 });
 
-// Call 01a13449: garbled speech right after a barge-in ("Red desk, the home team, please?")
+// Test call 01a13449: garbled speech right after a barge-in ("Red desk, the home team, please?")
 // was escalated, and "the second claim" reached the tool with no ending although the summary had
 // just named both claims in order.
 Deno.test("garbled speech is re-asked, never escalated; an interruption is answered; order words name a claim", () => {
@@ -499,7 +499,7 @@ Deno.test("garbled speech is re-asked, never escalated; an interruption is answe
   }
 });
 
-// Call 01a13635: the caller said "your voice was breaking, I was not able to hear" three
+// Test call 01a13635: the caller said "your voice was breaking, I was not able to hear" three
 // times. Ava re-listed the services with "Does that help?", sent an email without a word about the line,
 // and re-read the documents with "Does that make sense?"; the caller hung up. A caller who can't hear
 // her gets a short line check and only the part they missed ("hey, can you hear me now? I was saying
@@ -937,7 +937,7 @@ Deno.test("squad: Concierge first, members share the floor tools, Knowledge has 
   assert(toolsOf(withRep, "knowledge").includes("handoff_to_concierge"));
 });
 
-Deno.test("contact capture: the graded assistants carry both tools and the flow; Knowledge hands such callers back", () => {
+Deno.test("contact capture: the claims assistants carry both tools and the flow; Knowledge hands such callers back", () => {
   for (const t of CONTACT_TOOLS) {
     assert(!(FLOOR_TOOLS as readonly string[]).includes(t), `${t} must not be a squad floor tool`);
   }
@@ -960,7 +960,7 @@ Deno.test("contact capture: the graded assistants carry both tools and the flow;
       assertMatch(prompt, /leave first_name and last_name out: their name comes from the account/);
     } else {
       for (const t of CONTACT_TOOLS) assert(!tools.includes(t), `${key} carries ${t}`);
-      assert(!prompt.includes("NEW CALLERS"), `${key}: the capture flow belongs to the graded assistants`);
+      assert(!prompt.includes("NEW CALLERS"), `${key}: the capture flow belongs to the claims assistants`);
       assertMatch(prompt, /would like help getting started with a new claim, call handoff_to_concierge/);
       assertMatch(prompt, /Never ask for, spell or read out an email address/);
     }
@@ -995,7 +995,7 @@ Deno.test("reporting a loss: the contact assistants carry both claim tools and t
     const prompt = withRep.assistants[key].prompt;
     if (!CONTACT_ASSISTANTS.includes(key)) {
       for (const t of CLAIM_TOOLS) assert(!tools.includes(t), `${key} carries ${t}`);
-      assert(!prompt.includes("REPORTING A LOSS"), `${key}: the intake belongs to the graded assistants`);
+      assert(!prompt.includes("REPORTING A LOSS"), `${key}: the intake belongs to the claims assistants`);
       assertMatch(prompt, /wants to report a loss or file a new claim on this call, or wants to spell an email/);
       continue;
     }
@@ -1186,7 +1186,7 @@ function endpointingWait(assistant: string, customer: string): number | null {
 }
 
 // LiveKit's wait in ms as a function of x, the probability that the caller is still speaking (VAPI's
-// openapi; on test calls x = 1 - EOU): 200 ms when they're surely done, 2 s at most when the
+// openapi; on the test calls x = 1 - EOU): 200 ms when they're surely done, 2 s at most when the
 // sentence sounds unfinished. VAPI's own live curve waited about 0.38 s at best and 2.86 s at worst
 // (01a13635 waited 2.875 s on "...I was not able to hear").
 const WAIT_FUNCTION = "200 + 300 * sqrt(x) + 1500 * x^3";
@@ -1515,13 +1515,13 @@ Deno.test("barge-in: the caller's voice stops Ava without waiting for a transcri
   for (const key of ASSISTANT_KEYS) {
     const p = withRep.assistants[key].payload;
     assertEquals(p.stopSpeakingPlan, {
-      // voice activity alone stops Ava (numWords 0): on a 10:54 test call speech-to-text took up
+      // voice activity alone stops Ava (numWords 0): on the 10:54 test call speech-to-text took up
       // to 7.7 s on some turns, and a word-count rule waits for that transcript while Ava keeps
       // talking; 0.4 s of voice ignores clicks and line noise but catches "wait" or "sorry"
       numWords: 0,
       voiceSeconds: 0.4,
-      // after an interruption Ava answers half a second later, not a full second (a test call
-      // heard about four seconds of silence after cutting in)
+      // after an interruption Ava answers half a second later, not a full second (test call
+      // 01a13449 heard about four seconds of silence after cutting in)
       backoffSeconds: 0.5,
       interruptionPhrases: [...VAPI_INTERRUPTION_PHRASES, ...EXTRA_INTERRUPTION_PHRASES],
       acknowledgementPhrases: VAPI_ACKNOWLEDGEMENT_PHRASES,

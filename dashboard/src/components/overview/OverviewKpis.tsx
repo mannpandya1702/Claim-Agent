@@ -71,7 +71,7 @@ export function attentionTiles(m: DashboardMetrics, rangeQuery: string): KpiDef[
   ];
 }
 
-/** Range-scoped performance tiles, in the order the plan lists them. */
+/** Range-scoped performance tiles, in display order. */
 export function performanceTiles(m: DashboardMetrics, rangeQuery: string): KpiDef[] {
   const authShare = ratio(m.auth_failed, m.completed);
   const notFoundShare = ratio(m.not_found, m.completed);

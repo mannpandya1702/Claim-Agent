@@ -1,7 +1,7 @@
 // Tier-1 /chat battery: the rendered solo-core prompt on a transient assistant whose server
 // tools are inline VAPI code tools. Each mock answers with the real speak.ts sentence for the code
 // the server would return, so the battery measures the model, not the backend: tool order,
-// arguments, result codes and what the caller would hear, persona by persona (plan section 13).
+// arguments, result codes and what the caller would hear, persona by persona.
 //
 //   deno task battery                      every persona, 3 runs each
 //   deno task battery --n 1 --persona f1   one run of one persona (comma list; a trailing * is a prefix)
@@ -1106,7 +1106,7 @@ export interface TurnRecord {
   calls: CallRecord[];
   model: string[]; // the model's own words, in order
   // /chat only: words the model added after a server tool's spoken sentence, with no tool call
-  // after them. On voice the tool's sentence ends the turn (probe P4), so
+  // after them. On voice the tool's sentence ends the turn (the native-message check in voice_call.ts), so
   // these are reported but never heard and never fail a run.
   continuation: string[];
   // the model reading a spoken-false tool sentence out loud (heard; checked word for word)
@@ -1320,7 +1320,7 @@ const NOTIFIED_CODES: ReadonlySet<string> = new Set([
 ]);
 
 // ---------------------------------------------------------------------------------------------
-// Personas (plan section 13, tier 1, solo-core).
+// Personas (tier 1: mocked /chat on solo-core).
 // ---------------------------------------------------------------------------------------------
 type ArgCheck = (a: Args) => string | null;
 
@@ -1905,7 +1905,7 @@ export const PERSONAS: Persona[] = [
   },
   {
     id: "garbled",
-    title: "Garbled speech after the summary (call 01a13449): never an escalation; nonsense gets a warm re-ask",
+    title: "Garbled speech after the summary (test call 01a13449): never an escalation; nonsense gets a warm re-ask",
     turns: [
       { ...lookupTobias, user: `Hi, I'm calling to check on my claims. My number is ${TOBIAS_SAYS_PHONE}.` },
       { ...verifyTobias, args: { verify_identity: all(dobIs(3, 14, 1986), intentIs("claim_status")) } },
@@ -2494,7 +2494,7 @@ export const PERSONAS: Persona[] = [
     modelNever: [NAME, CLAIM_WORDS],
     heardNever: [NAME, CLAIM_WORDS],
   },
-  // Call 01a13635: "your voice was breaking, I was not able to hear" got a scripted re-read,
+  // Test call 01a13635: "your voice was breaking, I was not able to hear" got a scripted re-read,
   // an email with no word about the line, and "Does that make sense?". Rule 25 checks the line and says
   // again only what was missed (rule 26); a single hello after a hold and a "what?" of surprise are not
   // line trouble.

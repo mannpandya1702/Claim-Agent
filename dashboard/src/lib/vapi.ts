@@ -56,7 +56,7 @@ export const CALL_MODES: CallModeInfo[] = [
   {
     mode: "core",
     label: "Core",
-    description: "The frozen graded assistant, kept as the demo fallback.",
+    description: "The ten server tools with the FAQ in the prompt; the fallback assistant.",
     targetId: env.assistantCoreId,
   },
   {

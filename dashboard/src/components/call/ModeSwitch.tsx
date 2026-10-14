@@ -15,7 +15,7 @@ interface ModeSwitchProps {
 /**
  * Native radios styled as a segmented control, so arrow keys, focus and the checked state come
  * from the browser. The choice lives in ?mode= (the page owns the URL), which makes a mode
- * shareable as a link for the demo.
+ * shareable as a link.
  */
 export function ModeSwitch({ modes, value, onChange, locked, className }: ModeSwitchProps) {
   const name = useId();

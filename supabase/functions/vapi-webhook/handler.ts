@@ -244,7 +244,7 @@ async function runWithBackstop(
  *  while the model's own speech stops when the caller talks (01a13425: stopped 1.26 s after the caller
  *  started, with a user-interrupted event). The model reads result.message word for word when the
  *  result says spoken: false (rules.md rule 2); that costs a model turn (about one to one and a half
- *  seconds after the filler). Ava should always stop when the caller talks, so only very
+ *  seconds after the filler). Ava must always stop when the caller talks, so only very
  *  short sentences stay native: 12 words is about four seconds at voice speed 1.0 ("No problem. What
  *  should I change?"); the date-of-birth question, read-backs, summaries, callbacks and everything
  *  longer are model-read and can be cut into. A number written in figures counts one word per digit

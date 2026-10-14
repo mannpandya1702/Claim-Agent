@@ -22,7 +22,7 @@ const TENS_ORDINALS = [
 ];
 const MONTHS = "January February March April May June July August September October November December".split(" ");
 
-// The contract floor is 999,999; millions are accepted so a large settlement amount is read out
+// Amounts up to 999,999 must be spoken; millions are accepted so a large settlement amount is read out
 // instead of turning the whole status answer into a system error.
 const MAX_WORDS = 999_999_999;
 
@@ -35,7 +35,7 @@ const MAX_DOCUMENT_LIST_CHARS = 320;
 const MAX_NAME_CHARS = 60;
 
 // ---------------------------------------------------------------------------------------------
-// Sentences (exact text; CONTRACTS.md "Sentences"). Written the way a warm, capable person at a
+// Sentences (exact text, pinned word for word in speak_test.ts). Written the way a warm, capable person at a
 // claims front desk talks: contractions, short sentences, an opener now and then ("Got it.",
 // "There you go,", "No worries,") but never the same one twice in a row, sympathy once where it
 // matters (a loss being reported, a lock, a denial, a failure on our side) and never on the turn
@@ -129,7 +129,7 @@ const WEEKDAY_NAMES = "Sunday Monday Tuesday Wednesday Thursday Friday Saturday"
 const MAX_READBACK_SUMMARY_CHARS = 80;
 
 // ---------------------------------------------------------------------------------------------
-// Phrasings. Every sentence has one phrasing: the chosen warm script ("Thanks! And just to keep
+// Phrasings. Every sentence has one phrasing, from a single warm script ("Thanks! And just to keep
 // your account safe...", "Thanks, Tobias. You're all verified.", "I've passed this to our claims
 // team..."), so every call hears the same words. The selection plumbing stays (variantIndex picks
 // 0..count-1 from the call key and the code, with no clock or randomness), so adding phrasings to a
@@ -160,7 +160,7 @@ function pick<T>(choices: readonly T[], callKey: string | undefined, code: strin
 
 // "the date of birth on the account": a caller may be asking about a spouse's or a client's account.
 // It opens with a thank-you for the number, and the verified opening thanks them again for the date
-// of birth: that warmth beat a plainer opener.
+// of birth: that warmth was kept over a plainer opener.
 const NEEDS_DOB = [
   "Thanks! And just to keep your account safe, what's the date of birth on the account?",
 ] as const;
@@ -1192,9 +1192,9 @@ function contactRetry(d: Record<string, unknown>): string {
   return `Sorry about that. What did I get wrong, ${which}?`;
 }
 
-/** Code -> sentence. data carries the few dynamic parts (see CONTRACTS); callKey picks the phrasing of
+/** Code -> sentence. data carries the few dynamic parts; callKey picks the phrasing of
  *  a sentence whose list has several (variantIndex). Every list has one today, so a call key changes
- *  nothing: with or without one, every sentence is the warm script. */
+ *  nothing: with or without one, every sentence is the same warm script. */
 export function sentenceFor(code: Code, data?: Record<string, unknown>, callKey?: string): string {
   const d = data ?? {};
   switch (code) {

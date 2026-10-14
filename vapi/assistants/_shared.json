@@ -1,5 +1,5 @@
 {
-  "comment": "Section-7 block shared by every assistant (accepted as-is by the hour-0 probe). Each variant file is deep-merged over 'assistant' (objects merge, arrays and scalars replace); scripts/render.ts fills the <<PLACEHOLDERS>>. The analysis schema is built from enums.ts, never written here.",
+  "comment": "Base assistant block shared by every variant (accepted as-is by `deno task probe p1`). Each variant file is deep-merged over 'assistant' (objects merge, arrays and scalars replace); scripts/render.ts fills the <<PLACEHOLDERS>>. The analysis schema is built from enums.ts, never written here.",
   "assistant": {
     "model": {
       "provider": "openai",

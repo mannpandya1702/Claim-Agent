@@ -371,7 +371,7 @@ export function redactPII(text: string | null | undefined): string | null {
   return redactPIIAsOf(String(text), new Date().getUTCFullYear());
 }
 
-// The contract floor (date of birth, birthday, phone number, number on the account, ten-digit)
+// The base cues (date of birth, birthday, phone number, number on the account, ten-digit)
 // plus the other server sentences whose answer is a DOB or a phone number: dob_unreadable asks
 // for "the month, day and year", not_found asks "Is that the right number?", and
 // rep_queued_no_number asks for "the best number". The model words its own follow-ups for a

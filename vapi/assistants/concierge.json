@@ -1,5 +1,5 @@
 {
-  "comment": "First squad member. Owns every graded tool and the name and email capture, so the graded flows and new callers never depend on a handoff; general long-tail questions go to Knowledge.",
+  "comment": "First squad member. Owns every identity, claim-status and claim-intake tool and the name and email capture, so the core claim flows and new callers never depend on a handoff; general long-tail questions go to Knowledge.",
   "sections": [
     "header",
     "role",

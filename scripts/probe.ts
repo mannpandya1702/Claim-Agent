@@ -1,4 +1,4 @@
-// Hour-0 probes. Each probe spends at most one API call's worth of credit and prints what the
+// Platform probes. Each probe spends at most one API call's worth of credit and prints what the
 // live API actually accepts, so config and code are written against observed behaviour.
 //
 //   deno task probe p1   POST/GET/PATCH a throwaway assistant with the full production block;

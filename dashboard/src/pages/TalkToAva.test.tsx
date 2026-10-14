@@ -216,7 +216,7 @@ describe("Talk to Ava", () => {
     await waitFor(() => expect(getCallState().status).toBe("ended"));
     expect(sdk.stopCalls).toBeGreaterThan(0);
     expect(within(panel).getByRole("button", { name: "Start a new call" })).toBeEnabled();
-    // The link to the finished call stays so the presenter can open its report.
+    // The link to the finished call stays so its report can be opened.
     expect(within(pane).getByRole("link", { name: /open call detail/i })).toBeInTheDocument();
   });
 

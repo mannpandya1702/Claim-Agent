@@ -20,7 +20,7 @@ export const SQUAD_MEMBERS: readonly AssistantKey[] = ["concierge", "knowledge"]
 // Every squad member carries these, so a request for a person or an emergency never waits on a hop.
 export const FLOOR_TOOLS = ["escalate", "report_emergency", "send_info_email", "endCall"] as const;
 export const ACCOUNT_TOOLS = ["lookup_customer", "verify_identity", "get_claim_status"] as const;
-// Name and email capture (new callers, and an email a verified caller wants added). Every graded
+// Name and email capture (new callers, and an email a verified caller wants added). Every claims
 // assistant carries both; Knowledge never takes contact details, so it hands such a caller back.
 export const CONTACT_TOOLS = ["capture_contact", "confirm_contact"] as const;
 export const CONTACT_ASSISTANTS: readonly AssistantKey[] = ["solo-core", "solo-web", "solo-phone", "concierge"];

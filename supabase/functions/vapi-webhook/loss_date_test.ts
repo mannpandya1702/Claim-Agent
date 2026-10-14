@@ -1,4 +1,4 @@
-// parseLossDate: every phrase shape the contract lists, read against a fixed "today" in New York,
+// parseLossDate: every phrase shape it accepts, read against a fixed "today" in New York,
 // plus the edges that move a date by a day in careless code (the DST change on 2026-11-01, a UTC date
 // that is already tomorrow, the year boundary) and everything that must stay unreadable.
 import { assertEquals } from "@std/assert";

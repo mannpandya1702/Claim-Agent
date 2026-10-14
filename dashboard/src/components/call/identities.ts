@@ -1,6 +1,6 @@
 /*
- * The seeded demo customers (supabase seed), so a presenter can run every scenario without a
- * second screen. These are fictional records; the 0199 number has no customer on purpose.
+ * The seeded demo customers (supabase seed), so every scenario can be run from the call page
+ * without looking up the seed. These are fictional records; the 0199 number has no customer on purpose.
  * A web call carries no caller ID, so the caller says the phone number out loud.
  */
 

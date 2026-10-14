@@ -9,7 +9,7 @@
 //   deno task reset            show what would be deleted
 //   deno task reset --yes      delete it
 //
-// The demo project is the sandbox (the plan has one project), so the per-call tables are emptied
+// The demo project is the sandbox (there is one Supabase project), so the per-call tables are emptied
 // whole rather than filtered by number: every row in them belongs to a demo, smoke, battery or DB
 // test call. customers are never deleted, and the seeded claims are kept: only a claim a call filed
 // (reported_call_key not null) is removed.
