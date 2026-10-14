@@ -94,7 +94,7 @@ Bare file names are in `supabase/functions/vapi-webhook/`; `partials/` is `vapi/
 | Greeting and authentication | Ava speaks first and asks what the caller needs. The phone number is asked only for account questions; `lookup_customer` and `verify_identity` run a SQL state machine. Two wrong dates of birth lock the call | `partials/identity.md`, `supabase/migrations/0001_init.sql` |
 | Claim status and documents | `get_claim_status` takes no customer argument; the customer comes from the verified session. A summary of at most 60 words, then on request the documents due, the due date and how to send them, or one claim's details | `speak.ts`, `vapi/tools/get_claim_status.json` |
 | FAQ | FAQ facts rendered from `data/faq.json` into every prompt; long-tail questions through the knowledge base | `data/faq.json`, `scripts/render.ts` |
-| Escalation | `escalate` at once, never asks why. The escalation row is written first, then Telegram and the team email; the spoken sentence depends on what was actually delivered | `tools.ts`, `partials/representative-web.md` |
+| Escalation | `escalate` at once, never asks why. The escalation row is written first, then Telegram and the team email; the spoken sentence depends on what was actually delivered, and asks a caller the team has no name for, once, who to ask for | `tools.ts`, `partials/representative-web.md` |
 | Safety | Emergencies: the 911/988 line is a blocking tool message spoken before anything else, then a row, Telegram and email alerts, and an urgent CRM task after the call. Unsupported questions get a fixed line and one callback offer. Ava never claims to be human | `vapi/tools/report_emergency.json`, `partials/rules.md` (rules 9, 10, 22) |
 | Post-call record | `caller_name`, `summary`, `sentiment`, `started_at`, `ended_at`, outcome, call reason, caller type, claim number, flags, cost and a redacted transcript; mirrored to a 21-field Airtable table and a GoHighLevel contact | `post_call.ts`, `airtable.ts`, `ghl.ts` |
 | Tone | Contractions, one question per turn, turns of 60 words or fewer, one warm phrasing per server sentence, an upset-caller branch, a line check when the caller cannot hear | `partials/style.md`, `partials/branches.md`, rules 23 to 26 |
@@ -281,12 +281,12 @@ it to GitHub Pages on every push to `main` that touches `dashboard/`.
 
 | Suite | Command | Size | What it covers |
 |---|---|---|---|
-| Unit and conformance | `deno task test` | 898 tests in 33 files, 48 of them conformance | Every tool code and sentence, identity rules, claim gate, loss-date parsing, call-reason precedence, redaction, outbox, GoHighLevel against an in-memory twin; rendered prompts, tools and voice settings pinned |
+| Unit and conformance | `deno task test` | 925 tests in 33 files, 49 of them conformance | Every tool code and sentence, identity rules, claim gate, loss-date parsing, call-reason precedence, redaction, outbox, GoHighLevel against an in-memory twin; rendered prompts, tools and voice settings pinned |
 | Recording link | `deno test --allow-env supabase/functions/recording-url/` | 13 tests | Staff-only link logic |
-| Dashboard | `npm test` | 347 tests in 35 files | Pages, data mapping, empty and error states |
-| Persona battery | `deno task battery` | 45 personas x 3 runs = 135 conversations | The rendered Core prompt on VAPI `/chat` with mocked tools that return the real server sentences: tool order, arguments, no disclosure before verification, emergency scoping, injection, line trouble. `--dry-run` builds every request offline |
+| Dashboard | `npm test` | 349 tests in 35 files | Pages, data mapping, empty and error states |
+| Persona battery | `deno task battery` | 47 personas x 3 runs = 141 conversations | The rendered Core prompt on VAPI `/chat` with mocked tools that return the real server sentences: tool order, arguments, no disclosure before verification, emergency scoping, injection, line trouble. `--dry-run` builds every request offline |
 | Smoke | `deno task smoke` | 25 cases | The deployed webhook with real auth: identity ladder, smuggled arguments, contact capture, status details, claim filing, post-call writers; deletes the call rows it wrote |
-| Database | `deno task db:test` | 31 cases | Rolled-back SQL assertions plus concurrent deliveries, lockout, claim filing races, outbox lease, grants and RLS |
+| Database | `deno task db:test` | 32 cases | Rolled-back SQL assertions plus concurrent deliveries, lockout, claim filing races, outbox lease, grants and RLS |
 | Voice | `deno task voice <scenario>` | 11 scenarios | Real VAPI calls with a synthetic caller (Google TTS) over WebSocket, both sides recorded; includes two barge-in measurements |
 
 CI (`.github/workflows/ci.yml`) runs `check`, `test`, `lint`, the recording-link tests and the

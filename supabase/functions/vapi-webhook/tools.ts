@@ -39,8 +39,10 @@ import {
   type VerifyIntent,
 } from "./enums.ts";
 import {
+  callerFirstName,
   givenCallbackNumber,
   lastFour,
+  normaliseCallerName,
   normaliseEmail,
   normaliseName,
   normalisePhone,
@@ -745,14 +747,69 @@ function queuedData(source: CallbackSource | null, phone: string): Record<string
   }
 }
 
-function queued(ctx: Run, callback: Callback): ToolResult {
+function queued(ctx: Run, callback: Callback, askName = false): ToolResult {
   return callback.phone
-    ? answer(ctx, "rep_queued", queuedData(callback.source, callback.phone))
+    ? withNameQuestion(ctx, "rep_queued", queuedData(callback.source, callback.phone), askName)
     : answer(ctx, "rep_queued_no_number");
 }
 
+/** The answer, closing on "Who should they ask for?" instead of its usual question when ask is true. The
+ *  flag only picks the wording, so the result keeps its usual shape. */
+function withNameQuestion(
+  ctx: Pick<ToolCtx, "callKey">,
+  code: "rep_queued" | "callback_updated",
+  data: Record<string, unknown> | undefined,
+  ask: boolean,
+): ToolResult {
+  if (!ask) return answer(ctx, code, data);
+  const sentence = sentenceFor(code, { ...data, ask_name: true }, ctx.callKey);
+  return data ? { code, sentence, data } : { code, sentence };
+}
+
+/** A caller_name argument was passed at all, a usable name or not: the name question has its answer (or
+ *  the caller volunteered one), so the answer to this request never asks it. */
+function nameGiven(v: unknown): boolean {
+  return v !== undefined && v !== null && !(typeof v === "string" && !v.trim());
+}
+
+// The answers that can close on the name question. An earlier one on the call means it was asked then,
+// or the name was already known (and still is): either way it is not asked again.
+const NAME_QUESTION_CODES: ReadonlySet<string> = new Set(["rep_queued", "callback_updated"]);
+
+/** Whether this escalate answer asks who the team should ask for. Only when no caller_name came with the
+ *  request and the name is unknown: no verified customer on the call, no captured contact confirmed with
+ *  a first name, and none on the escalation row; and no escalate before this one on the call answered
+ *  rep_queued or callback_updated, so it is asked once a call at most. undefined stands for a read that
+ *  failed, and then it is never asked: asking a verified caller for their name, or asking twice, is worse
+ *  than not asking. */
+function asksName(p: {
+  args: Args;
+  session: Session | null | undefined;
+  contact: CallerContact | null | undefined;
+  attempts: AttemptRow[] | undefined;
+  rowName: string | null | undefined;
+  toolCallId: string;
+}): boolean {
+  if (nameGiven(p.args.caller_name) || p.rowName !== null) return false;
+  if (p.session === undefined || p.session?.level === "verified") return false;
+  if (p.contact === undefined || (p.contact?.confirmed === true && (p.contact.first_name ?? "").trim() !== "")) {
+    return false;
+  }
+  if (p.attempts === undefined) return false;
+  // This delivery's own ledger row bounds "before", so a replay decides as its first delivery did.
+  const own = p.attempts.findIndex((a) => a.tool_call_id === p.toolCallId);
+  const before = own >= 0 ? p.attempts.slice(0, own) : p.attempts;
+  return !before.some((a) => a.tool_name === "escalate" && a.code !== null && NAME_QUESTION_CODES.has(a.code));
+}
+
+/** callback_name_saved, thanking the caller by the first name they gave ("Thanks." when there is none). */
+function nameSaved(ctx: Pick<ToolCtx, "callKey">, name: string | null): ToolResult {
+  const first = callerFirstName(name);
+  return first ? answer(ctx, "callback_name_saved", { first_name: first }) : answer(ctx, "callback_name_saved");
+}
+
 // ---------------------------------------------------------------------------------------------
-// escalate {reason?, details?, callback_phone?}
+// escalate {reason?, details?, callback_phone?, caller_name?}
 // ---------------------------------------------------------------------------------------------
 function escalationReason(args: Args, level: Level, attempts: AttemptRow[]): EscalationReason {
   const raw = typeof args.reason === "string" ? args.reason.trim() : "";
@@ -774,23 +831,29 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
   // Read against the caller id: on a call from abroad, the caller's own number said in its national
   // form is that caller id, and no number given without a country code is made North American.
   const given = givenCallbackNumber(args.callback_phone, ownNumbers(env), ctx.callerNumber);
+  // The name the caller gave for the callback (their answer to "Who should they ask for?", or one they
+  // volunteered), as stored; null when none came or it is not a name.
+  const callerName = normaliseCallerName(args.caller_name);
 
-  // Enrichment reads are best effort: a failed read costs a label, and the row matters more.
-  const [session, attempts, escalations, contact] = await Promise.all([
-    readOr<Session | null>(ctx, "getSession", () => store.getSession(callKey), null),
-    readOr<AttemptRow[]>(ctx, "listAttempts", () => store.listAttempts(callKey), []),
+  // Enrichment reads are best effort: a failed read costs a label, and the row matters more. A failed
+  // read is undefined (null is a row that is not there), so the name question is never asked on a guess.
+  const [read, attempts, escalations, captured] = await Promise.all([
+    readOr<Session | null | undefined>(ctx, "getSession", () => store.getSession(callKey), undefined),
+    readOr<AttemptRow[] | undefined>(ctx, "listAttempts", () => store.listAttempts(callKey), undefined),
     readOr<EscalationRow[] | null>(ctx, "listEscalations", () => store.listEscalations(callKey), null),
-    capturedContact(ctx),
+    readOr<CallerContact | null | undefined>(ctx, "getContact", () => store.getContact(callKey), undefined),
   ]);
+  const session = read ?? null;
+  const contact = captured ?? null;
   const level: Level = session?.level ?? "none";
   const verified = level === "verified";
-  const reason = escalationReason(args, level, attempts);
+  const reason = escalationReason(args, level, attempts ?? []);
   const existing = escalations?.find((e) => e.kind === "representative") ?? null;
 
   // upsert_escalation merges every non-null value into a row that already exists, so the first
-  // write carries only what a repeat may merge: a number the caller just gave, and details where
-  // the row is known to have none. A failed read therefore can never let a fallback number or new
-  // details overwrite what the caller said on an earlier request.
+  // write carries only what a repeat may merge: a number the caller just gave, a name they just gave,
+  // and details where the row is known to have none. A failed read therefore can never let a fallback
+  // number or new details overwrite what the caller said on an earlier request.
   let row: Awaited<ReturnType<Store["upsertEscalation"]>>;
   try {
     row = await store.upsertEscalation({
@@ -802,24 +865,39 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
       callbackSource: given ? "argument" : "none",
       channel: ctx.channel,
       verified,
+      callerName,
     });
   } catch (e) {
     logError(ctx, "upsertEscalation", e);
     return answer(ctx, "rep_unavailable");
   }
+  const askName = asksName({
+    args,
+    session: read,
+    contact: captured,
+    attempts,
+    rowName: row.callerName,
+    toolCallId: ctx.toolCallId,
+  });
 
   if (!row.inserted) {
-    // A repeat never alerts again; the dashboard row now carries the new number.
+    // A repeat never alerts again; the dashboard row now carries the new number and the name.
     if (given && given !== existing?.callback_phone) {
-      return answer(ctx, "callback_updated", { digits: readBackNumber(given) });
+      return withNameQuestion(ctx, "callback_updated", { digits: readBackNumber(given) }, askName);
     }
     // A chat answered its first request as if the team had been told, so its repeat says the same.
     const told = row.alertStatus === "sent" || (ctx.isChat && row.alertStatus === "skipped");
-    if (!told) return answer(ctx, "rep_recorded");
     // "Someone will call you back" only with a number to call: the row's, or one this call can give it.
-    if (!row.callbackPhone && !(await fillCallback(ctx, session, contact, { reason, verified }))) {
-      return answer(ctx, "rep_queued_no_number");
+    const reachable = async () =>
+      row.callbackPhone !== null || await fillCallback(ctx, session, contact, { reason, verified });
+    if (callerName) {
+      // The name is on the request, which promises nothing new. A name never stands in for a number:
+      // a request the team was told of with no number to call still asks for one.
+      if (told && !(await reachable())) return answer(ctx, "rep_queued_no_number");
+      return nameSaved(ctx, callerName);
     }
+    if (!told) return answer(ctx, "rep_recorded");
+    if (!(await reachable())) return answer(ctx, "rep_queued_no_number");
     return answer(ctx, "rep_already_queued");
   }
 
@@ -847,7 +925,7 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
 
   if (ctx.isChat) {
     writeBack(ctx, "setEscalationDelivery", () => store.setEscalationDelivery(row.id, "skipped", null));
-    return queued(ctx, callback);
+    return queued(ctx, callback, askName);
   }
   const alert: EscalationAlert = { kind: "representative", reason, callKey, channel: ctx.channel, verified };
   const delivery = await notifyTeam(ctx, alert, "callback_request", () =>
@@ -860,6 +938,7 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
       channel: ctx.channel,
       dashboardUrl: env.DASHBOARD_URL,
       caller: teamCallerOf(customer, contact),
+      askFor: callerName,
     }));
   writeBack(
     ctx,
@@ -867,31 +946,46 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
     () => store.setEscalationDelivery(row.id, delivery.notified ? "sent" : "failed", delivery.error),
   );
   // "Sent" and a timeframe are promised only when a channel confirmed delivery.
-  return delivery.notified ? queued(ctx, callback) : answer(ctx, "rep_recorded");
+  return delivery.notified ? queued(ctx, callback, askName) : answer(ctx, "rep_recorded");
 }
 
 async function replayEscalate(code: Code, args: Args, ctx: Run): Promise<ToolResult> {
+  // A retry carries the first delivery's arguments, so the name it saved is rebuilt from them.
+  if (code === "callback_name_saved") return nameSaved(ctx, normaliseCallerName(args.caller_name));
   if (code !== "rep_queued" && code !== "callback_updated") return answer(ctx, code);
-  // A retry carries the first delivery's arguments, so a number the caller gave is rebuilt from
-  // them (against the same caller id). The row is not: a later request may have changed its number since.
+  const { store } = ctx.deps;
+  // A number the caller gave is rebuilt from the retry's arguments too (against the same caller id). The
+  // row is not: a later request may have changed its number since. Reading is not a side effect.
   const given = givenCallbackNumber(args.callback_phone, ownNumbers(ctx.deps.env), ctx.callerNumber);
-  if (code === "callback_updated") return answer(ctx, code, given ? { digits: readBackNumber(given) } : undefined);
-  if (given) return answer(ctx, code, queuedData("argument", given));
+  const [session, contact, attempts, rows] = await Promise.all([
+    readOr<Session | null | undefined>(ctx, "getSession", () => store.getSession(ctx.callKey), undefined),
+    readOr<CallerContact | null | undefined>(ctx, "getContact", () => store.getContact(ctx.callKey), undefined),
+    readOr<AttemptRow[] | undefined>(ctx, "listAttempts", () => store.listAttempts(ctx.callKey), undefined),
+    readOr<EscalationRow[] | undefined>(ctx, "listEscalations", () => store.listEscalations(ctx.callKey), undefined),
+  ]);
+  const row = rows?.find((r) => r.kind === "representative");
+  // The name question again only while the name is still unknown, decided as the first delivery decided
+  // it: a caller who has given their name (or verified) since is never asked again.
+  const askName = asksName({
+    args,
+    session,
+    contact,
+    attempts,
+    rowName: rows === undefined ? undefined : row?.caller_name ?? null,
+    toolCallId: ctx.toolCallId,
+  });
+  if (code === "callback_updated") {
+    return withNameQuestion(ctx, code, given ? { digits: readBackNumber(given) } : undefined, askName);
+  }
+  if (given) return withNameQuestion(ctx, code, queuedData("argument", given), askName);
   // Without an argument the first answer named the fallback this delivery wrote when it created the
   // row. Only a number given later can have replaced it, and then that target is no longer known,
-  // so the sentence names none rather than a different one. Reading the row is not a side effect.
-  const rows = await readOr<EscalationRow[]>(
-    ctx,
-    "listEscalations",
-    () => ctx.deps.store.listEscalations(ctx.callKey),
-    [],
-  );
-  const row = rows.find((r) => r.kind === "representative");
+  // so the sentence names none rather than a different one.
   const source = row?.callback_source ?? null;
   if (row?.callback_phone && (source === "account" || source === "caller_id")) {
-    return answer(ctx, code, queuedData(source, row.callback_phone));
+    return withNameQuestion(ctx, code, queuedData(source, row.callback_phone), askName);
   }
-  return answer(ctx, code);
+  return withNameQuestion(ctx, code, undefined, askName);
 }
 
 // ---------------------------------------------------------------------------------------------

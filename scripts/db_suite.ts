@@ -64,7 +64,7 @@ const AUTHENTICATED_ALLOWLIST = [
 const SERVER_FUNCTIONS = [
   "lookup_customer_attempt(text,text,text,text,text)",
   "verify_dob_attempt(text,integer,integer,integer,text)",
-  "upsert_escalation(text,text,text,text,text,text,text,boolean)",
+  "upsert_escalation(text,text,text,text,text,text,text,boolean,text)",
   "upsert_interaction(jsonb)",
   "enqueue_outbox(text,text,text,integer)",
   "claim_outbox(integer)",
@@ -676,6 +676,72 @@ await test("0011: a callback number from abroad, or noted as said, is stored as 
   select caller_phone_masked into e from call_interactions where vapi_call_id = ${k};
   assert e.caller_phone_masked = '+1 602 ... 0177', format('North American: %s', row_to_json(e));`,
     "r record; e record;",
+  )));
+});
+
+// 0012: who the claims team should ask for on a callback. The whole case is one rolled-back transaction,
+// so nothing it writes outlives it.
+await test("0012: upsert_escalation stores the caller's name, takes a newer one, keeps it otherwise; one signature", async () => {
+  const f = fixture("askfor");
+  const k = lit(f.callKey);
+  const fn = "public.upsert_escalation(text,text,text,text,text,text,text,boolean,text)";
+  const upsert = (name: string | null, phone: string | null = null) =>
+    `upsert_escalation(${k}, 'representative', 'representative_requested', null, ${lit(phone)}, ${
+      lit(phone ? "argument" : "none")
+    }, 'inboundPhoneCall', false, ${lit(name)})`;
+  await sql(tx(doBlock(
+    `
+  -- exactly one upsert_escalation: the old eight-parameter signature is gone, so PostgREST resolves the
+  -- call by name, and a call with only the eight names the webhook deployed before 0012 passes still works
+  assert (select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'public' and p.proname = 'upsert_escalation') = 1, 'more than one upsert_escalation';
+  assert to_regprocedure(${lit(fn)}) is not null, 'the nine-parameter signature is missing';
+  assert to_regprocedure('public.upsert_escalation(text,text,text,text,text,text,text,boolean)') is null,
+    'the eight-parameter signature is still there';
+  select * into r from upsert_escalation(p_call_key => ${k}, p_kind => 'representative',
+    p_reason => 'representative_requested', p_details => null, p_callback_phone => null, p_callback_source => 'none',
+    p_channel => 'inboundPhoneCall', p_verified => false);
+  assert r.inserted and r.caller_name is null and r.callback_source = 'none',
+    format('first upsert by the old names: %s', row_to_json(r));
+  v_id := r.id;
+
+  -- a name on a repeat is stored and returned; a repeat without one keeps it; a newer one replaces it
+  select * into r from ${upsert("Priya")};
+  assert not r.inserted and r.id = v_id and r.caller_name = 'Priya', format('name: %s', row_to_json(r));
+  select * into r from ${upsert(null, "+16025550177")};
+  assert r.caller_name = 'Priya' and r.callback_phone = '+16025550177' and r.callback_source = 'argument',
+    format('a number, the name kept: %s', row_to_json(r));
+  select * into r from ${upsert("Priya Raman")};
+  assert r.caller_name = 'Priya Raman' and r.callback_phone = '+16025550177',
+    format('a newer name, the number kept: %s', row_to_json(r));
+  assert (select caller_name from escalations where id = v_id) = 'Priya Raman', 'the stored name';
+  -- delivery state is never touched by a repeat, the name included
+  update escalations set alert_status = 'sent' where id = v_id;
+  select * into r from ${upsert("Priya")};
+  assert r.alert_status = 'sent' and r.caller_name = 'Priya', format('delivery state: %s', row_to_json(r));
+
+  -- a name given with the first request goes on the new row
+  select * into r from upsert_escalation(${lit(`${f.callKey}-b`)}, 'representative', 'not_found', null, null,
+    'none', 'webCall', false, ${lit("Renee O'Brien")});
+  assert r.inserted and r.caller_name = 'Renee O''Brien', format('first request: %s', row_to_json(r));
+
+  -- the CHECK: 1 to 80 characters when set
+  begin perform ${upsert("")};
+    assert false, 'an empty name was stored'; exception when check_violation then null; end;
+  begin perform ${upsert("x".repeat(81))};
+    assert false, 'an 81-character name was stored'; exception when check_violation then null; end;
+  select * into r from ${upsert("x".repeat(80))};
+  assert char_length(r.caller_name) = 80, format('80 characters: %s', char_length(r.caller_name));
+
+  -- the grants 0001 gave the old signature: the service role runs it, nobody else; staff read the column
+  assert has_function_privilege('service_role', ${lit(fn)}, 'execute'), 'service_role cannot run it';
+  assert not has_function_privilege('authenticated', ${lit(fn)}, 'execute')
+     and not has_function_privilege('anon', ${lit(fn)}, 'execute'), 'authenticated or anon can run it';
+  assert (select p.prosecdef from pg_proc p where p.oid = to_regprocedure(${lit(fn)})) = false,
+    'upsert_escalation must stay security invoker';
+  assert has_column_privilege('authenticated', 'public.escalations', 'caller_name', 'select'),
+    'staff cannot read caller_name';`,
+    "r record; v_id uuid;",
   )));
 });
 
@@ -1472,13 +1538,28 @@ await test("store.ts round trip through PostgREST maps every method onto the sch
     const e1 = await store.upsertEscalation(esc);
     assertEquals([e1.inserted, e1.callbackPhone, e1.alertStatus], [true, null, "pending"]);
     const e2 = await store.upsertEscalation({ ...esc, callbackPhone: "+16025550111", callbackSource: "argument" });
-    assertEquals(e2, { id: e1.id, inserted: false, callbackPhone: "+16025550111", alertStatus: "pending" });
+    assertEquals(e2, {
+      id: e1.id,
+      inserted: false,
+      callbackPhone: "+16025550111",
+      alertStatus: "pending",
+      callerName: null,
+    });
+    // 0012: the name to ask for goes through PostgREST by name and comes back on the row
+    const e3 = await store.upsertEscalation({ ...esc, callerName: "Dbtest" });
+    assertEquals([e3.id, e3.inserted, e3.callbackPhone, e3.callerName], [e1.id, false, "+16025550111", "Dbtest"]);
     await store.setEscalationDelivery(e1.id, "failed", "telegram timeout");
     const escRows = await store.listEscalations(k);
     assertEquals(escRows.length, 1);
     assertEquals(
-      [escRows[0].alert_status, escRows[0].delivery_error, escRows[0].callback_source, escRows[0].verified],
-      ["failed", "telegram timeout", "argument", true],
+      [
+        escRows[0].alert_status,
+        escRows[0].delivery_error,
+        escRows[0].callback_source,
+        escRows[0].verified,
+        escRows[0].caller_name,
+      ],
+      ["failed", "telegram timeout", "argument", true, "Dbtest"],
     );
 
     assertEquals(await store.claimEmail(k, "claim_summary", "d***@example.com"), { claimed: true });

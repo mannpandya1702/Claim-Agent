@@ -362,10 +362,11 @@ what the server cannot know.
 
 ### 4.6 Caller name, sentiment and call reason
 
-**Caller name:** the verified customer's name; else the name the caller confirmed; else the analysis'
-`caller_name` (rejected if a placeholder, bracketed, altered by redaction, or over 80 characters);
-else `Unknown caller`. The middle two are skipped when the call matched an account but never
-verified, since that name is most likely the account holder's.
+**Caller name:** the verified customer's name; else the name the caller confirmed; else the name they
+gave for a callback (`escalations.caller_name`, asked once with "Who should they ask for?"); else the
+analysis' `caller_name` (rejected if a placeholder, bracketed, altered by redaction, or over 80
+characters); else `Unknown caller`. The middle three are skipped when the call matched an account but
+never verified, since that name is most likely the account holder's.
 
 **Sentiment:** VAPI's structured data (`vapi`), else the `claims_call` structured output
 (`structured_output`), else either found by the backfill (`backfill`). Nothing found leaves it NULL.
@@ -596,7 +597,8 @@ our claims team..." only if at least one confirmed; otherwise "Okay, I've record
 Per-call sends go through the `emails` ledger, unique on `(call_key, kind)`: render first (a template
 fault cannot strand a row), claim the row as `sending`, send with `Idempotency-Key: <call_key>:<kind>`
 (never started without budget left), and report "sent" only when Resend returns a message id.
-Customer emails use database facts only; team emails carry who to call back. Addresses are stored
+Customer emails use database facts only; team emails carry who to call back, and the callback request and
+the SLA re-alert add "Ask for" when the caller gave a name for the callback. Addresses are stored
 masked (`o***@example.com`).
 
 The sender is `onboarding@resend.dev` without a verified domain, so Resend delivers only to the

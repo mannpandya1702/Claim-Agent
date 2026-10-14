@@ -64,6 +64,11 @@ const NOT_VERIFIED_NONE = "Happy to help with that once I've verified you. What'
 const NO_CLAIMS = "I'm not seeing any claims on file for your account. Would you like me to explain how to start one?";
 const REP_QUEUED_NO_NUMBER =
   "Done, I've sent your request to our claims team. What's the best number for a representative to reach you?";
+// Asked once a call, of a caller whose name the team does not have (no verified account, no confirmed
+// details, none on the request yet): it takes the place of the closing question of rep_queued and
+// callback_updated, so the turn still asks exactly one question. "they" is whoever calls back.
+const ASK_NAME = "Who should they ask for?";
+const NAME_SAVED = "I've added your name to the request.";
 const REP_RECORDED = `Okay, I've recorded your request. ${ANYTHING_ELSE}`;
 const REP_ALREADY_QUEUED =
   `Your request is already with our claims team, so someone will call you back within one business day. ${ANYTHING_ELSE}`;
@@ -201,6 +206,8 @@ const INTAKE_SAVED = [
     }.`,
 ] as const;
 const INTAKE_THANKS = [(name: string) => (name ? `Thanks, ${name}.` : "Thanks.")] as const;
+// callback_name_saved: the caller answered "Who should they ask for?", and the name is on the request.
+const NAME_SAVED_THANKS = [(name: string) => (name ? `Thanks, ${name}.` : "Thanks.")] as const;
 // contact_saved_new: the read-back just thanked them, so this doesn't thank them again.
 const CONTACT_SAVED_OPENERS = ["Perfect, I've saved your details."] as const;
 const CHOICE_QUESTIONS = ["Which would you like?"] as const;
@@ -1059,9 +1066,10 @@ function fromClaims(d: Record<string, unknown>, compose: (claims: Claim[], refDa
   }
 }
 
-/** rep_queued from {target, digits?, number?}. A number the caller gave is named by its last four (digits)
- *  when it is North American, and read in full (number) when it is from abroad or noted as said, so a
- *  wrong country code or a missing digit can still be heard. */
+/** rep_queued from {target, digits?, number?, ask_name?}. A number the caller gave is named by its last four
+ *  (digits) when it is North American, and read in full (number) when it is from abroad or noted as said,
+ *  so a wrong country code or a missing digit can still be heard. ask_name true ends on "Who should they
+ *  ask for?" instead of the usual closing question. */
 function repQueued(d: Record<string, unknown>, callKey?: string): string {
   const full = callbackNumberOf(d.number);
   const northAmerican = full !== null && /^\+1\d{10}$/.test(full);
@@ -1076,7 +1084,8 @@ function repQueued(d: Record<string, unknown>, callKey?: string): string {
       : " at the number you gave me";
   } else if (d.target === "caller_id") at = " at the number you're calling from";
   const i = variantIndex(callKey, "rep_queued");
-  return `${REP_QUEUED_LEADS[i]} Someone will call you back${at} within one business day. ${ANYTHING_ELSES[i]}`;
+  const closing = d.ask_name === true ? ASK_NAME : ANYTHING_ELSES[i];
+  return `${REP_QUEUED_LEADS[i]} Someone will call you back${at} within one business day. ${closing}`;
 }
 
 /** "Thanks, Tobias. You're all verified." The opening every verified sentence shares (the plain one here,
@@ -1277,7 +1286,13 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>, callKey?
       return REP_QUEUED_NO_NUMBER;
     case "callback_updated": {
       const callback = callbackNumberOf(d.digits);
-      return callback ? `Got it, ${speakPhone(callback)}. ${ANYTHING_ELSE}` : `Got it. ${ANYTHING_ELSE}`;
+      const closing = d.ask_name === true ? ASK_NAME : ANYTHING_ELSE;
+      return callback ? `Got it, ${speakPhone(callback)}. ${closing}` : `Got it. ${closing}`;
+    }
+    case "callback_name_saved": {
+      // Thanked by the first name they gave (the tool picks it); a name that cannot be spoken is left out.
+      const i = variantIndex(callKey, code);
+      return `${NAME_SAVED_THANKS[i](speakableName(d.first_name))} ${NAME_SAVED} ${ANYTHING_ELSE}`;
     }
     case "rep_recorded":
       return REP_RECORDED;

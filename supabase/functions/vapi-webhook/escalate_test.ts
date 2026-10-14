@@ -22,6 +22,10 @@ const REP_ALREADY_QUEUED =
 // "passed": Telegram or the team email confirmed delivery (rep_recorded otherwise).
 const queuedAt = (at: string) =>
   `I've passed this to our claims team. Someone will call you back at ${at} within one business day. ${ANYTHING_ELSE}`;
+// A caller whose name the team does not have is asked for it once, in place of the closing question.
+const ASK_NAME = "Who should they ask for?";
+const askedAt = (at: string) =>
+  `I've passed this to our claims team. Someone will call you back at ${at} within one business day. ${ASK_NAME}`;
 
 type Responder = (url: string, init: RequestInit) => Response | Promise<Response>;
 
@@ -143,9 +147,10 @@ Deno.test("first web call writes a row with no callback number; the second call 
   ]);
 
   const second = await h.run("escalate", { reason: "representative_requested", callback_phone: "602-555-0177" });
+  // the number is read back, and the unverified caller is asked who to ask for (the first question that asks it)
   assertEquals(second, {
     code: "callback_updated",
-    sentence: `Got it, six zero two, five five five, zero one seven seven. ${ANYTHING_ELSE}`,
+    sentence: `Got it, six zero two, five five five, zero one seven seven. ${ASK_NAME}`,
     data: { digits: "6025550177" },
   });
   assertEquals(h.rows().length, 1);
@@ -188,7 +193,7 @@ Deno.test("Telegram down but the email sent: rep_queued, alert_status sent, the 
   const r = await h.run("escalate", { reason: "representative_requested" });
   assertEquals(r, {
     code: "rep_queued",
-    sentence: queuedAt("the number you're calling from"),
+    sentence: askedAt("the number you're calling from"),
     data: { target: "caller_id" },
   });
   const row = h.rows()[0];
@@ -201,7 +206,7 @@ Deno.test("Telegram sent but the email down: rep_queued, and the email error is 
   const r = await h.run("escalate", { callback_phone: "(602) 555-0177" });
   assertEquals(r, {
     code: "rep_queued",
-    sentence: queuedAt("the number you gave me, ending in zero one seven seven,"),
+    sentence: askedAt("the number you gave me, ending in zero one seven seven,"),
     data: { target: "given", digits: "0177" },
   });
   assertEquals(h.rows()[0].alert_status, "sent");
@@ -331,12 +336,13 @@ Deno.test("callback number from abroad: the argument with its country code is ke
   // read in full, country code first, so a wrong country code or a missing digit can still be heard
   assertEquals(first, {
     code: "rep_queued",
-    sentence: queuedAt("the number you gave me, plus four four, two zero seven, nine four six, zero nine five eight,"),
+    sentence: askedAt("the number you gave me, plus four four, two zero seven, nine four six, zero nine five eight,"),
     data: { target: "given", number: "+442079460958" },
   });
   assertEquals([h.rows()[0].callback_phone, h.rows()[0].callback_source], ["+442079460958", "argument"]);
   // the team email carries every digit, readably
   assertStringIncludes(body(h.resendCalls()[0]).html, "+44 207 946 0958 (international)");
+  // the name was asked for once already, so a new number is only read back
   const updated = await h.run("escalate", { callback_phone: "0061 491 570 156" });
   assertEquals(updated, {
     code: "callback_updated",
@@ -353,7 +359,7 @@ Deno.test("callback number said without a country code: noted as said and read b
   const given = await h.run("escalate", { callback_phone: "9601550123" });
   assertEquals(given, {
     code: "callback_updated",
-    sentence: `Got it, nine six zero, one five five, zero one two three. ${ANYTHING_ELSE}`,
+    sentence: `Got it, nine six zero, one five five, zero one two three. ${ASK_NAME}`,
     data: { digits: "9601550123" },
   });
   assertEquals([h.rows()[0].callback_phone, h.rows()[0].callback_source], ["9601550123", "argument"]);
@@ -363,7 +369,7 @@ Deno.test("callback number said without a country code: noted as said and read b
   const r = await fresh.run("escalate", { callback_phone: "960 155 0123" });
   assertEquals(r, {
     code: "rep_queued",
-    sentence: queuedAt("the number you gave me, nine six zero, one five five, zero one two three,"),
+    sentence: askedAt("the number you gave me, nine six zero, one five five, zero one two three,"),
     data: { target: "given", number: "9601550123" },
   });
   assertStringIncludes(body(fresh.resendCalls()[0]).html, "960 155 0123 (as said, no country code)");
@@ -385,7 +391,7 @@ Deno.test("a call from abroad: the caller's own number in its national form is t
     const r = await h.run("escalate", { callback_phone: said });
     assertEquals(r, {
       code: "rep_queued",
-      sentence: queuedAt(
+      sentence: askedAt(
         "the number you gave me, plus four four, two zero seven, nine four six, zero nine five eight,",
       ),
       data: { target: "given", number: "+442079460958" },
@@ -435,7 +441,7 @@ Deno.test("a caller id from abroad on the phone line is the callback target", as
   const r = await h.run("escalate", { reason: "representative_requested" });
   assertEquals(r, {
     code: "rep_queued",
-    sentence: queuedAt("the number you're calling from"),
+    sentence: askedAt("the number you're calling from"),
     data: { target: "caller_id" },
   });
   assertEquals([h.rows()[0].callback_phone, h.rows()[0].callback_source], ["+61491570156", "caller_id"]);
@@ -660,14 +666,14 @@ Deno.test("a replayed rep_queued speaks the first answer's target, never one a l
   // fallback target, then the caller gives a number: the replay no longer knows the fallback, so it names none
   const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
   const first = await h.run("escalate", {}, "tc1");
-  assertEquals(first.sentence, queuedAt("the number you're calling from"));
+  assertEquals(first.sentence, askedAt("the number you're calling from"));
   assertEquals(await h.run("escalate", {}, "tc1"), first, "a replay before anything changed is identical");
   assertEquals((await h.run("escalate", { callback_phone: "6025550177" }, "tc2")).code, "callback_updated");
+  // the name is still unknown, so the replay still asks the question its first delivery asked
   const replay = await h.run("escalate", {}, "tc1");
   assertEquals(replay, {
     code: "rep_queued",
-    sentence:
-      `I've passed this to our claims team. Someone will call you back within one business day. ${ANYTHING_ELSE}`,
+    sentence: `I've passed this to our claims team. Someone will call you back within one business day. ${ASK_NAME}`,
   });
 
   // a number given in the first request is rebuilt from the retry's own arguments
@@ -680,4 +686,300 @@ Deno.test("a replayed rep_queued speaks the first answer's target, never one a l
   await g.run("escalate", { callback_phone: "6025550144" }, "tc4");
   assertEquals(await g.run("escalate", { callback_phone: "6025550155" }, "tc3"), updated);
   assertEquals(g.telegramCalls().length, 1);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Who to ask for (0012): a caller whose name the team does not have is asked once, after the request
+// is logged and the team alerted, and the name they give goes on the escalation row.
+// ---------------------------------------------------------------------------------------------
+const nameSaved = (first: string) => `Thanks, ${first}. I've added your name to the request. ${ANYTHING_ELSE}`;
+const readBack0177 = (closing: string) => `Got it, six zero two, five five five, zero one seven seven. ${closing}`;
+
+Deno.test("an unknown caller is asked who to ask for, on the phone and on the web, after the request is logged and alerted", async () => {
+  // phone: queued on the caller id, then the name question
+  const phone = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+  assertEquals(await phone.run("escalate", { reason: "representative_requested" }), {
+    code: "rep_queued",
+    sentence: askedAt("the number you're calling from"),
+    data: { target: "caller_id" },
+  });
+  // logged and alerted first, exactly as before: the alert cannot know a name nobody has said yet
+  const row = phone.rows()[0];
+  assertEquals([row.alert_status, row.callback_phone, row.caller_name], ["sent", "+16025550188", null]);
+  assertEquals([phone.telegramCalls().length, phone.resendCalls().length], [1, 1]);
+  assertStringIncludes(body(phone.resendCalls()[0]).html, "Unknown caller");
+  assertFalse(body(phone.resendCalls()[0]).html.includes("Ask for"));
+
+  // web, the number given with the request
+  const web = harness();
+  assertEquals(
+    (await web.run("escalate", { callback_phone: "602 555 0177" })).sentence,
+    askedAt("the number you gave me, ending in zero one seven seven,"),
+  );
+
+  // web without one: the number first (one question a turn), then the name with its read-back
+  const later = harness();
+  assertEquals(await later.run("escalate", {}), { code: "rep_queued_no_number", sentence: REP_QUEUED_NO_NUMBER });
+  assertEquals((await later.run("escalate", { callback_phone: "6025550177" })).sentence, readBack0177(ASK_NAME));
+
+  // a chat is asked too, and pages nobody
+  const chat = harness({ channel: "chat", isChat: true });
+  assertEquals(
+    (await chat.run("escalate", { callback_phone: "6025550177" })).sentence,
+    askedAt("the number you gave me, ending in zero one seven seven,"),
+  );
+  assertEquals(chat.calls.length, 0);
+
+  // a request the team was not told of promises nothing, and asks nothing either
+  const down = harness({
+    channel: "inboundPhoneCall",
+    callerNumber: "+16025550188",
+    telegram: () => json({ ok: false }, 500),
+    resend: () => json({ message: "down" }, 500),
+  });
+  assertEquals(await down.run("escalate", {}), { code: "rep_recorded", sentence: REP_RECORDED });
+});
+
+Deno.test("never asked of a verified customer, a caller whose details were confirmed, or a request with a name", async () => {
+  const verified = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+  await verifyTobias(verified);
+  assertEquals((await verified.run("escalate", {})).sentence, queuedAt("the number on your account"));
+  assertEquals(
+    (await verified.run("escalate", { callback_phone: "6025550177" })).sentence,
+    readBack0177(ANYTHING_ELSE),
+  );
+
+  const captured = harness();
+  await captured.run("capture_contact", { first_name: "Jane", last_name: "Doe", callback_phone: "6025550177" });
+  assertEquals((await captured.run("confirm_contact", { correct: true })).code, "contact_saved_new");
+  assertEquals(
+    (await captured.run("escalate", {})).sentence,
+    queuedAt("the number you gave me, ending in zero one seven seven,"),
+  );
+
+  // details the caller said "no" to are no name: asked
+  const unconfirmed = harness();
+  await unconfirmed.run("capture_contact", { first_name: "Jane", last_name: "Doe", callback_phone: "6025550177" });
+  await unconfirmed.run("confirm_contact", { correct: false });
+  assertEquals(
+    (await unconfirmed.run("escalate", {})).sentence,
+    askedAt("the number you gave me, ending in zero one seven seven,"),
+  );
+
+  // a name already on the request (given earlier on the call): a new number is only read back
+  const named = harness();
+  assertEquals(await named.run("escalate", { caller_name: "Priya" }), {
+    code: "rep_queued_no_number",
+    sentence: REP_QUEUED_NO_NUMBER,
+  });
+  assertEquals(named.rows()[0].caller_name, "Priya");
+  assertEquals((await named.run("escalate", { callback_phone: "6025550177" })).sentence, readBack0177(ANYTHING_ELSE));
+});
+
+Deno.test("the name they give goes on the request: callback_name_saved, and the team is never paged again", async () => {
+  const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+  assertEquals(
+    (await h.run("escalate", { reason: "representative_requested" })).sentence,
+    askedAt("the number you're calling from"),
+  );
+  const saved = await h.run("escalate", { reason: "representative_requested", caller_name: "Priya" });
+  assertEquals(saved, { code: "callback_name_saved", sentence: nameSaved("Priya"), data: { first_name: "Priya" } });
+  const row = h.rows()[0];
+  assertEquals(
+    [row.caller_name, row.callback_phone, row.callback_source, row.alert_status, row.reason],
+    ["Priya", "+16025550188", "caller_id", "sent", "representative_requested"],
+  );
+  // cleaned as the caller said it: a lead-in and a closing full stop dropped, title-cased, thanked by the first name
+  assertEquals(await h.run("escalate", { caller_name: "it's priya raman." }), {
+    code: "callback_name_saved",
+    sentence: nameSaved("Priya"),
+    data: { first_name: "Priya" },
+  });
+  assertEquals(h.rows()[0].caller_name, "Priya Raman");
+  // accents are kept on the row and folded when spoken
+  assertEquals((await h.run("escalate", { caller_name: "Ren\u00e9e" })).sentence, nameSaved("Renee"));
+  assertEquals(h.rows()[0].caller_name, "Ren\u00e9e");
+  // a later request without a name keeps it, and is not asked again
+  assertEquals(await h.run("escalate", {}), { code: "rep_already_queued", sentence: REP_ALREADY_QUEUED });
+  assertEquals(h.rows()[0].caller_name, "Ren\u00e9e");
+  // one row, one page, one email
+  assertEquals([h.rows().length, h.telegramCalls().length, h.resendCalls().length], [1, 1, 1]);
+});
+
+Deno.test("a name volunteered with the first request is stored, never asked for, and in the team email only", async () => {
+  const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+  assertEquals(await h.run("escalate", { reason: "representative_requested", caller_name: "Ren\u00e9e Okafor" }), {
+    code: "rep_queued",
+    sentence: queuedAt("the number you're calling from"),
+    data: { target: "caller_id" },
+  });
+  assertEquals(h.rows()[0].caller_name, "Ren\u00e9e Okafor");
+  const html = body(h.resendCalls()[0]).html as string;
+  assertStringIncludes(html, "Ask for");
+  assertStringIncludes(html, "Ren&#233;e Okafor (caller-provided, unverified)");
+  // the Telegram card stays ids and enums
+  assertFalse(/Ren[e\u00e9]e|Okafor/.test(body(h.telegramCalls()[0]).text));
+});
+
+Deno.test("a new number and a name together: both saved, the number read back, no question about the name", async () => {
+  const h = harness();
+  assertEquals((await h.run("escalate", {})).code, "rep_queued_no_number");
+  assertEquals(await h.run("escalate", { callback_phone: "6025550177", caller_name: "Priya" }), {
+    code: "callback_updated",
+    sentence: readBack0177(ANYTHING_ELSE),
+    data: { digits: "6025550177" },
+  });
+  assertEquals([h.rows()[0].callback_phone, h.rows()[0].callback_source, h.rows()[0].caller_name], [
+    "+16025550177",
+    "argument",
+    "Priya",
+  ]);
+  // the answer to the question, with a different number: both saved, nothing asked
+  const p = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+  assertEquals((await p.run("escalate", {})).sentence, askedAt("the number you're calling from"));
+  assertEquals(await p.run("escalate", { callback_phone: "6025550177", caller_name: "Priya" }), {
+    code: "callback_updated",
+    sentence: readBack0177(ANYTHING_ELSE),
+    data: { digits: "6025550177" },
+  });
+  assertEquals([p.rows()[0].callback_phone, p.rows()[0].caller_name], ["+16025550177", "Priya"]);
+  // a junk name with the number: the number saved, the name not, and no question
+  const j = harness();
+  await j.run("escalate", {});
+  assertEquals(
+    (await j.run("escalate", { callback_phone: "6025550177", caller_name: "none" })).sentence,
+    readBack0177(ANYTHING_ELSE),
+  );
+  assertEquals([j.rows()[0].callback_phone, j.rows()[0].caller_name], ["+16025550177", null]);
+  for (const x of [h, p, j]) assertEquals(x.telegramCalls().length, 1);
+});
+
+Deno.test("a name that is not a name is never stored, promises nothing new, and the question is not asked again", async () => {
+  const junk = [
+    "unknown",
+    "Unknown caller",
+    "no",
+    "None",
+    "nope",
+    "I'd rather not say",
+    "Just call me",
+    "No thanks",
+    "602 555 0177",
+    "priya@example.com",
+    "{{caller_name}}",
+    "N/A",
+    "Mr.",
+    "x".repeat(81),
+    "one two three four five six",
+  ];
+  for (const name of junk) {
+    const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+    assertEquals((await h.run("escalate", {})).sentence, askedAt("the number you're calling from"), name);
+    // never refused as a placeholder: the request is already recorded, so it answers as a repeat does
+    assertEquals(await h.run("escalate", { caller_name: name }), {
+      code: "rep_already_queued",
+      sentence: REP_ALREADY_QUEUED,
+    }, name);
+    assertEquals(h.rows()[0].caller_name, null, name);
+    // and a later number is only read back
+    assertEquals(
+      (await h.run("escalate", { callback_phone: "6025550177" })).sentence,
+      readBack0177(ANYTHING_ELSE),
+      name,
+    );
+    assertEquals(h.telegramCalls().length, 1, name);
+  }
+  // with no number on the request it still asks for the number; with the team not told it records only
+  const noNumber = harness();
+  await noNumber.run("escalate", {});
+  assertEquals(await noNumber.run("escalate", { caller_name: "unknown" }), {
+    code: "rep_queued_no_number",
+    sentence: REP_QUEUED_NO_NUMBER,
+  });
+  const down = harness({ telegram: () => json({ ok: false }, 500), resend: () => json({ message: "down" }, 500) });
+  await down.run("escalate", {});
+  assertEquals(await down.run("escalate", { caller_name: "no" }), { code: "rep_recorded", sentence: REP_RECORDED });
+  // a placeholder anywhere else is still refused
+  assertEquals((await noNumber.run("escalate", { details: "{{details}}" })).code, "bad_args");
+});
+
+Deno.test("asked once a call: after the question, a decline is never asked again and a new number is only read back", async () => {
+  const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+  assertEquals((await h.run("escalate", {})).sentence, askedAt("the number you're calling from"));
+  // the caller would rather not say: no escalate; later they give another number, then ask again
+  assertEquals((await h.run("escalate", { callback_phone: "6025550177" })).sentence, readBack0177(ANYTHING_ELSE));
+  assertEquals(await h.run("escalate", {}), { code: "rep_already_queued", sentence: REP_ALREADY_QUEUED });
+  // a callback_updated that asked counts as asked too
+  const w = harness();
+  await w.run("escalate", {});
+  assertEquals((await w.run("escalate", { callback_phone: "6025550177" })).sentence, readBack0177(ASK_NAME));
+  assertEquals(
+    (await w.run("escalate", { callback_phone: "6025550166" })).sentence,
+    `Got it, six zero two, five five five, zero one six six. ${ANYTHING_ELSE}`,
+  );
+});
+
+Deno.test("a failed read never asks: the session, the captured details or the ledger", async () => {
+  for (const method of ["getSession", "getContact", "listAttempts"] as const) {
+    const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+    h.store.failNext(method);
+    assertEquals(await h.run("escalate", {}), {
+      code: "rep_queued",
+      sentence: queuedAt("the number you're calling from"),
+      data: { target: "caller_id" },
+    }, method);
+    // the request is still logged and alerted
+    assertEquals([h.rows().length, h.rows()[0].alert_status, h.telegramCalls().length], [1, "sent", 1], method);
+    assert(h.logs.some((l) => l.event === "tool_error" && l.step === method), method);
+  }
+});
+
+Deno.test("a name with no number to call still asks for one; a name on a request the team was not told of is saved", async () => {
+  // told, and no number anywhere: the name goes on the row and the number is asked for
+  const h = harness();
+  assertEquals((await h.run("escalate", {})).code, "rep_queued_no_number");
+  assertEquals(await h.run("escalate", { caller_name: "Priya" }), {
+    code: "rep_queued_no_number",
+    sentence: REP_QUEUED_NO_NUMBER,
+  });
+  assertEquals(h.rows()[0].caller_name, "Priya");
+  assertEquals((await h.run("escalate", { callback_phone: "6025550177" })).sentence, readBack0177(ANYTHING_ELSE));
+  // the team was not told: the name is saved, nothing is promised, and nothing is retried
+  const down = harness({ telegram: () => json({ ok: false }, 500), resend: () => json({ message: "down" }, 500) });
+  assertEquals((await down.run("escalate", { callback_phone: "6025550177" })).code, "rep_recorded");
+  assertEquals(await down.run("escalate", { caller_name: "Priya" }), {
+    code: "callback_name_saved",
+    sentence: nameSaved("Priya"),
+    data: { first_name: "Priya" },
+  });
+  assertEquals(down.rows()[0].caller_name, "Priya");
+  assertEquals([down.telegramCalls().length, down.resendCalls().length], [1, 1]);
+});
+
+Deno.test("replays of the name question and the saved name are word for word, and page nobody", async () => {
+  const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
+  const asked = await h.run("escalate", {}, "tc-ask");
+  assertEquals(asked.sentence, askedAt("the number you're calling from"));
+  assertEquals(await h.run("escalate", {}, "tc-ask"), asked);
+  const saved = await h.run("escalate", { caller_name: "Priya" }, "tc-name");
+  assertEquals(saved.code, "callback_name_saved");
+  assertEquals(await h.run("escalate", { caller_name: "Priya" }, "tc-name"), saved);
+  // a callback_updated that asked replays with its question
+  const w = harness();
+  await w.run("escalate", {}, "w1");
+  const updated = await w.run("escalate", { callback_phone: "6025550177" }, "w2");
+  assertEquals(updated.sentence, readBack0177(ASK_NAME));
+  assertEquals(await w.run("escalate", { callback_phone: "6025550177" }, "w2"), updated);
+  // a caller who has given their name since is never asked it again, not even by a replay
+  assertEquals(await h.run("escalate", {}, "tc-ask"), {
+    code: "rep_queued",
+    sentence: queuedAt("the number you're calling from"),
+    data: { target: "caller_id" },
+  });
+  assertEquals(
+    h.store.tables.attempts.filter((a) => a.tool_name === "escalate").map((a) => [a.tool_call_id, a.code]),
+    [["tc-ask", "rep_queued"], ["tc-name", "callback_name_saved"]],
+  );
+  assertEquals([h.telegramCalls().length, h.resendCalls().length, w.telegramCalls().length], [1, 1, 1]);
+  assertEquals(h.rows()[0].caller_name, "Priya");
 });

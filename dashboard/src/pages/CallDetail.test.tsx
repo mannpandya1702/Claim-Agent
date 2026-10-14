@@ -231,7 +231,7 @@ describe("CallDetail after hangup", () => {
       id: "e1", call_key: ID, kind: "representative", reason: "representative_requested", details: null,
       callback_phone: "+16025550101", callback_phone_masked: "+1 602 ... 0101", channel: "webCall", verified: true, callback_source: "account",
       alert_status: "sent", delivery_error: null, status: "open", claimed_by: null, claimed_at: null,
-      closed_by: null, closed_at: null, close_note: null, realerted_at: null,
+      closed_by: null, closed_at: null, close_note: null, realerted_at: null, caller_name: null,
       created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     };
     api.fetchCall.mockResolvedValue(call({ escalated: true, outcome: "escalated" }));

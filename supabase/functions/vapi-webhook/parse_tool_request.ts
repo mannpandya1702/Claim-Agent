@@ -72,6 +72,10 @@ export function parseCalls(message: VapiMessage): ParsedToolCall[] {
 const IDENTITY_FIELDS = new Set(["identityverified", "verified", "customerid", "callkey", "callerphone", "level"]);
 const PLACEHOLDER_VALUES = new Set(["unknown", "null", "undefined"]);
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+// Fields a tool screens itself. escalate's caller_name is the caller's answer to "Who should they ask
+// for?": "unknown" there means they gave no name, so it reaches the tool (which stores only a real
+// name, identity.ts normaliseCallerName) instead of refusing a request that is already recorded.
+const SELF_SCREENED: Readonly<Record<string, ReadonlySet<string>>> = { escalate: new Set(["caller_name"]) };
 
 function fieldKey(k: string): string {
   return k.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -100,7 +104,7 @@ function findPlaceholder(v: unknown, path: string, depth: number): string | null
 /** Trust boundary for model-supplied arguments. Strips identity fields (identity_verified, verified,
  *  customer_id, call_key, caller_phone, level; and phone for every tool except lookup_customer).
  *  Refuses (ok:false) when any remaining string value contains "{{" or equals "unknown"/"null"/"undefined"
- *  (case-insensitive, trimmed). */
+ *  (case-insensitive, trimmed), except in a field the tool screens itself (escalate's caller_name). */
 export function parseToolRequest(
   toolName: string,
   args: Record<string, unknown> | null,
@@ -114,7 +118,9 @@ export function parseToolRequest(
     if (key === "phone" && toolName !== "lookup_customer") continue;
     clean[k] = v;
   }
-  const hit = findPlaceholder(clean, "", 0);
+  const screened = SELF_SCREENED[toolName];
+  const checked = screened ? Object.fromEntries(Object.entries(clean).filter(([k]) => !screened.has(k))) : clean;
+  const hit = findPlaceholder(checked, "", 0);
   if (hit) return { ok: false, reason: `placeholder_value:${hit}` };
   return { ok: true, args: clean };
 }

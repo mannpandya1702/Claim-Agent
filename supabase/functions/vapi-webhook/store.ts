@@ -59,7 +59,7 @@ const CLAIM_COLUMNS = "id, customer_id, claim_number, claim_type, status, status
 const SESSION_COLUMNS = "call_key, channel, caller_number, level, candidate_customer_id, verified_customer_id";
 const ATTEMPT_COLUMNS = "call_key, tool_call_id, tool_name, kind, code, created_at";
 const ESCALATION_COLUMNS = "id, call_key, kind, reason, details, callback_phone, channel, verified, callback_source, " +
-  "alert_status, delivery_error, status, created_at";
+  "alert_status, delivery_error, status, created_at, caller_name";
 const EMAIL_COLUMNS = "call_key, kind, to_masked, resend_id, status, error";
 const CONTACT_COLUMNS = "call_key, kind, first_name, last_name, email, callback_phone, callback_source, customer_id, " +
   "confirmed, confirmed_at";
@@ -307,17 +307,22 @@ export function createStore(supabaseUrl: string, serviceRoleKey: string): Store 
         p_callback_source: p.callbackSource,
         p_channel: p.channel,
         p_verified: p.verified,
+        p_caller_name: p.callerName ?? null,
       }).abortSignal(signal());
       if (error) fail("upsertEscalation", error);
-      const row = firstRow<{ id: string; inserted: boolean; callback_phone: string | null; alert_status: string }>(
-        "upsertEscalation",
-        data,
-      );
+      const row = firstRow<{
+        id: string;
+        inserted: boolean;
+        callback_phone: string | null;
+        alert_status: string;
+        caller_name?: string | null;
+      }>("upsertEscalation", data);
       return {
         id: row.id,
         inserted: row.inserted === true,
         callbackPhone: row.callback_phone ?? null,
         alertStatus: row.alert_status as AlertStatus,
+        callerName: row.caller_name ?? null,
       };
     },
 

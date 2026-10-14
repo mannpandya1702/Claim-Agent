@@ -380,7 +380,9 @@ Deno.test("escalate mock: new row, callback merge, verified account target, chan
   assertEquals([given.code, given.data], ["rep_queued", { target: "given", digits: "0177" }]);
   const after = stateAfter([{ tool: "escalate", args: {}, code: "rep_queued_no_number" }]);
   const merged = await answer("escalate", after, { callback_phone: "602 555 0177" });
-  assertEquals(merged.message, say("callback_updated", { digits: "6025550177" }));
+  // the unverified caller's name is asked for with the read-back, the first answer that can ask it
+  assertEquals(merged.message, say("callback_updated", { digits: "6025550177", ask_name: true }));
+  assertEquals(merged.data, { digits: "6025550177" });
   // no number anywhere: a repeat asks for one, as tools.ts does, never promises the call
   assertEquals((await answer("escalate", after, {})).code, "rep_queued_no_number");
   const withNumber = stateAfter([
@@ -399,7 +401,7 @@ Deno.test("escalate mock: a number from abroad, one said without a country code,
   // read in full on a first request, country code first (speak.ts repQueued)
   const abroad = await answer("escalate", s, { callback_phone: "+61 491 570 156" }, { phones });
   assertEquals([abroad.code, abroad.data], ["rep_queued", { target: "given", number: "+61491570156" }]);
-  assertEquals(abroad.message, say("rep_queued", { target: "given", number: "+61491570156" }));
+  assertEquals(abroad.message, say("rep_queued", { target: "given", number: "+61491570156", ask_name: true }));
   const after = stateAfter([{ tool: "escalate", args: {}, code: "rep_queued_no_number" }]);
   for (
     const [said, stored] of [["9601550123", "9601550123"], ["960 155 0123", "9601550123"], [
@@ -408,7 +410,7 @@ Deno.test("escalate mock: a number from abroad, one said without a country code,
     ]]
   ) {
     const r = await answer("escalate", after, { callback_phone: said }, { phones });
-    assertEquals(r.message, say("callback_updated", { digits: stored }), said);
+    assertEquals(r.message, say("callback_updated", { digits: stored, ask_name: true }), said);
   }
   // the phone line's caller id the persona stands in for is the target when no number is given
   const callerId = await answer("escalate", s, {}, { persona: { callerId: "+61491570156" } });
@@ -421,6 +423,98 @@ Deno.test("escalate mock: a number from abroad, one said without a country code,
   assertEquals(callbackKey("+1 602 555 0177"), "6025550177");
   assertEquals(callbackKey("+44 20 7946 0958"), "+442079460958");
   assertEquals(callbackKey("555-017"), "");
+});
+
+Deno.test("escalate mock: who to ask for is asked once and saved by name, exactly as the server answers", async () => {
+  const scenarios: { name: string; callerId: string | null; steps: Obj[] }[] = [
+    {
+      name: "phone, the question answered",
+      callerId: "+16025550188",
+      steps: [{ reason: "representative_requested" }, { caller_name: "Priya" }, {}, { callback_phone: "6025550177" }],
+    },
+    {
+      name: "web, the number first",
+      callerId: null,
+      steps: [{}, { callback_phone: "6025550177" }, { caller_name: "priya raman" }, { caller_name: "Priya." }],
+    },
+    {
+      name: "volunteered",
+      callerId: "+16025550188",
+      steps: [{ caller_name: "Priya" }, { callback_phone: "6025550177" }],
+    },
+    {
+      name: "junk, then a number and a name",
+      callerId: "+16025550188",
+      steps: [{}, { caller_name: "unknown" }, { callback_phone: "6025550177", caller_name: "Priya" }],
+    },
+    { name: "a name with no number to call", callerId: null, steps: [{}, { caller_name: "Priya" }, {}] },
+  ];
+  let seq = 0;
+  for (const s of scenarios) {
+    const deps = {
+      store: createFakeStore(undefined, { now: () => NOW }),
+      fetch: (() => Promise.reject(new Error("no network"))) as typeof fetch,
+      env: { VAPI_ORG_ID: "org", VAPI_WEBHOOK_SECRET: "secret" },
+      now: () => NOW,
+      waitUntil: () => {},
+      log: () => {},
+    };
+    // the battery is a chat; a persona's callerId stands in for the phone line's caller id
+    const tc: Omit<ToolCtx, "toolCallId"> = {
+      callKey: `battery-name-${++seq}`,
+      channel: "chat",
+      callerNumber: s.callerId,
+      isChat: true,
+      deps,
+    };
+    const persona = { callerNames: ["Priya", "Priya Raman"], ...(s.callerId ? { callerId: s.callerId } : {}) };
+    const done: { tool: string; args: Obj; code: string }[] = [];
+    for (const args of s.steps) {
+      const server = await runTool({ id: `tc-${++seq}`, name: "escalate", args }, tc);
+      const mock = await answer("escalate", stateAfter(done), args, {
+        persona,
+        phones: ["6025550177"],
+        callKey: tc.callKey,
+      });
+      assertEquals(
+        [mock.code, mock.message, mock.data ?? null],
+        [server.code, server.sentence, server.data ?? null],
+        `${s.name}: ${JSON.stringify(args)}`,
+      );
+      done.push({ tool: "escalate", args, code: mock.code });
+    }
+  }
+});
+
+Deno.test("escalate mock: never asks a verified caller, one whose details were confirmed, or a request with a name", async () => {
+  const verified = await answer("escalate", stateAfter([TOBIAS_LOOKUP, TOBIAS_VERIFY]), {});
+  assertEquals(verified.message, say("rep_queued", { target: "account" }));
+  const confirmed = stateAfter([
+    ...NOT_FOUND_TWICE,
+    { tool: "capture_contact", args: { ...JORDAN, callback_phone: "6025550177" }, code: "contact_readback" },
+    { tool: "confirm_contact", args: { correct: true }, code: "contact_saved_new" },
+  ]);
+  assertEquals(
+    (await answer("escalate", confirmed, {})).message,
+    say("rep_queued", { target: "given", digits: "0177" }),
+  );
+  const named = stateAfter([{ tool: "escalate", args: { caller_name: "Priya" }, code: "rep_queued_no_number" }]);
+  assertEquals(
+    (await answer("escalate", named, { callback_phone: "6025550177" })).message,
+    say("callback_updated", { digits: "6025550177" }),
+  );
+  // a name the persona did not script is saved too, and thanked without a first name (the mock composes
+  // sentences only for the names a persona says)
+  const asked = stateAfter([{ tool: "escalate", args: {}, code: "rep_queued" }]);
+  const other = await answer("escalate", asked, { caller_name: "Dana" }, {
+    persona: { callerId: "+16025550188", callerNames: ["Priya"] },
+  });
+  assertEquals([other.code, other.message], ["callback_name_saved", say("callback_name_saved")]);
+  // and a name on a first request asks nothing
+  const first = await answer("escalate", initialState(), { caller_name: "Priya" }, {
+    persona: { callerId: "+16025550188" },
+  });
+  assertEquals(first.message, say("rep_queued", { target: "caller_id" }));
 });
 
 Deno.test("spoken numbers: double and triple, plus and a country code, read as the caller said them", () => {
@@ -436,10 +530,16 @@ Deno.test("spoken numbers: double and triple, plus and a country code, read as t
 });
 
 Deno.test("callback personas: the turns a model should take get the codes and read-backs the personas expect", async () => {
-  const ideal: Record<string, Obj[]> = {
+  // per turn, the escalate arguments the model should pass (null: a turn with no tool call)
+  const ideal: Record<string, (Obj | null)[]> = {
     "callback-international": [{ reason: "representative_requested" }],
     "callback-as-said": [{ reason: "representative_requested" }, { callback_phone: "9601550123" }],
     "callback-double-digits": [{ reason: "representative_requested" }, { callback_phone: "9601550123" }],
+    "callback-name": [{ reason: "representative_requested" }, {
+      reason: "representative_requested",
+      caller_name: "Priya",
+    }],
+    "callback-name-declined": [{ reason: "representative_requested" }, null, null],
   };
   for (const [id, calls] of Object.entries(ideal)) {
     const p = persona(id);
@@ -447,6 +547,11 @@ Deno.test("callback personas: the turns a model should take get the codes and re
     const done: { tool: string; args: Obj; code: string }[] = [];
     for (const [i, args] of calls.entries()) {
       const turn = p.turns[i];
+      if (args === null) {
+        // no escalate this turn: a reply of the model's own, or the goodbye
+        assert(!(turn.tools ?? []).includes("escalate"), `${id} t${i + 1}`);
+        continue;
+      }
       const r = await answer("escalate", stateAfter(done), args, { persona: p, phones: personaPhones(p) });
       assertEquals(r.code, turn.codes?.[0], `${id} t${i + 1}`);
       assertEquals(turn.args?.escalate?.(args) ?? null, null, `${id} t${i + 1} args`);

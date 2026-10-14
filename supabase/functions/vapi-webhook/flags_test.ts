@@ -49,6 +49,7 @@ function escalation(
     delivery_error: alert_status === "failed" ? "telegram 500: boom" : null,
     status: "open",
     created_at: "2026-10-12T15:00:00Z",
+    caller_name: null,
   };
 }
 

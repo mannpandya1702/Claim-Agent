@@ -25,6 +25,7 @@ function esc(over: Partial<EscalationListRow>): EscalationListRow {
     closed_at: null,
     close_note: null,
     realerted_at: null,
+    caller_name: null,
     created_at: ago(1),
     updated_at: ago(1),
     ...over,

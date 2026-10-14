@@ -8,7 +8,7 @@
 //   deno task battery --list               persona ids
 //   deno task battery --dry-run            build every first request offline and print the plan
 //
-// Options: --cap <conversations> (default 135, a hard ceiling checked before anything is spent),
+// Options: --cap <conversations> (default 141, a hard ceiling checked before anything is spent),
 // --concurrency <k> (default 3). Every chat is named "INTERNAL ...", every number is a 555 number
 // (or one of the fictional numbers from abroad in FICTION_NUMBERS),
 // and a one-turn 402 probe runs first: an empty wallet halts the run before any persona starts.
@@ -30,9 +30,11 @@ import {
 import { demoSeed } from "../supabase/functions/vapi-webhook/fake_store.ts";
 import { computeFlags } from "../supabase/functions/vapi-webhook/flags.ts";
 import {
+  callerFirstName,
   type IdentityState,
   initialIdentity,
   normaliseCallbackNumber,
+  normaliseCallerName,
   normaliseEmail,
   normaliseName,
   normalisePhone,
@@ -80,7 +82,7 @@ import { vapiClient, VapiError } from "./lib/vapi.ts";
 import { deepMerge, loadVariant, paths, promptPath, renderPrompt, sha256Hex } from "./render.ts";
 
 export const ASSISTANT_KEY = "solo-core" as const;
-export const DEFAULTS = { n: 3, cap: 135, concurrency: 3 };
+export const DEFAULTS = { n: 3, cap: 141, concurrency: 3 };
 const MAX_N = 20;
 const MAX_CONCURRENCY = 6;
 // A conversation never needs more requests than turns plus confirmations; this bounds a runaway.
@@ -217,12 +219,27 @@ export interface MockPlan {
     // verified with an intent: the opening that leads into the claim, or the claims read in the same call
     intents: Record<string, MockResult>;
   };
-  callback?: { known: Record<string, MockResult>; other: MockResult; none: MockResult };
+  callback?: CallbackPlan;
   topic?: { known: Record<string, MockResult>; other: MockResult };
   contact?: ContactPlan;
   confirm?: { yes: MockResult; no: MockResult; bad: MockResult };
   claim?: ClaimPlan;
   status?: StatusPlan;
+}
+
+/** escalate answers, by the callback number the arguments give (callbackKey: known, any other, or none).
+ *  A caller_name argument means the name question is not asked (tools.ts asksName): plain holds those
+ *  answers when the question is due on this turn. names holds a repeat's callback_name_saved by the stored
+ *  name in lower case (normaliseCallerName runs from its source), for the names a persona says; any other
+ *  usable name gets the sentence without a first name (nameOther). Without names, a name is answered as
+ *  a repeat with none (a request with no number to call still asks for one). */
+export interface CallbackPlan {
+  known: Record<string, MockResult>;
+  other: MockResult;
+  none: MockResult;
+  plain?: { known: Record<string, MockResult>; other: MockResult; none: MockResult };
+  names?: Record<string, MockResult>;
+  nameOther?: MockResult;
 }
 
 /** get_claim_status answers for a verified caller with claims. The detail and claim_ending arguments
@@ -308,6 +325,8 @@ export interface SimState {
   identity: IdentityState;
   escalated: boolean;
   escalationNumber: boolean; // the representative row holds a callback number
+  escalationName: boolean; // the representative row holds the name the caller gave (caller_name)
+  nameAsked: boolean; // an escalate answered rep_queued or callback_updated: who to ask for is asked once
   phoneAsked: boolean; // a capture already asked for the best number (contact_needs_phone)
   emailed: string[];
   contact: SimContact | null;
@@ -320,6 +339,8 @@ export function initialState(): SimState {
     identity: initialIdentity(),
     escalated: false,
     escalationNumber: false,
+    escalationName: false,
+    nameAsked: false,
     phoneAsked: false,
     emailed: [],
     contact: null,
@@ -356,6 +377,8 @@ export interface PersonaOptions {
   /** The caller id the phone line would carry (E.164). A chat has none; this stands in for it, so a
    *  persona can be a phone caller whose number the server already knows. */
   callerId?: string;
+  /** Names the caller gives for a callback, so the mock thanks them by name with the real sentence. */
+  callerNames?: string[];
 }
 
 export interface PlanCtx {
@@ -522,23 +545,21 @@ function givenTarget(key: string): Obj {
     : { target: "given", number: key };
 }
 
+/** tools.ts withNameQuestion: the answer closing on "Who should they ask for?" when asked; the data keeps
+ *  its usual shape. */
+function nameQuestion(ctx: PlanCtx, code: "rep_queued" | "callback_updated", data: Obj | undefined, ask: boolean) {
+  return ask
+    ? result(ctx, code, data, sentenceFor(code, { ...data, ask_name: true }, ctx.callKey))
+    : result(ctx, code, data);
+}
+
 function escalatePlan(ctx: PlanCtx): MockPlan {
   if (ctx.persona.escalateCode) return { fixed: result(ctx, ctx.persona.escalateCode) };
-  const { escalated, escalationNumber } = ctx.state;
+  const { escalated, escalationNumber, contact } = ctx.state;
   const verified = ctx.state.identity.level === "verified";
-  // An existing row only merges a new callback number; a new row is answered as notified.
-  const withNumber = (number: string | null) =>
-    escalated
-      ? result(ctx, "callback_updated", number ? { digits: number } : undefined)
-      : result(ctx, "rep_queued", number ? givenTarget(number) : { target: "given" });
-  const known: Record<string, MockResult> = {};
-  for (const d of ctx.phones) {
-    const key = callbackKey(d);
-    if (key) known[key] = withNumber(key);
-  }
   // tools.ts fallbackCallback: the account's number, else one captured with the caller's details, else
   // caller id. Without any, a repeat asks for a number rather than promise a call.
-  const captured = ctx.state.contact?.phone ?? null;
+  const captured = contact?.phone ?? null;
   const fallback = verified
     ? { target: "account" }
     : captured
@@ -546,12 +567,49 @@ function escalatePlan(ctx: PlanCtx): MockPlan {
     : ctx.persona.callerId
     ? { target: "caller_id" }
     : null;
-  const none = escalated
-    ? result(ctx, escalationNumber || fallback ? "rep_already_queued" : "rep_queued_no_number")
-    : fallback
-    ? result(ctx, "rep_queued", fallback)
-    : result(ctx, "rep_queued_no_number");
-  return { callback: { known, other: withNumber(null), none } };
+  // tools.ts asksName: no verified customer, no contact confirmed with a first name, no name on the row, and
+  // not asked before on the call (an earlier rep_queued or callback_updated)
+  const ask = !verified && !(contact?.confirmed && contact.first) && !ctx.state.escalationName &&
+    !ctx.state.nameAsked;
+  const answers = (asks: boolean) => {
+    // An existing row only merges a new callback number; a new row is answered as notified.
+    const withNumber = (number: string | null) =>
+      escalated
+        ? nameQuestion(ctx, "callback_updated", number ? { digits: number } : undefined, asks)
+        : nameQuestion(ctx, "rep_queued", number ? givenTarget(number) : { target: "given" }, asks);
+    const known: Record<string, MockResult> = {};
+    for (const d of ctx.phones) {
+      const key = callbackKey(d);
+      if (key) known[key] = withNumber(key);
+    }
+    const none = escalated
+      ? result(ctx, escalationNumber || fallback ? "rep_already_queued" : "rep_queued_no_number")
+      : fallback
+      ? nameQuestion(ctx, "rep_queued", fallback, asks)
+      : result(ctx, "rep_queued_no_number");
+    return { known, other: withNumber(null), none };
+  };
+  const plan: CallbackPlan = answers(ask);
+  // a caller_name argument: no question, whether or not it is a name
+  if (ask) plan.plain = answers(false);
+  // A repeat with a name saves it and thanks them (tools.ts nameSaved); a request with no number to call
+  // still asks for one first.
+  if (escalated && (escalationNumber || fallback)) {
+    plan.names = {};
+    for (const said of ctx.persona.callerNames ?? []) {
+      const stored = normaliseCallerName(said);
+      const first = callerFirstName(stored);
+      if (stored) {
+        plan.names[stored.toLowerCase()] = result(
+          ctx,
+          "callback_name_saved",
+          first ? { first_name: first } : undefined,
+        );
+      }
+    }
+    plan.nameOther = result(ctx, "callback_name_saved");
+  }
+  return { callback: plan };
 }
 
 function infoEmailPlan(ctx: PlanCtx): MockPlan {
@@ -975,7 +1033,15 @@ export function mockCode(plan: MockPlan): string {
       `}`,
     ],
     callback: [
-      `if (P.callback) { const k = callback(a.callback_phone); r = k ? (P.callback.known[k] ?? P.callback.other) : P.callback.none; }`,
+      `if (P.callback) {`,
+      `  const C = P.callback;`,
+      `  const k = callback(a.callback_phone);`,
+      `  const v = a.caller_name;`,
+      `  const named = v !== undefined && v !== null && !(typeof v === "string" && !v.trim());`,
+      `  const n = named ? (${normaliseCallerName.toString()})(v) : null;`,
+      `  const B = named && C.plain ? C.plain : C;`,
+      `  r = k ? (B.known[k] ?? B.other) : n && C.names ? (C.names[n.toLowerCase()] ?? C.nameOther) : B.none;`,
+      `}`,
     ],
     topic: [
       `if (P.topic) { r = P.topic.known[String(a.topic ?? "")] ?? P.topic.other; }`,
@@ -1316,6 +1382,10 @@ export function advance(state: SimState, turn: TurnRecord, now: Date): string[] 
         state.escalationNumber = true;
       }
       if (ESCALATION_ROW_CODES.has(code) && callbackKey(a.callback_phone)) state.escalationNumber = true;
+      // tools.ts asksName: once one of these was answered, who to ask for is never asked again
+      if (code === "rep_queued" || code === "callback_updated") state.nameAsked = true;
+      // the row keeps a name the caller gave, whatever the answer was
+      if (ESCALATION_ROW_CODES.has(code) && normaliseCallerName(a.caller_name)) state.escalationName = true;
     } else if (call.name === "send_info_email") {
       if (call.result.code === "email_sent" && typeof a.topic === "string") state.emailed.push(a.topic);
     } else if (call.name === "capture_contact") {
@@ -1390,6 +1460,7 @@ const ESCALATION_ROW_CODES: ReadonlySet<string> = new Set([
   "rep_queued",
   "rep_queued_no_number",
   "callback_updated",
+  "callback_name_saved",
   "rep_recorded",
   "rep_already_queued",
 ]);
@@ -1518,6 +1589,11 @@ const US_ONLY = /\bU\.?S\.?(?![A-Za-z])/;
 // "I didn't catch 1 digit" after a number said like "9 6 0 1 double 5 0 1 2 3").
 const MISSING_DIGIT =
   /\b(?:didn't|did not|couldn't|could not) (?:quite )?(?:catch|get|hear) (?:the |one |a |that |1 )?(?:last |final )?digit|\b(?:one|a|1) digit (?:short|missing)|\bmissing (?:a |one )?digit|\b(?:only )?(?:nine|9) digits\b/i;
+// A question in the model's own words about the caller's name or who to ask for: escalate's sentence asks
+// it once ("Who should they ask for?"), so any such question of the model's is a second ask.
+const CALLBACK_NAME_ASK = /\b(?:ask for|name)\b[^.!?]*\?/i;
+// The ending rule's one check before a goodbye ("Anything else before I let you go?", "Are you all set?").
+const ANYTHING_ELSE_CHECK = /\b(?:anything|something) (?:else|more)\b|\ball set\b|\blet you go\b/i;
 
 const TOBIAS_SAYS_PHONE = "six zero two, five five five, zero one zero one";
 const TOBIAS_DOB = "March fourteenth, nineteen eighty-six.";
@@ -1548,6 +1624,15 @@ const noCallback: ArgCheck = (a) =>
   a.callback_phone === undefined || a.callback_phone === ""
     ? null
     : `callback_phone was set to ${JSON.stringify(a.callback_phone)} unasked`;
+// the name the caller said for the callback, as escalate stores it (identity.ts normaliseCallerName)
+const callerNameIs = (want: string): ArgCheck => (a) =>
+  normaliseCallerName(a.caller_name)?.toLowerCase() === want.toLowerCase()
+    ? null
+    : `caller_name was ${JSON.stringify(a.caller_name ?? null)}`;
+const noCallerName: ArgCheck = (a) =>
+  a.caller_name === undefined || a.caller_name === ""
+    ? null
+    : `caller_name was set to ${JSON.stringify(a.caller_name)} unasked`;
 const topicIs = (want: string): ArgCheck => (a) =>
   a.topic === want ? null : `topic was ${JSON.stringify(a.topic ?? null)}`;
 const nameIs = (first: string, last: string): ArgCheck => (a) =>
@@ -1890,6 +1975,65 @@ export const PERSONAS: Persona[] = [
     neverTools: ["lookup_customer", "verify_identity", "get_claim_status"],
     modelNever: [NUMBER_REFUSED, US_ONLY, MISSING_DIGIT],
     heardNever: [NUMBER_REFUSED, US_ONLY],
+  },
+  // An unverified caller on the phone line asks for a callback: the request is queued on the number they are
+  // calling from (callerId stands in for the line's caller id), and escalate's sentence asks who the team
+  // should ask for, once. The name they say goes back to escalate with no words of the model's own.
+  {
+    id: "callback-name",
+    title: "Callback for an unverified phone caller: asked once who to ask for; the name they say goes to escalate",
+    callerId: "+16025550188",
+    callerNames: ["Priya"],
+    turns: [
+      {
+        user:
+          "Hi, I don't have a policy with you yet. Could someone from your claims team call me back on this number, please?",
+        confirm: { tool: "escalate", say: "Yes, please, a callback on the number I'm calling from." },
+        tools: ["escalate"],
+        codes: ["rep_queued"],
+        args: { escalate: all(reasonListed, noCallback, noCallerName) },
+        heardSays: [/number you're calling from/, /Who should they ask for\?/],
+      },
+      {
+        user: "Priya.",
+        tools: ["escalate"],
+        codes: ["callback_name_saved"],
+        args: { escalate: all(callerNameIs("Priya"), noCallback) },
+        firstToolSilent: "escalate",
+        heardSays: [/Thanks, Priya\. I've added your name to the request\./],
+      },
+    ],
+    neverTools: ["lookup_customer", "verify_identity", "get_claim_status", "capture_contact"],
+    modelNever: [CALLBACK_NAME_ASK],
+    toolOrder: ["escalate", "escalate"],
+  },
+  {
+    id: "callback-name-declined",
+    title: "Callback for an unverified phone caller who would rather not give a name: never asked again",
+    callerId: "+16025550188",
+    turns: [
+      {
+        user:
+          "Hi, I don't have a policy with you yet. Could someone from your claims team call me back on this number, please?",
+        confirm: { tool: "escalate", say: "Yes, please, a callback on the number I'm calling from." },
+        tools: ["escalate"],
+        codes: ["rep_queued"],
+        args: { escalate: all(reasonListed, noCallback, noCallerName) },
+        heardSays: [/Who should they ask for\?/],
+      },
+      // the name question took the place of the request's "anything else", so that check comes now, and
+      // a "thanks" before it is not a goodbye (ENDING THE CALL)
+      {
+        user: "Just call me, thanks.",
+        tools: [],
+        modelSays: [ANYTHING_ELSE_CHECK],
+        modelNever: [CALLBACK_NAME_ASK],
+      },
+      { user: "No, that's everything. Bye.", tools: ["endCall"] },
+    ],
+    neverTools: ["lookup_customer", "verify_identity", "get_claim_status", "capture_contact"],
+    modelNever: [CALLBACK_NAME_ASK],
+    toolOrder: ["escalate", "endCall"],
   },
   {
     id: "emergency",
@@ -3058,6 +3202,7 @@ export function flagProblems(turns: TurnRecord[]): string[] {
       delivery_error: null,
       status: "open",
       created_at: "",
+      caller_name: null,
     }]
     : [];
   const filedCodes: ReadonlySet<string> = new Set(["claim_filed", "claim_intake_saved"]);

@@ -883,6 +883,7 @@ Deno.test("ghl note and callback task: a number from abroad or one noted as said
       delivery_error: null,
       status: "open" as const,
       created_at: "2026-10-13T14:55:00.000Z",
+      caller_name: null,
     };
     const f = facts({ level: "none", callerNumber: "+61491570156", escalations: [rep] });
     const plan = planCaller(f, []);
@@ -954,6 +955,7 @@ Deno.test("ghl note: header, summary redacted and capped, claim block, callback 
     delivery_error: null,
     status: "open" as const,
     created_at: "2026-10-13T14:56:00.000Z",
+    caller_name: null,
   };
   const f = facts({
     intake,
@@ -1000,6 +1002,7 @@ Deno.test("ghl tasks: completed false, assigned to the configured users; callbac
     delivery_error: null,
     status: "open" as const,
     created_at: "2026-10-16T21:30:00.000Z", // a Friday, 5:30 PM Eastern
+    caller_name: null,
   };
   const emergency = { ...rep, id: crypto.randomUUID(), kind: "emergency" as const, reason: "emergency" as const };
   const intake = {

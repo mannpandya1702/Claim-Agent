@@ -206,13 +206,13 @@ Each layer catches a class of bug the one below cannot.
 
 | Suite | Size | Runs against | Catches |
 |---|---|---|---|
-| Unit (`deno task test`) | 898 tests in 33 files, 0 failed, about 13 s | pure modules with every I/O injected through `Deps`; `fake_store.ts` (an in-memory `Store` with Postgres semantics) and `ghl_twin.ts` (an in-memory GoHighLevel that answers as the live API did when probed) | logic, budgets, fallbacks, exact sentence wording, redaction, date parsing, merge rules, GHL step order and retries |
+| Unit (`deno task test`) | 925 tests in 33 files, 0 failed, about 13 s | pure modules with every I/O injected through `Deps`; `fake_store.ts` (an in-memory `Store` with Postgres semantics) and `ghl_twin.ts` (an in-memory GoHighLevel that answers as the live API did when probed) | logic, budgets, fallbacks, exact sentence wording, redaction, date parsing, merge rules, GHL step order and retries |
 | Conformance (inside the unit run) | 48 tests | rendered prompts, assistants, tools and squad | a prompt naming a missing tool, an unfilled placeholder, unspeakable text, `transferCall` on a web assistant, enum drift, an endpointing regex RE2 would refuse, drifted voice or stop settings |
 | Recording link | 13 tests | the `recording-url` handler with injected fetch | staff and row checks before the private key is used |
 | Dashboard | 347 Vitest tests; Playwright smoke with axe | components and pure rules; production build, light and dark, desktop and mobile | UI logic, data-access shape, WCAG 2.1 AA |
-| DB suite (`deno task db:test`) | 31 cases | the live project over the Management API; most are `BEGIN ... ROLLBACK` scripts with `ASSERT`, some commit and clean up | identity ladder in real SQL, 8 concurrent deliveries recording one attempt, 8 concurrent filings filing one claim, a live race of two filings, merge order, grants and RLS from the catalog, the PostgREST mapping of every store method |
+| DB suite (`deno task db:test`) | 32 cases | the live project over the Management API; most are `BEGIN ... ROLLBACK` scripts with `ASSERT`, some commit and clean up | identity ladder in real SQL, 8 concurrent deliveries recording one attempt, 8 concurrent filings filing one claim, a live race of two filings, merge order, grants and RLS from the catalog, the PostgREST mapping of every store method |
 | Smoke (`deno task smoke`) | 25 cases | the deployed function with the real Bearer; each answer compared with the exact sentence; its rows deleted afterwards | a stale deploy, auth, the identity ladder, smuggled arguments, contact capture, claim filing, post-call writers |
-| Persona battery (`deno task battery`) | 45 personas x 3 runs = 135 conversations (cap), at most 519 chat requests | the rendered prompt on a transient assistant over VAPI `/chat`; tools mocked with the real server sentences | tool order and arguments, no disclosure before verification, emergency scoping, injection, social engineering, PII fishing, unbacked promises, line trouble; each `spoken: false` reading checked word for word |
+| Persona battery (`deno task battery`) | 47 personas x 3 runs = 141 conversations (cap), at most 540 chat requests | the rendered prompt on a transient assistant over VAPI `/chat`; tools mocked with the real server sentences | tool order and arguments, no disclosure before verification, emergency scoping, injection, social engineering, PII fishing, unbacked promises, line trouble; each `spoken: false` reading checked word for word |
 | Voice harness (`deno task voice <scenario>`) | 11 scenarios | real VAPI calls over WebSocket with a synthetic caller (Google TTS), both sides recorded | digit, date and spelled-email recognition, endpointing, barge-in, the real end-of-call report and deliveries |
 | Drift (`deno task sync:check`) | every live VAPI object | live org vs the repository, plus invariants | hand edits to the live assistant |
 
@@ -230,10 +230,10 @@ Latest live results:
 
 ```mermaid
 flowchart BT
-    U["Unit: 898 tests, 13 s, every push"] --> K["Conformance: 48, inside the unit run"]
-    K --> D["DB suite: 31 cases on live SQL"]
+    U["Unit: 925 tests, 13 s, every push"] --> K["Conformance: 49, inside the unit run"]
+    K --> D["DB suite: 32 cases on live SQL"]
     D --> S["Smoke: 25 cases on the deployed function"]
-    S --> B["Battery: 45 personas, model behaviour"]
+    S --> B["Battery: 47 personas, model behaviour"]
     B --> V["Voice harness: 11 scenarios, real audio"]
     V --> H["Phone calls: measured with VAPI's logs"]
 ```
@@ -371,7 +371,7 @@ the new curve is open until the next measured call.
 $0.29 to $0.49 on four synthetic voice calls (113 to 174 s) and $0.28 to $0.67 on four phone calls
 (83 to 248 s). Each record stores `cost`, `cost_breakdown` and `latency_avg_ms`.
 Levers in place: `maxTokens: 400`, Turbo v2.5 with streaming optimisation 3,
-`maxDurationSeconds: 900`, and the battery's 135-conversation cap with its wallet probe.
+`maxDurationSeconds: 900`, and the battery's 141-conversation cap with its wallet probe.
 
 ---
 

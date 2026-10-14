@@ -5,6 +5,24 @@ Build history, newest first. Times are UTC. Test counts are `deno task test` at 
 
 ## 2026-10-14
 
+### Callbacks: who to ask for
+An unverified caller's callback request reached the team, and the call record, as "Unknown caller".
+After the request is logged and the team alerted (unchanged), a caller with no verified account, no
+confirmed details and no name on the request is asked once, in place of the sentence's closing
+question: "Who should they ask for?" (`rep_queued` at any target, or `callback_updated`). `escalate`
+takes the answer as `caller_name`, cleaned on the server (letters, spaces, apostrophes, hyphens and full
+stops, 1 to 80 characters; "unknown", "no", numbers and addresses refused), stores it on the escalation
+row and answers `callback_name_saved` ("Thanks, Priya. I've added your name to the request. Anything else
+I can help with?"); a name volunteered with the first request is stored and nothing is asked. A repeat
+never pages again, a replay keeps its words, and a decline is never asked again. The post-call
+`caller_name` takes the name after a verified or confirmed one and before the analysis' guess, never next
+to an account the caller did not verify; the callback email, the SLA re-alert email and the dashboard
+card show "Ask for" (never the Telegram card). `0012_callback_caller_name.sql` adds
+`escalations.caller_name` and `p_caller_name` on `upsert_escalation`. Battery personas `callback-name` and
+`callback-name-declined`: 8 personas live, 6 of 8 on the first run; the decline ended the call without
+the "anything else" check the name question had displaced, so the rule now says to check once, and `f4`
+failed on the known filler read; both passed on rerun. 925 tests.
+
 ### Callbacks: live battery
 Battery over the callback and escalation personas, one run each: 11 of 14 passed on the first run. Asked
 "I'm calling from Australia ... call me back on this number", the model passed `+61` as the callback

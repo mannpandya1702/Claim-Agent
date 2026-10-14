@@ -405,7 +405,7 @@ How the record is built (`buildInteractionRow`, a pure function):
 |---|---|
 | `outcome` | Emergency row (`emergency`) > representative escalation or transfer (`escalated`) > filed claim intake (`resolved`) > locked session (`auth_failed`) > never verified with at least one miss and no match (`not_found`) > verified with a status read (`resolved`); then a silence or max-duration end (`abandoned`); then the analysis outcome; then `resolved` if the caller spoke, else `abandoned` |
 | `call_reason` | Server facts (emergency row, filed intake) > structured output > derived from tool results; a weaker source never replaces a stronger one; null rather than invented |
-| `caller_name` | Verified customer's name > confirmed captured name > the analysis' name; the last two never next to an unverified account match; else "Unknown caller" |
+| `caller_name` | Verified customer's name > confirmed captured name > the name given for a callback (`escalations.caller_name`) > the analysis' name; the last three never next to an unverified account match; else "Unknown caller" |
 | `caller_type` | `existing` (the session reached an account), `new` (a new-caller contact was captured) or `unknown` |
 | `sentiment` | VAPI analysis > structured output > backfill; else NULL with `analysis_status = missing` |
 | `flags` | Five evidence-first flags, each needing what the agent said and a missing server fact: `promised_callback_without_escalation`, `status_read_without_verified_identity`, `tool_markup_spoken`, `email_promised_without_send`, `claim_promised_without_filing` |
@@ -477,6 +477,7 @@ migration is never edited; changes go in a new file.
 | `0009_review_fixes.sql` | A changed callback number needs a new confirmation; `file_claim_intake_once` returns `filed_now` |
 | `0010_lookup_retries.sql` | `lookup_numbers`; lookups counted by distinct number |
 | `0011_intl_callbacks.sql` | A callback number from abroad or noted as said passes the `caller_contacts` CHECK; masked columns say `+1` only for a number stored with its `+1` |
+| `0012_callback_caller_name.sql` | `escalations.caller_name` (1 to 80 characters), who to ask for on a callback; `upsert_escalation` takes `p_caller_name` (a newer name replaces an older one) and returns it |
 
 Tables not covered in section 7.1:
 

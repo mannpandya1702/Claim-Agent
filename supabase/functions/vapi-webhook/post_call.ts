@@ -49,6 +49,7 @@ import type {
   Customer,
   Deps,
   Env,
+  EscalationRow,
   InteractionRow,
   Session,
   Store,
@@ -420,6 +421,13 @@ function structuredCallerName(message: VapiMessage): string | null {
   return firstOf(values, callerNameOf);
 }
 
+/** The name the caller gave for a callback, stored on the representative escalation row, under the same
+ *  checks as the analysis' name (a stored name passed them already; a row edited by hand might not). */
+function escalationCallerName(escalations: EscalationRow[]): string | null {
+  const row = escalations.find((e) => e.kind === "representative" && typeof e.caller_name === "string");
+  return row ? callerNameOf(row.caller_name) : null;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Numbers.
 // ---------------------------------------------------------------------------------------------
@@ -559,16 +567,18 @@ export function buildInteractionRow(
   // would most likely be that account holder's name.
   const candidateUnverified = !customer && session?.candidate_customer_id != null;
   const contact = facts.contact ?? null;
-  // The name the caller gave and confirmed on the read-back comes before the analysis' guess, under
+  // The name the caller gave and confirmed on the read-back comes before the analysis' guess, and so
+  // does the name they gave for a callback (escalate's caller_name, on the escalation row), all under
   // the same guard: never next to an account the caller did not verify.
   const confirmed = contact?.confirmed === true ? contact : null;
   const capturedName = confirmed && !candidateUnverified
     ? `${confirmed.first_name} ${confirmed.last_name}`.replace(/\s+/g, " ").trim() || null
     : null;
+  const callbackName = candidateUnverified ? null : escalationCallerName(facts.escalations ?? []);
   const givenName = candidateUnverified ? null : structuredCallerName(message);
   const callerName = customer
     ? `${customer.first_name} ${customer.last_name}`.trim() || UNKNOWN_CALLER
-    : capturedName ?? givenName ?? UNKNOWN_CALLER;
+    : capturedName ?? callbackName ?? givenName ?? UNKNOWN_CALLER;
   const callerId = callerIdNumber(obj(call.customer).number ?? obj(message.customer).number, ownNumberList);
 
   const summaryText = str(analysis.summary) ?? str(message.summary);

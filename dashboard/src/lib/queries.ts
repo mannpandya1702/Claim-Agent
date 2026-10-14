@@ -311,7 +311,7 @@ export async function saveStaffNotes(id: string, notes: string): Promise<string 
 
 /** The queue's columns: the masked callback number only; the call page reads the full one. */
 export const ESCALATION_LIST_COLUMNS =
-  "id,call_key,kind,reason,details,callback_phone_masked,channel,verified,callback_source,alert_status,delivery_error,status,claimed_by,claimed_at,closed_by,closed_at,close_note,realerted_at,created_at,updated_at";
+  "id,call_key,kind,reason,details,callback_phone_masked,channel,verified,callback_source,alert_status,delivery_error,status,claimed_by,claimed_at,closed_by,closed_at,close_note,realerted_at,created_at,updated_at,caller_name";
 
 export async function fetchEscalations(status: EscalationStatus | "all" = "all"): Promise<EscalationListRow[]> {
   let q = supabase.from("escalations").select(ESCALATION_LIST_COLUMNS);

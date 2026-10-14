@@ -207,6 +207,7 @@ export const CODES = [
   "rep_queued",
   "rep_queued_no_number",
   "callback_updated",
+  "callback_name_saved",
   "rep_recorded",
   "rep_already_queued",
   "rep_unavailable",

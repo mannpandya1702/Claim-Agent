@@ -96,7 +96,12 @@ function attempt(callKey: string, tool: string, kind: AttemptRow["kind"], code: 
   };
 }
 
-function escalation(callKey: string, kind: EscalationRow["kind"], alert: EscalationRow["alert_status"] = "sent") {
+function escalation(
+  callKey: string,
+  kind: EscalationRow["kind"],
+  alert: EscalationRow["alert_status"] = "sent",
+  callerName: string | null = null,
+) {
   return {
     id: crypto.randomUUID(),
     call_key: callKey,
@@ -111,6 +116,7 @@ function escalation(callKey: string, kind: EscalationRow["kind"], alert: Escalat
     delivery_error: null,
     status: "open",
     created_at: "2026-10-12T15:02:30.000Z",
+    caller_name: callerName,
   } satisfies EscalationRow;
 }
 
@@ -2193,4 +2199,117 @@ Deno.test("status-update forwarding: a contact from caller id, or a failed conta
     const [row] = store.tables.escalations;
     assertEquals([row.callback_phone, row.callback_source], ["+16025550104", "caller_id"], `failRead=${failRead}`);
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The name a caller gave for a callback (escalations.caller_name, 0012) in the post-call record.
+// ---------------------------------------------------------------------------------------------
+Deno.test("name chain: the name given for a callback comes after a confirmed one and before the analysis' guess", () => {
+  const message = fixture("not_found");
+  // the analysis guessed the caller's name; the escalation row holds the name they gave for the callback
+  assertEquals(message.analysis.structuredData.caller_name, "Dana");
+  const callback = (name: string | null): PostCallFacts => ({
+    ...newCallerFacts(null),
+    escalations: [escalation(NOT_FOUND_ID, "representative", "sent", name)],
+  });
+  const row = buildInteractionRow(message, callback("Priya"));
+  assertEquals([row.caller_name, row.caller_type, row.customer_id, row.caller_email], ["Priya", "unknown", null, null]);
+  // a first and last name, and an accented one, as stored
+  assertEquals(buildInteractionRow(message, callback("Ren\u00e9e Okafor")).caller_name, "Ren\u00e9e Okafor");
+  // none on the row: the analysis' name, as before
+  assertEquals(buildInteractionRow(message, callback(null)).caller_name, "Dana");
+  // a row edited by hand to hold a placeholder or a number is no name either
+  for (const junk of ["unknown", "Unknown caller", "{{name}}", "602-555-0101", "  "]) {
+    assertEquals(buildInteractionRow(message, callback(junk)).caller_name, "Dana", junk);
+  }
+  // only the representative row: an emergency row never carries one
+  const emergency: PostCallFacts = {
+    ...newCallerFacts(null),
+    escalations: [escalation(NOT_FOUND_ID, "emergency", "sent", "Priya")],
+  };
+  assertEquals(buildInteractionRow(message, emergency).caller_name, "Dana");
+  // nothing anywhere: Unknown caller
+  const bare = fixture("not_found");
+  bare.analysis = {};
+  bare.artifact.structuredOutputs = {};
+  assertEquals(buildInteractionRow(bare, callback(null)).caller_name, UNKNOWN_CALLER);
+  assertEquals(buildInteractionRow(bare, callback("Priya")).caller_name, "Priya");
+});
+
+Deno.test("name chain: a verified customer, then a confirmed contact, come before the name given for a callback", () => {
+  const verified = buildInteractionRow(fixture("full"), {
+    ...verifiedFacts(),
+    escalations: [escalation(FULL_ID, "representative", "sent", "Priya")],
+  });
+  assertEquals([verified.caller_name, verified.customer_id], ["Tobias Halvorsen", TOBIAS.id]);
+  const captured = buildInteractionRow(fixture("not_found"), {
+    ...newCallerFacts(contact(NOT_FOUND_ID)),
+    escalations: [escalation(NOT_FOUND_ID, "representative", "sent", "Priya")],
+  });
+  assertEquals([captured.caller_name, captured.caller_type], ["Jane Doe", "new"]);
+  // an unconfirmed capture contributes nothing: the callback name stands
+  const unconfirmed = buildInteractionRow(fixture("not_found"), {
+    ...newCallerFacts(contact(NOT_FOUND_ID, { confirmed: false, confirmed_at: null })),
+    escalations: [escalation(NOT_FOUND_ID, "representative", "sent", "Priya")],
+  });
+  assertEquals(unconfirmed.caller_name, "Priya");
+});
+
+Deno.test("name chain: a callback name next to an account the caller looked up but did not verify is not used", () => {
+  const message = fixture("auth_failed");
+  const id = message.call!.id!;
+  const facts_ = (level: Session["level"]): PostCallFacts => ({
+    ...facts({
+      session: session(id, level, SLOANE.id),
+      attempts: [
+        attempt(id, "lookup_customer", "lookup_hit", "needs_dob"),
+        attempt(id, "verify_identity", "dob_wrong", "auth_failed"),
+        attempt(id, "verify_identity", "dob_wrong", "locked"),
+      ],
+      escalations: [escalation(id, "representative", "sent", "Sloane")],
+    }),
+    contact: null,
+  });
+  // locked after the lookup matched an account: the name they gave would most likely be that account
+  // holder's, so the record says Unknown caller (the escalation row still tells staff who to ask for)
+  for (const level of ["locked", "phone_found"] as const) {
+    const row = buildInteractionRow(message, facts_(level));
+    assertEquals([row.caller_name, row.customer_id, row.caller_phone], [UNKNOWN_CALLER, null, null], level);
+    assertFalse(JSON.stringify([row.caller_name, row.caller_email]).includes("Sloane"), level);
+  }
+});
+
+Deno.test("eocr: the name given for a callback lands in the stored row and the call log mirror", async () => {
+  const { store, deps, calls, settle } = harness({
+    env: { AIRTABLE_TOKEN: "pat_test", AIRTABLE_BASE_ID: "appTEST" },
+  });
+  for (const id of ["t1", "t2"]) {
+    await store.lookupCustomerAttempt({
+      callKey: NOT_FOUND_ID,
+      channel: "webCall",
+      phoneE164: "+16025550199",
+      toolCallId: id,
+      callerNumber: null,
+    });
+  }
+  const escalation = {
+    callKey: NOT_FOUND_ID,
+    kind: "representative" as const,
+    reason: "not_found" as const,
+    details: null,
+    callbackPhone: "+16025550177",
+    callbackSource: "argument" as const,
+    channel: "webCall",
+    verified: false,
+  };
+  await store.upsertEscalation(escalation);
+  await store.upsertEscalation({ ...escalation, callbackPhone: null, callbackSource: "none", callerName: "Priya" });
+  const out = await onEndOfCallReport(fixture("not_found"), deps, { backfillDelaysMs: ZEROS });
+  assertEquals(out.status, 200);
+  await settle();
+  const row = interaction(store, NOT_FOUND_ID);
+  assertEquals([row.caller_name, row.caller_type, row.outcome, row.escalated], ["Priya", "unknown", "escalated", true]);
+  const airtable = calls.filter((c) => c.url.startsWith("https://api.airtable.com/"));
+  assertEquals(airtable.length, 1);
+  assertEquals(JSON.parse(String(airtable[0].init.body)).records[0].fields["Caller Name"], "Priya");
 });

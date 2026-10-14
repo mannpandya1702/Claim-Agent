@@ -43,6 +43,7 @@ function esc(over: Partial<Escalation> = {}): Escalation {
     closed_at: null,
     close_note: null,
     realerted_at: null,
+    caller_name: null,
     created_at: "2026-10-12T14:50:00Z",
     updated_at: "2026-10-12T14:50:00Z",
     ...over,
@@ -113,6 +114,27 @@ describe("EscalationCard", () => {
   it("shows the delivery error when a channel failed", () => {
     renderCard(esc({ alert_status: "failed", delivery_error: "telegram: 401 Unauthorized" }));
     expect(screen.getByRole("note")).toHaveTextContent("Delivery error: telegram: 401 Unauthorized");
+  });
+
+  it("shows who to ask for when the caller gave a name, on the call page and in the queue", () => {
+    const named = esc({ verified: false, callback_source: "caller_id", caller_name: "Priya Raman" });
+    const { unmount } = renderCard(named);
+    const askFor = screen.getByText("Ask for").parentElement!;
+    expect(within(askFor).getByText("Priya Raman")).toBeInTheDocument();
+    expect(within(askFor).getByText("Given by caller, not verified")).toBeInTheDocument();
+    expect(screen.getByText("Not verified")).toBeInTheDocument();
+    unmount();
+    // the queue's masked row carries the name too (it is no phone number)
+    renderCard({ ...named, callback_phone: undefined }, "staff@example.com", { maskCallback: true });
+    expect(within(screen.getByText("Ask for").parentElement!).getByText("Priya Raman")).toBeInTheDocument();
+  });
+
+  it("shows no ask-for line without a name", () => {
+    for (const caller_name of [null, "", "   "]) {
+      const { unmount } = renderCard(esc({ caller_name }));
+      expect(screen.queryByText("Ask for")).not.toBeInTheDocument();
+      unmount();
+    }
   });
 
   it("claims through claim_escalation and tells the second claimer who got there first", async () => {

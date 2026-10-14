@@ -324,6 +324,150 @@ export function normaliseName(raw: unknown): string | null {
   return s === s.toLowerCase() || s === s.toUpperCase() ? titleCase(s) : s;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The name a caller gives for a callback (escalate's caller_name, stored on the escalation row by
+// 0012_callback_caller_name.sql): who the claims team should ask for when they call back.
+// ---------------------------------------------------------------------------------------------
+/** Longest name a callback request stores (the CHECK on escalations.caller_name). */
+export const MAX_CALLER_NAME_CHARS = 80;
+
+/** The name a caller gave for a callback (escalate's caller_name) as it is stored, or null. Trimmed with
+ *  its spaces collapsed, curly apostrophes and dashes made plain, a lead-in such as "it's" or "my name is"
+ *  dropped, and a sentence's closing full stop too ("Priya." but not "J.R."). Letters (accented ones
+ *  included), spaces, apostrophes, hyphens and full stops only, 1 to 80 characters and at most five words.
+ *  Refused: anything with a digit or another symbol (a phone number, an email address), and words that only
+ *  say there is no name ("unknown", "no", "none", "rather not say", a title on its own). An all-lower or
+ *  all-upper name is title-cased, as normaliseName does. Self-contained (no references outside the
+ *  function), so the chat battery's mock tools can run this very function. */
+export function normaliseCallerName(raw: unknown): string | null {
+  if (typeof raw !== "string" || raw.length > 200) return null;
+  const s = raw.normalize("NFC")
+    .replace(/[\u2018\u2019\u02bc`]/g, "'")
+    .replace(/[\u2010-\u2015]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(
+      /^(?:it's|it is|this is|my name is|my name's|name's|i'm|i am|call me|ask for|just ask for|they can ask for)\s+/i,
+      "",
+    )
+    .replace(/\s*([-'])\s*/g, "$1")
+    .replace(/(\p{L}{3})\.+$/u, "$1");
+  const length = [...s].length;
+  if (length < 1 || length > 80 || !/^[\p{L}\p{M}' .-]+$/u.test(s) || !/\p{L}/u.test(s)) return null;
+  const words = s.split(" ");
+  // more words than a name has, or an email address said aloud ("priya at example dot com")
+  if (words.length > 5 || /\bat\b.*\bdot\b/i.test(s)) return null;
+  // Words that only say there is no name, or decline to give one, or point at a number instead, and
+  // titles with no name after them.
+  const empty = new Set([
+    "on",
+    "in",
+    "of",
+    "the",
+    "this",
+    "same",
+    "number",
+    "phone",
+    "use",
+    "your",
+    "here",
+    "now",
+    "later",
+    "back",
+    "good",
+    "great",
+    "nothing",
+    "else",
+    "bye",
+    "hello",
+    "hi",
+    "unknown",
+    "no",
+    "none",
+    "nope",
+    "nah",
+    "nobody",
+    "noone",
+    "anonymous",
+    "anon",
+    "name",
+    "not",
+    "given",
+    "provided",
+    "declined",
+    "caller",
+    "customer",
+    "rather",
+    "say",
+    "prefer",
+    "to",
+    "skip",
+    "pass",
+    "thanks",
+    "thank",
+    "you",
+    "just",
+    "call",
+    "me",
+    "null",
+    "undefined",
+    "unspecified",
+    "unavailable",
+    "dont",
+    "know",
+    "doesnt",
+    "matter",
+    "whatever",
+    "anyone",
+    "anybody",
+    "it",
+    "its",
+    "is",
+    "my",
+    "i",
+    "id",
+    "im",
+    "would",
+    "want",
+    "tell",
+    "that",
+    "thats",
+    "fine",
+    "ok",
+    "okay",
+    "sure",
+    "yes",
+    "yeah",
+    "please",
+    "test",
+    "user",
+    "mr",
+    "mrs",
+    "ms",
+    "miss",
+    "mx",
+    "dr",
+    "sir",
+    "madam",
+    "maam",
+  ]);
+  const plain = words.map((w) => w.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/[.'-]/g, ""));
+  if (plain.every((w) => w === "" || empty.has(w))) return null;
+  return s === s.toLowerCase() || s === s.toUpperCase()
+    ? s.toLowerCase().replace(/(^|[' .-])(\p{L})/gu, (_m, sep: string, ch: string) => sep + ch.toUpperCase())
+    : s;
+}
+
+/** The part of a stored caller name a sentence thanks them by: the first word ("Priya" of "Priya Raman"),
+ *  or a title with the word after it ("Dr. Shah"), without a closing full stop ("J.R." -> "J.R"). "" when
+ *  there is no name. */
+export function callerFirstName(name: unknown): string {
+  const words = typeof name === "string" ? name.trim().split(/\s+/).filter(Boolean) : [];
+  if (words.length === 0) return "";
+  const title = /^(mr|mrs|ms|miss|mx|dr|sir)\.?$/i.test(words[0]) && words.length > 1;
+  return (title ? `${words[0]} ${words[1]}` : words[0]).replace(/\.+$/, "");
+}
+
 /** Last four digits for logs and sentences; never more. */
 export function lastFour(e164: string): string {
   return typeof e164 === "string" ? e164.replace(/\D/g, "").slice(-4) : "";

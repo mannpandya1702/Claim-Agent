@@ -216,6 +216,21 @@ Deno.test("parseToolRequest: placeholder values are refused", () => {
   assert(parseToolRequest("escalate", { details: "caller says the status is unknown to them" }).ok);
 });
 
+Deno.test("parseToolRequest: escalate screens its own caller_name; a placeholder elsewhere is still refused", () => {
+  // "unknown" there is a caller who gave no name: the tool stores only a real one (normaliseCallerName)
+  for (const v of ["unknown", "Unknown", "null", "{{caller_name}}"]) {
+    const r = parseToolRequest("escalate", { reason: "representative_requested", caller_name: v });
+    assert(r.ok, JSON.stringify(v));
+    assertEquals(r.args, { reason: "representative_requested", caller_name: v });
+  }
+  const both = parseToolRequest("escalate", { caller_name: "unknown", details: "{{details}}" });
+  assert(!both.ok);
+  assertEquals(both.reason, "placeholder_value:details");
+  // only escalate's, and only that field
+  assert(!parseToolRequest("capture_contact", { first_name: "unknown", last_name: "Doe" }).ok);
+  assert(!parseToolRequest("send_info_email", { topic: "claim_summary", caller_name: "unknown" }).ok);
+});
+
 Deno.test("parseToolRequest: unparseable arguments are refused", () => {
   const r = parseToolRequest("lookup_customer", null);
   assert(!r.ok);

@@ -4,7 +4,7 @@
   "function": {
     "name": "escalate",
     "strict": false,
-    "description": "Record a request for a claims representative to call the caller back, and alert the claims team. Use it for a request for a person unless your instructions say to transfer, for a yes to a callback that a sentence offered, and after a transfer did not connect. Call it again with callback_phone when its sentence asked for a number. Its result is the sentence for the caller: already spoken, or read out word for word when spoken is false.",
+    "description": "Record a request for a claims representative to call the caller back, and alert the claims team. Use it for a request for a person unless your instructions say to transfer, for a yes to a callback that a sentence offered, and after a transfer did not connect. Call it again with callback_phone when its sentence asked for a number, and with caller_name when it asked who they should ask for. Its result is the sentence for the caller: already spoken, or read out word for word when spoken is false.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -24,6 +24,10 @@
         "callback_phone": {
           "type": "string",
           "description": "Only when the caller just gave a number to be called back on, or a new caller gave one with their details: the number exactly as they said it, digits only, with a leading + and the country code if they gave one. A number from any country and of any length is taken: never reject or question one for either. Never a country code on its own, or one worked out from a country they mention: when they ask to be called back on the number they are calling from, leave it out."
+        },
+        "caller_name": {
+          "type": "string",
+          "description": "The name the caller gave for the callback, exactly as they said it: a first name, or first and last. Only a name they said on this call; never guessed and never taken from an account they did not verify."
         }
       },
       "required": [

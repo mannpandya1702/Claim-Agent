@@ -154,6 +154,8 @@ export function EscalationCard({
   // number wherever the phone is, so it shows as text with a note that the country is still to be found.
   const dialable = !maskCallback && isDialable(fullCallback);
   const asSaid = !maskCallback && isAsSaid(fullCallback);
+  // Who to ask for on the callback: the name the caller gave when asked (or volunteered), never verified.
+  const askFor = e.caller_name?.trim() || null;
 
   return (
     <article
@@ -197,6 +199,15 @@ export function EscalationCard({
 
       {/* Sized by the card, not the viewport: it sits in a narrow column on the call page. */}
       <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2.5 text-sm @[17rem]:grid-cols-2">
+        {askFor && (
+          <div className="min-w-0 @[17rem]:col-span-2">
+            <dt className="text-xs text-ink-3">Ask for</dt>
+            <dd className="mt-0.5 break-words font-medium text-ink-1">
+              {askFor}
+              <span className="block text-xs font-normal text-ink-3">Given by caller, not verified</span>
+            </dd>
+          </div>
+        )}
         <div className="min-w-0">
           <dt className="text-xs text-ink-3">Callback number</dt>
           <dd className="mt-0.5">

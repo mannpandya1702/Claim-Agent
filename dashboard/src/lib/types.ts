@@ -225,6 +225,8 @@ export interface Escalation {
   realerted_at: string | null;
   created_at: string;
   updated_at: string;
+  /** Who to ask for on the callback: the name the caller gave, as they said it (0012); never verified. */
+  caller_name: string | null;
 }
 
 /** An escalation as the queue reads it: the full callback number stays on the call page. */

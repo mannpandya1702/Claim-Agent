@@ -732,12 +732,20 @@ export function createFakeStore(
 
     upsertEscalation(p) {
       const source = p.callbackSource ?? "none";
+      const callerName = p.callerName ?? null;
       checkIn("escalations", "kind", p.kind, ESCALATION_KINDS);
       checkIn("escalations", "reason", p.reason, ESCALATION_REASONS);
       checkIn("escalations", "callback_source", source, CALLBACK_SOURCES);
       notNull("escalations", "kind", p.kind);
       notNull("escalations", "reason", p.reason);
       notNull("escalations", "channel", p.channel);
+      // escalations_caller_name_check (0012): 1 to 80 characters when set
+      if (
+        callerName !== null &&
+        (typeof callerName !== "string" || [...callerName].length < 1 || [...callerName].length > 80)
+      ) {
+        throw dbError("23514", 'new row for relation "escalations" violates check constraint on caller_name');
+      }
 
       const existing = tables.escalations.find((e) => e.call_key === p.callKey && e.kind === p.kind);
       if (!existing) {
@@ -763,25 +771,35 @@ export function createFakeStore(
           realerted_at: null,
           created_at: at,
           updated_at: at,
+          caller_name: callerName,
         };
         tables.escalations.push(row);
-        return { id: row.id, inserted: true, callbackPhone: row.callback_phone, alertStatus: row.alert_status };
+        return {
+          id: row.id,
+          inserted: true,
+          callbackPhone: row.callback_phone,
+          alertStatus: row.alert_status,
+          callerName: row.caller_name,
+        };
       }
 
-      // A repeat merges only a newly supplied number (with its source), fills details, ORs verified;
-      // reason, channel and delivery state stay as first written.
+      // A repeat merges only a newly supplied number (with its source), fills details, ORs verified,
+      // and takes a newly supplied caller name over an older one; reason, channel and delivery state
+      // stay as first written.
       if (p.callbackPhone !== null) {
         existing.callback_phone = p.callbackPhone;
         existing.callback_source = source;
       }
       existing.details = p.details ?? existing.details;
       existing.verified = existing.verified || (p.verified ?? false);
+      existing.caller_name = callerName ?? existing.caller_name ?? null;
       existing.updated_at = nowIso();
       return {
         id: existing.id,
         inserted: false,
         callbackPhone: existing.callback_phone,
         alertStatus: existing.alert_status,
+        callerName: existing.caller_name,
       };
     },
 
@@ -813,6 +831,7 @@ export function createFakeStore(
           delivery_error: e.delivery_error,
           status: e.status,
           created_at: e.created_at,
+          caller_name: e.caller_name ?? null,
         }));
     },
 

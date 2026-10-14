@@ -129,6 +129,7 @@ export interface EscalationRow {
   delivery_error: string | null;
   status: EscalationStatus;
   created_at: string;
+  caller_name: string | null; // who to ask for on the callback, as the caller gave it (0012); never verified
 }
 
 export interface EmailRow {
@@ -328,6 +329,7 @@ export interface Store {
   setAttemptCode(callKey: string, toolCallId: string, code: string): Promise<void>;
   listAttempts(callKey: string): Promise<AttemptRow[]>;
 
+  // upsert_escalation (0001, 0012): a repeat merges each non-null value; a newer caller name replaces an older one.
   upsertEscalation(p: {
     callKey: string;
     kind: EscalationKind;
@@ -337,7 +339,10 @@ export interface Store {
     callbackSource: CallbackSource;
     channel: string;
     verified: boolean;
-  }): Promise<{ id: string; inserted: boolean; callbackPhone: string | null; alertStatus: AlertStatus }>;
+    callerName?: string | null; // already normalised (identity.ts normaliseCallerName)
+  }): Promise<
+    { id: string; inserted: boolean; callbackPhone: string | null; alertStatus: AlertStatus; callerName: string | null }
+  >;
   setEscalationDelivery(id: string, alertStatus: AlertStatus, deliveryError: string | null): Promise<void>;
   listEscalations(callKey: string): Promise<EscalationRow[]>;
 

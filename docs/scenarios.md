@@ -112,16 +112,19 @@ Automated: smoke `happy-path`, `verify-intent-status`, `status-details`; battery
 | "Sorry, June third, nineteen eighty-four." | Filler, then `locked`: "I'm sorry, but I'm not able to verify your identity on this call, so I can't share claim details. I can have a representative call you back, or you can call back with your policy number handy. Which would you prefer?" |
 | "Can you just tell me where my claim is at?" | Declines, says nothing about the account (not even the name), offers the callback again |
 | "Okay, have someone call me back." | Filler, then `rep_queued_no_number`: "Done, I've sent your request to our claims team. What's the best number for a representative to reach you?" |
-| "Six zero two, five five five, zero one seven seven." | Filler, then `callback_updated`: "Got it, six zero two, five five five, zero one seven seven. Anything else I can help with?" |
+| "Six zero two, five five five, zero one seven seven." | Filler, then `callback_updated`, which asks for the name the team does not have: "Got it, six zero two, five five five, zero one seven seven. Who should they ask for?" |
+| "Tobias." | Filler, then `callback_name_saved`: "Thanks, Tobias. I've added your name to the request. Anything else I can help with?" |
 
 A web call has no caller ID and an unverified caller's account number is never used, hence the
-question. Variants: after the lock Ava does not retry a DOB, and SQL would still answer `locked`.
+question. The name is asked once and goes on the escalation ("Ask for: Tobias" on its card), never on
+the call record: next to an account the caller did not verify it is a claim, not an identity. A caller
+who would rather not say is not asked again. Variants: after the lock Ava does not retry a DOB, and SQL would still answer `locked`.
 A loss reported after the lock gets `claim_locked` ("Since I wasn't able to verify your identity, I
 can't file a claim on this call. ..."). Declining the callback leaves outcome `auth_failed`.
 
 | Check | Expected |
 |---|---|
-| Call detail | Identity path ends at Locked; tools `needs_dob`, `auth_failed`, `locked`, `rep_queued_no_number`, `callback_updated`. Escalation reason `auth_locked` (derived from the session, whatever the model passed), verified false, callback source `argument`. Caller `Unknown caller`, outcome `escalated`. `attempts` holds one row per `toolCallId`, so a VAPI retry replays the stored code instead of counting again |
+| Call detail | Identity path ends at Locked; tools `needs_dob`, `auth_failed`, `locked`, `rep_queued_no_number`, `callback_updated`, `callback_name_saved`. Escalation reason `auth_locked` (derived from the session, whatever the model passed), verified false, callback source `argument`, ask for `Tobias`. Caller `Unknown caller`, outcome `escalated`. `attempts` holds one row per `toolCallId`, so a VAPI retry replays the stored code instead of counting again |
 | Telegram | `UNVERIFIED: do not disclose claim details`, then `[Observe Claims] representative \| auth_locked \| normal` |
 | Team email | `Callback requested: call <short id>`, UNVERIFIED banner, "Identity verified: No", the callback number |
 | Airtable, GoHighLevel | `Unknown caller`, Caller Phone empty, Outcome `escalated`, Escalated checked. GoHighLevel skipped (`web_unverified`) |
@@ -161,8 +164,10 @@ Web, as Ronan:
 
 Phone: +1 520 521 0277 runs Observe Claims Web with no transfer number, so escalation is a callback.
 Unverified, "Hi, I'd like to speak to a representative, please." gets no verification and no "why",
-then `rep_queued` "at the number you're calling from". Ronan on the phone still hears "at the number
-on your account": a verified number outranks caller ID, and `OWN_NUMBERS` are never a target.
+then `rep_queued` "at the number you're calling from", closing on "Who should they ask for?" (the name
+they give goes on the request: `callback_name_saved`). Ronan on the phone still hears "at the number
+on your account", and is never asked his name: a verified number outranks caller ID, and `OWN_NUMBERS`
+are never a target.
 
 "I've passed this" needs Telegram or the team email to confirm delivery; otherwise `rep_recorded`:
 "Okay, I've recorded your request. Anything else I can help with?" Then press Claim and Mark done in
@@ -179,7 +184,8 @@ only browser write path.
 
 The calling number stays on the escalation row and in the team email until the next reset.
 
-Automated: battery `f4`, `escalation-unverified`, `ghost` (no promise without delivery); voice
+Automated: battery `f4`, `escalation-unverified`, `callback-name`, `callback-name-declined`, `ghost` (no
+promise without delivery); voice
 `escalation`; `escalate_test.ts` for the callback targets and the `OWN_NUMBERS` guard.
 
 ## 5. Claim intake, verified customer
@@ -272,7 +278,8 @@ Automated: battery `emergency`, `emergency-cut-off`, `emergency-neg-accident`, `
 
 "Will my premium go up because of my claim?" The Web assistant may run `faq_search` first, then says
 "That's something a claims representative would need to answer." and offers a callback once (rule
-10). A yes gives `rep_queued_no_number`, then `callback_updated`. Coverage decisions, payments and
+10). A yes gives `rep_queued_no_number`, then `callback_updated` with the name question, and
+`callback_name_saved` once they say a name. Coverage decisions, payments and
 legal advice work the same way, and a caller who starts reading a card or Social Security number is
 stopped. Check: escalation reason `unsupported_question`, verified false, Telegram with the
 UNVERIFIED line, outcome `escalated`. A declined callback leaves no server fact, so the outcome

@@ -948,14 +948,75 @@ Deno.test("loadEscalationContact: the caller and the escalation's own callback n
       email: "jane.doe@gmail.com",
     },
     callbackPhone: "+16025550177",
+    askFor: null,
   });
   assertEquals(
     (await loadEscalationContact(store, CALL_KEY, "emergency")).callbackPhone,
     null,
   );
+  // the name the caller gave for the callback, from the escalation row
+  await store.upsertEscalation({
+    callKey: CALL_KEY,
+    kind: "representative",
+    reason: "not_found",
+    details: null,
+    callbackPhone: null,
+    callbackSource: "none",
+    channel: "webCall",
+    verified: false,
+    callerName: "Priya",
+  });
+  assertEquals((await loadEscalationContact(store, CALL_KEY, "representative")).askFor, "Priya");
+  assertEquals((await loadEscalationContact(store, CALL_KEY, "emergency")).askFor, null);
   store.failNext("listEscalations");
   const failed = await loadEscalationContact(store, CALL_KEY, "representative");
-  assertEquals([failed.callbackPhone, failed.caller.name], [null, "Jane Doe"]);
+  assertEquals([failed.callbackPhone, failed.askFor, failed.caller.name], [null, null, "Jane Doe"]);
+});
+
+Deno.test("team emails: the name to ask for, as the caller gave it, only when there is one", () => {
+  const callback = callbackRequestEmail({
+    callKey: CALL_KEY,
+    reason: "representative_requested",
+    verified: false,
+    callbackPhone: "+16025550177",
+    details: null,
+    channel: "inboundPhoneCall",
+    askFor: "Ren\u00e9e O'Brien",
+  });
+  assertAsciiTemplate(callback);
+  // escaped and ASCII-only, labelled as the caller's own word for it
+  assertStringIncludes(callback.html, "Ask for");
+  assertStringIncludes(callback.html, "Ren&#233;e O&#39;Brien (caller-provided, unverified)");
+  // the caller's identity stays unknown: the name to ask for is not an identity
+  assertMatch(callback.html, /Caller name<\/th><td[^>]*>Unknown caller</);
+  for (const askFor of [undefined, null, "", "   "]) {
+    const plain = callbackRequestEmail({
+      callKey: CALL_KEY,
+      reason: "representative_requested",
+      verified: false,
+      callbackPhone: null,
+      details: null,
+      channel: "webCall",
+      askFor,
+    });
+    assertFalse(plain.html.includes("Ask for"), JSON.stringify(askFor));
+  }
+  const realert = slaRealertEmail({
+    callKey: CALL_KEY,
+    kind: "representative",
+    reason: "representative_requested",
+    minutesOpen: 31,
+    caller: { name: null, nameSource: null, email: null },
+    callbackPhone: "+16025550177",
+    askFor: "Priya",
+  });
+  assertAsciiTemplate(realert);
+  assertStringIncludes(realert.html, "Ask for");
+  assertStringIncludes(realert.html, "Priya (caller-provided, unverified)");
+  assertFalse(
+    slaRealertEmail({ callKey: CALL_KEY, kind: "emergency", reason: "emergency", minutesOpen: 31 }).html
+      .includes("Ask for"),
+  );
 });
 
 // ---------------------------------------------------------------------------------------------

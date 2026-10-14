@@ -4,7 +4,7 @@
 // notifying anyone and queueing what the call log is missing, and the outbox's at-least-once
 // delivery to Airtable with its lease, attempt cap and deadline. No network.
 
-import { assert, assertEquals, assertFalse, assertRejects, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertFalse, assertMatch, assertRejects, assertStringIncludes } from "@std/assert";
 import { createFakeStore, type FakeStore } from "./fake_store.ts";
 import { isJobName, periodKey, runJob } from "./jobs.ts";
 import { deliverOutbox, deliverSoon } from "./outbox.ts";
@@ -372,6 +372,43 @@ Deno.test("sla: a failed contact read still sends the re-alert, without the call
   assertStringIncludes(email.subject, "Still unclaimed after 31 minutes");
   assertStringIncludes(email.html, "Unknown caller");
   assertStringIncludes(email.html, "None known (check the dashboard)");
+  assertFalse(email.html.includes("Ask for"));
+});
+
+Deno.test("sla: the re-alert email says who to ask for when the caller gave a name; the Telegram card does not", async () => {
+  const h = harness();
+  await h.store.ensureSession(CALL_A, "inboundPhoneCall", "+16025550101");
+  await escalation(h.store, CALL_A, { minutesAgo: 31 });
+  // the caller answered "Who should they ask for?" on the call
+  await h.store.upsertEscalation({
+    callKey: CALL_A,
+    kind: "representative",
+    reason: "representative_requested",
+    details: null,
+    callbackPhone: null,
+    callbackSource: "none",
+    channel: "inboundPhoneCall",
+    verified: false,
+    callerName: "Priya Raman",
+  });
+  const out = await runJob("sla", h.deps);
+  assert(!out.skipped);
+  assertEquals([out.result.realerted, out.result.telegram_sent, out.result.email_sent], [1, 1, 1]);
+
+  const email = JSON.parse(String(h.calls.find((c) => c.host === "api.resend.com")!.init.body));
+  assertMatch(email.html, /Ask for<\/th><td[^>]*>Priya Raman \(caller-provided, unverified\)</);
+  // the caller's identity is still unknown, and the number is the escalation row's
+  assertStringIncludes(email.html, "Unknown caller");
+  assertStringIncludes(email.html, "(602) 555-0101 (+16025550101)");
+  // the card stays ids and enums: no name, as on the first alert
+  const card = JSON.parse(String(h.calls.find((c) => c.host === "api.telegram.org")!.init.body)).text as string;
+  assertStringIncludes(card, "RE-ALERT: still unclaimed");
+  assertFalse(/Priya|Raman|555|0101/.test(card), card);
+  // the digest carries counts only: no line names an escalation, so nothing there changes
+  const digest = await runJob("digest", h.deps);
+  assert(!digest.skipped);
+  const digestMail = JSON.parse(String(h.calls.filter((c) => c.host === "api.resend.com").at(-1)!.init.body));
+  assertFalse(/Priya|Raman/.test(digestMail.html));
 });
 
 Deno.test("sla: channels switched off or not configured are skipped without a request or a ledger row", async () => {

@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import { type Code, CODES } from "./enums.ts";
 import {
+  callerFirstName,
   callerIdNumber,
   givenCallbackNumber,
   type IdentityEvent,
@@ -8,9 +9,11 @@ import {
   initialIdentity,
   isPlainEmail,
   lastFour,
+  MAX_CALLER_NAME_CHARS,
   MAX_EMAIL_CHARS,
   MAX_LOOKUP_MISSES,
   normaliseCallbackNumber,
+  normaliseCallerName,
   normaliseEmail,
   normaliseName,
   normalisePhone,
@@ -522,4 +525,102 @@ Deno.test("normaliseName: shared name vectors", () => {
       `${v.note}: ${JSON.stringify(v.input)}`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The name a caller gives for a callback (escalate's caller_name, escalations.caller_name in 0012).
+// ---------------------------------------------------------------------------------------------
+Deno.test("normaliseCallerName: a first name, or first and last, as the caller said it", () => {
+  const cases: [unknown, string | null][] = [
+    ["Priya", "Priya"],
+    ["  Priya   Raman  ", "Priya Raman"],
+    ["priya raman", "Priya Raman"],
+    ["PRIYA", "Priya"],
+    ["McDonald", "McDonald"],
+    ["van der Berg", "van der Berg"],
+    ["dot smith", "Dot Smith"],
+    ["Ren\u00e9e", "Ren\u00e9e"],
+    ["Jos\u00e9 Mar\u00eda Garc\u00eda", "Jos\u00e9 Mar\u00eda Garc\u00eda"],
+    ["O\u2019Brien", "O'Brien"],
+    ["Mary - Jane", "Mary-Jane"],
+    ["Mary\u2013Jane", "Mary-Jane"],
+    ["J.R. Smith", "J.R. Smith"],
+    ["Smith Jr.", "Smith Jr."],
+    ["Dr. Shah", "Dr. Shah"],
+    // a sentence's closing full stop and a lead-in are not part of the name
+    ["Priya.", "Priya"],
+    ["Priya Raman...", "Priya Raman"],
+    ["It's Priya", "Priya"],
+    ["my name is Priya Raman", "Priya Raman"],
+    ["Call me Al", "Al"],
+    ["Ask for Priya", "Priya"],
+    // up to five words and 80 characters
+    ["Juan Carlos de la Cruz", "Juan Carlos de la Cruz"],
+    [`${"A".repeat(40)} ${"b".repeat(39)}`, `${"A".repeat(40)} ${"b".repeat(39)}`],
+  ];
+  for (const [input, expected] of cases) assertEquals(normaliseCallerName(input), expected, JSON.stringify(input));
+  // 80 characters is the most the CHECK takes, counted as Postgres counts them
+  for (const [, expected] of cases) {
+    if (expected) assert([...expected].length <= MAX_CALLER_NAME_CHARS, expected);
+  }
+});
+
+Deno.test("normaliseCallerName: junk, numbers, addresses and no-name answers are not a name", () => {
+  const refused: unknown[] = [
+    undefined,
+    null,
+    42,
+    { name: "Priya" },
+    "",
+    "   ",
+    "unknown",
+    "Unknown caller",
+    "UNKNOWN",
+    "no",
+    "No.",
+    "none",
+    "nope",
+    "N/A",
+    "anonymous",
+    "I'd rather not say",
+    "rather not",
+    "Prefer not to say",
+    "Just call me",
+    "call me",
+    "no thanks",
+    "that's fine",
+    "doesn't matter",
+    "Mr.",
+    "Dr",
+    "sir",
+    "602 555 0177",
+    "Priya 2",
+    "+44 20 7946 0958",
+    "priya@example.com",
+    "priya at example dot com",
+    "on this number",
+    "the same number",
+    "use my phone number",
+    "{{caller_name}}",
+    "<b>Priya</b>",
+    "Priya, thanks",
+    "Priya; drop table",
+    "x".repeat(81),
+    "one two three four five six",
+    "...",
+    "'-'",
+    "a".repeat(201),
+  ];
+  for (const input of refused) assertEquals(normaliseCallerName(input), null, JSON.stringify(input));
+});
+
+Deno.test("callerFirstName: the first word, a title with the name after it, no closing full stop", () => {
+  assertEquals(callerFirstName("Priya"), "Priya");
+  assertEquals(callerFirstName("Priya Raman"), "Priya");
+  assertEquals(callerFirstName("Mary-Jane Watson"), "Mary-Jane");
+  assertEquals(callerFirstName("Dr. Shah"), "Dr. Shah");
+  assertEquals(callerFirstName("Mrs Okafor Smith"), "Mrs Okafor");
+  assertEquals(callerFirstName("J.R. Smith"), "J.R");
+  assertEquals(callerFirstName("  Ren\u00e9e  "), "Ren\u00e9e");
+  for (const none of ["", "   ", null, undefined, 7]) assertEquals(callerFirstName(none), "", JSON.stringify(none));
 });

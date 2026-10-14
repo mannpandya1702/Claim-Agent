@@ -180,11 +180,11 @@ async function realertTelegram(deps: Deps, row: StaleEscalation): Promise<Channe
 }
 
 /** Who to call back for the re-alert email (the caller's name, any address they confirmed, the
- *  escalation's callback number), or nothing when the read is slow. Never throws. */
+ *  escalation's callback number and the name to ask for), or nothing when the read is slow. Never throws. */
 async function realertContact(
   deps: Deps,
   row: StaleEscalation,
-): Promise<{ caller: TeamCaller; callbackPhone: string | null } | Record<never, never>> {
+): Promise<{ caller: TeamCaller; callbackPhone: string | null; askFor: string | null } | Record<never, never>> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const slow = new Promise<Record<never, never>>((resolve) => {
     timer = setTimeout(() => resolve({}), CONTACT_READ_MS);
@@ -200,7 +200,8 @@ async function realertContact(
 
 /** The sla_realert email through the ledger: one per call, so a second stale row of the same call
  *  (its emergency and its representative request) re-pages on Telegram only. The email names the
- *  caller and the callback number like the first alert; the Telegram card stays ids and enums. */
+ *  caller, the callback number and who to ask for like the first alert; the Telegram card stays ids
+ *  and enums. */
 async function realertEmail(deps: Deps, row: StaleEscalation, now: Date): Promise<ChannelResult> {
   const { env, store } = deps;
   const to = str(env.CLAIMS_TEAM_EMAIL);

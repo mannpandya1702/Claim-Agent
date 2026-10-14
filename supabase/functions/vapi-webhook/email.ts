@@ -366,22 +366,33 @@ export async function loadTeamCaller(store: Store, callKey: string, session: Ses
 }
 
 /** Who to call back for one escalation, for a job that holds only its call key and kind (the sla
- *  re-alert): the TeamCaller and the number on the escalation row. Best effort, never throws. */
+ *  re-alert): the TeamCaller, and the number and the name to ask for on the escalation row. Best effort,
+ *  never throws. */
 export async function loadEscalationContact(
   store: Store,
   callKey: string,
   kind: string,
-): Promise<{ caller: TeamCaller; callbackPhone: string | null }> {
+): Promise<{ caller: TeamCaller; callbackPhone: string | null; askFor: string | null }> {
   let session: Session | null = null;
   let callbackPhone: string | null = null;
+  let askFor: string | null = null;
   try {
     const [s, rows] = await Promise.all([store.getSession(callKey), store.listEscalations(callKey)]);
     session = s;
-    callbackPhone = rows.find((r) => r.kind === kind)?.callback_phone ?? null;
+    const row = rows.find((r) => r.kind === kind);
+    callbackPhone = row?.callback_phone ?? null;
+    askFor = row?.caller_name ?? null;
   } catch {
     // the re-alert still goes out with what is known
   }
-  return { caller: await loadTeamCaller(store, callKey, session), callbackPhone };
+  return { caller: await loadTeamCaller(store, callKey, session), callbackPhone, askFor };
+}
+
+/** "Ask for": the name the caller gave for the callback (escalations.caller_name), as they said it and
+ *  never verified; no row without one. */
+function askForRows(name: string | null | undefined): [string, string][] {
+  const n = typeof name === "string" ? name.replace(/\s+/g, " ").trim() : "";
+  return n ? [["Ask for", `${escapeHtml(n)} (caller-provided, unverified)`]] : [];
 }
 
 function callerRows(caller: TeamCaller): [string, string][] {
@@ -411,6 +422,7 @@ export function callbackRequestEmail(p: {
   channel: string;
   dashboardUrl?: string;
   caller?: TeamCaller; // absent: shown as an unknown caller
+  askFor?: string | null; // the name the caller gave for the callback, when they gave one with the request
 }): { subject: string; html: string } {
   const verified = p.verified === true;
   const details = typeof p.details === "string" && p.details.trim() ? redactPII(p.details) : null;
@@ -423,6 +435,7 @@ export function callbackRequestEmail(p: {
       ["Reason", escapeHtml(reasonText(p.reason))],
       ["Identity verified", verified ? "Yes" : "No"],
       ...callerRows(p.caller ?? UNKNOWN_TEAM_CALLER),
+      ...askForRows(p.askFor),
       ["Callback number", phone ? escapeHtml(writtenPhone(phone)) : "None given yet (check the dashboard)"],
       ["Channel", escapeHtml(p.channel || "unknown")],
       ["Details (redacted)", details ? textBlock(details) : "None"],
@@ -546,9 +559,11 @@ export function slaRealertEmail(p: {
   minutesOpen: number;
   dashboardUrl?: string;
   // Who to call back. Optional so a caller that has not read them still sends the re-alert; when
-  // given they are shown like the first alert's (loadTeamCaller, escalations.callback_phone).
+  // given they are shown like the first alert's (loadTeamCaller, escalations.callback_phone), with the
+  // name to ask for (escalations.caller_name) when the caller gave one.
   caller?: TeamCaller;
   callbackPhone?: string | null;
+  askFor?: string | null;
 }): { subject: string; html: string } {
   const minutes = Number.isFinite(p.minutesOpen) ? Math.max(0, Math.round(p.minutesOpen)) : null;
   const kind = asciiLine(p.kind, 40) || "escalation";
@@ -563,6 +578,7 @@ export function slaRealertEmail(p: {
       ["Reason", escapeHtml(reasonText(p.reason))],
       ["Minutes open", minutes === null ? "Unknown" : String(minutes)],
       ...(p.caller ? callerRows(p.caller) : []),
+      ...askForRows(p.askFor),
       ...(p.caller || p.callbackPhone !== undefined
         ? [[
           "Callback number",

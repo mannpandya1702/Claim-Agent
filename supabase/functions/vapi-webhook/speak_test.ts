@@ -135,7 +135,12 @@ const VARIANTS: [Code, Record<string, unknown> | undefined][] = [
   ["rep_queued", { target: "account" }],
   ["rep_queued", { target: "given", digits: "6025550101" }],
   ["rep_queued", { target: "caller_id" }],
+  ["rep_queued", { target: "caller_id", ask_name: true }],
+  ["rep_queued", { target: "given", number: "+442079460958", ask_name: true }],
   ["callback_updated", { digits: "6025550101" }],
+  ["callback_updated", { digits: "6025550101", ask_name: true }],
+  ["callback_name_saved", { first_name: "Priya" }],
+  ["callback_name_saved", { first_name: "{{first_name}}" }],
   ["emergency_logged", { db_failed: true }],
   ["email_sent", { target: "given" }],
   ["contact_readback", { first_name: "Jane", last_name: "Doe", email: "jane.doe42@gmail.com" }],
@@ -969,6 +974,117 @@ Deno.test("callback read-backs: a number from abroad or one noted as said, read 
   );
 });
 
+// ---------------------------------------------------------------------------------------------
+// Who to ask for: a callback for a caller whose name the team does not have asks for it, once.
+// ---------------------------------------------------------------------------------------------
+const ASK_NAME = "Who should they ask for?";
+
+Deno.test("the name question takes the place of the closing question of rep_queued and callback_updated", () => {
+  const asked = (at: string) =>
+    `I've passed this to our claims team. Someone will call you back at ${at} within one business day. ${ASK_NAME}`;
+  assertEquals(
+    sentenceFor("rep_queued", { target: "caller_id", ask_name: true }),
+    "I've passed this to our claims team. Someone will call you back at the number you're calling from within one business day. Who should they ask for?",
+  );
+  assertEquals(
+    sentenceFor("rep_queued", { target: "given", digits: "0177", ask_name: true }),
+    asked("the number you gave me, ending in zero one seven seven,"),
+  );
+  assertEquals(
+    sentenceFor("rep_queued", { target: "given", number: "+442079460958", ask_name: true }),
+    asked("the number you gave me, plus four four, two zero seven, nine four six, zero nine five eight,"),
+  );
+  assertEquals(sentenceFor("rep_queued", { target: "account", ask_name: true }), asked("the number on your account"));
+  assertEquals(
+    sentenceFor("rep_queued", { ask_name: true }),
+    `I've passed this to our claims team. Someone will call you back within one business day. ${ASK_NAME}`,
+  );
+  assertEquals(
+    sentenceFor("callback_updated", { digits: "6025550177", ask_name: true }),
+    "Got it, six zero two, five five five, zero one seven seven. Who should they ask for?",
+  );
+  assertEquals(
+    sentenceFor("callback_updated", { digits: "+442079460958", ask_name: true }),
+    "Got it, plus four four, two zero seven, nine four six, zero nine five eight. Who should they ask for?",
+  );
+  assertEquals(sentenceFor("callback_updated", { ask_name: true }), `Got it. ${ASK_NAME}`);
+  // every other word is the usual sentence's; one question, digits as words, one turn, the endpointing and
+  // masking cue words of the target kept, and the answer (a name) is never masked as a number or a date
+  const cases: [Code, Record<string, unknown>][] = [
+    ["rep_queued", { target: "caller_id" }],
+    ["rep_queued", { target: "account" }],
+    ["rep_queued", { target: "given", digits: "0177" }],
+    ["rep_queued", { target: "given", number: "9601550123" }],
+    ["rep_queued", { target: "given", number: "+861012345678901" }],
+    ["rep_queued", {}],
+    ["callback_updated", { digits: "6025550177" }],
+    ["callback_updated", { digits: "+861012345678901" }],
+    ["callback_updated", {}],
+  ];
+  for (const [code, data] of cases) {
+    const plain = sentenceFor(code, data);
+    const ask = sentenceFor(code, { ...data, ask_name: true });
+    const where = `${code} ${JSON.stringify(data)}: ${ask}`;
+    assertEquals(ask, plain.replace(/ Anything else I can help with\?$/, ` ${ASK_NAME}`), where);
+    assertEquals((ask.match(/\?/g) ?? []).length, 1, where);
+    assert(ask.endsWith(ASK_NAME), where);
+    assert(spokenWords(ask) <= MAX_TURN_WORDS, `${where}: ${spokenWords(ask)} words`);
+    assertFalse(/\d|\boh\b/.test(ask), where);
+    assertSpeakable(ask);
+    assertEquals(asksForSensitive(ask), asksForSensitive(plain), where);
+  }
+  for (const data of [{ target: "caller_id" }, { target: "given", digits: "0177" }, {}]) {
+    assertFalse(asksForSensitive(sentenceFor("rep_queued", { ...data, ask_name: true })), JSON.stringify(data));
+  }
+  assertFalse(asksForSensitive(sentenceFor("callback_updated", { digits: "6025550177", ask_name: true })));
+  // only an explicit true asks
+  for (const flag of [undefined, false, "true", 1, null]) {
+    assertEquals(
+      sentenceFor("rep_queued", { target: "caller_id", ask_name: flag }),
+      sentenceFor("rep_queued", { target: "caller_id" }),
+      String(flag),
+    );
+    assertEquals(
+      sentenceFor("callback_updated", { digits: "6025550177", ask_name: flag }),
+      sentenceFor("callback_updated", { digits: "6025550177" }),
+      String(flag),
+    );
+  }
+});
+
+Deno.test("callback_name_saved thanks the caller by the first name they gave and promises nothing new", () => {
+  assertEquals(
+    sentenceFor("callback_name_saved", { first_name: "Priya" }),
+    "Thanks, Priya. I've added your name to the request. Anything else I can help with?",
+  );
+  assertEquals(
+    sentenceFor("callback_name_saved"),
+    "Thanks. I've added your name to the request. Anything else I can help with?",
+  );
+  // accents folded as every spoken name is; a title kept with the name; an initial without a doubled stop
+  assertStringIncludes(sentenceFor("callback_name_saved", { first_name: "Ren\u00e9e" }), "Thanks, Renee. I've");
+  assertStringIncludes(sentenceFor("callback_name_saved", { first_name: "Dr. Shah" }), "Thanks, Dr. Shah. I've");
+  assertStringIncludes(sentenceFor("callback_name_saved", { first_name: "J.R" }), "Thanks, J.R. I've");
+  // markup never reaches the caller (as in every name sentence; the tool never passes it anyway)
+  assertFalse(/[{}]/.test(sentenceFor("callback_name_saved", { first_name: "{{first_name}}" })));
+  // a name that cannot be spoken is left out, never spoken around
+  for (const first_name of ["", "  ", "Null", "6025550177", "\u0905\u0928\u0941", 42]) {
+    assertEquals(
+      sentenceFor("callback_name_saved", { first_name }),
+      "Thanks. I've added your name to the request. Anything else I can help with?",
+      JSON.stringify(first_name),
+    );
+  }
+  for (const first_name of ["Priya", "Mary Ann", undefined]) {
+    const s = sentenceFor("callback_name_saved", first_name ? { first_name } : undefined);
+    // no promise the request did not already make, and nothing that sounds like the team was told again
+    assertFalse(/call you back|business day|passed|sent|told/i.test(s), s);
+    assertEquals((s.match(/\?/g) ?? []).length, 1, s);
+    assert(spokenWords(s) <= MAX_TURN_WORDS, s);
+    assertSpeakable(s);
+  }
+});
+
 Deno.test("speakDate is pure: ordinals in words, year only when it differs", () => {
   assertEquals(speakDate("2026-10-08"), "October eighth");
   assertEquals(speakDate("2026-10-08", 2026), "October eighth");
@@ -1398,8 +1514,14 @@ const CLOSINGS: [Code, Record<string, unknown> | undefined, string][] = [
   ["not_verified", { level: "locked" }, "Which would you prefer?"],
   ["rep_queued", { target: "account" }, ANYTHING],
   ["rep_queued", { target: "given", digits: "6025550177" }, ANYTHING],
+  // the name question takes the place of the closing question, so the turn still asks one
+  ["rep_queued", { target: "caller_id", ask_name: true }, "Who should they ask for?"],
+  ["rep_queued", { target: "given", digits: "6025550177", ask_name: true }, "Who should they ask for?"],
   ["rep_queued_no_number", undefined, "What's the best number for a representative to reach you?"],
   ["callback_updated", { digits: "6025550177" }, ANYTHING],
+  ["callback_updated", { digits: "6025550177", ask_name: true }, "Who should they ask for?"],
+  ["callback_name_saved", { first_name: "Priya" }, ANYTHING],
+  ["callback_name_saved", undefined, ANYTHING],
   ["rep_recorded", undefined, ANYTHING],
   ["rep_already_queued", undefined, ANYTHING],
   ["rep_unavailable", undefined, ANYTHING],
@@ -1661,6 +1783,9 @@ Deno.test("every spoken sentence fits one turn: sixty words at most, seventy-fiv
       callback_phone: "+861012345678901",
     }],
     ["callback_updated", { digits: "+861012345678901" }],
+    ["callback_updated", { digits: "+861012345678901", ask_name: true }],
+    ["rep_queued", { target: "given", number: "+861012345678901", ask_name: true }],
+    ["callback_name_saved", { first_name: "Mary Ann" }],
     ["contact_saved_new", { first_name: "Mary Ann", has_email: false }],
     ["contact_saved_existing", { first_name: "Mary Ann" }],
     ["contact_retry", { has_email: true, has_phone: true }],

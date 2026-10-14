@@ -71,6 +71,7 @@ function escalation(kind: EscalationRow["kind"]): EscalationRow {
     delivery_error: null,
     status: "open",
     created_at: NOW.toISOString(),
+    caller_name: null,
   };
 }
 

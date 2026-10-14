@@ -110,6 +110,7 @@ export interface SmokeDb {
       callback_phone: string | null;
       callback_source: string | null;
       channel: string;
+      caller_name: string | null;
     }[]
   >;
   interaction(callKey: string): Promise<
@@ -653,11 +654,18 @@ export function smokeCases(): SmokeCase[] {
           args: { reason: "representative_requested", details: "Wants a callback about a claim." },
           code: "rep_queued_no_number",
         });
+        // an unverified caller with no name on the request: the read-back asks who to ask for, once
         await c.tool(ref, {
           name: "escalate",
           args: { reason: "representative_requested", callback_phone: CALLBACK_PHONE },
           code: "callback_updated",
-          sentence: sentenceFor("callback_updated", { digits: CALLBACK_PHONE }, ref.callKey),
+          sentence: sentenceFor("callback_updated", { digits: CALLBACK_PHONE, ask_name: true }, ref.callKey),
+        });
+        await c.tool(ref, {
+          name: "escalate",
+          args: { reason: "representative_requested", caller_name: "Smoke" },
+          code: "callback_name_saved",
+          sentence: sentenceFor("callback_name_saved", { first_name: "Smoke" }, ref.callKey),
         });
         const db = c.cfg.db;
         if (db) {
@@ -667,6 +675,7 @@ export function smokeCases(): SmokeCase[] {
             callback_phone: `+1${CALLBACK_PHONE}`,
             callback_source: "argument",
             channel: "chat",
+            caller_name: "Smoke",
           };
           const problem = await c.rows(() => db.escalations(ref.callKey), (rows) => {
             if (rows.length !== 1) return `expected one escalation row, found ${rows.length}`;
@@ -1401,7 +1410,7 @@ export function sqlDb(sql: ReturnType<typeof sqlClient>): SmokeDb {
       sql(`select tool_name, code from attempts where call_key = ${lit(k)} order by created_at, tool_call_id`),
     escalations: (k) =>
       sql(
-        `select kind, reason, alert_status, callback_phone, callback_source, channel from escalations where call_key = ${
+        `select kind, reason, alert_status, callback_phone, callback_source, channel, caller_name from escalations where call_key = ${
           lit(k)
         }`,
       ),

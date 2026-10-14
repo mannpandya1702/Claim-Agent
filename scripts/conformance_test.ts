@@ -793,7 +793,14 @@ Deno.test("function tools: the server tools, flat non-strict schemas, Bearer ser
     withRep.tools.get_claim_status.function.parameters.properties.claim_ending.description,
     /by its place in the summary they just heard \(the first one, the second one\), pass that claim's last three digits/,
   );
-  assertEquals(props("escalate"), { reason: "string", details: "string", callback_phone: "string" });
+  assertEquals(props("escalate"), {
+    reason: "string",
+    details: "string",
+    callback_phone: "string",
+    caller_name: "string",
+  });
+  // a callback number and a name are both the caller's to give: only the reason is required
+  assertEquals(withRep.tools.escalate.function.parameters.required, ["reason"]);
   assertEquals(props("report_emergency"), { note: "string" });
   assertEquals(props("send_info_email"), { topic: "string" });
   assertEquals(props("capture_contact"), {
@@ -853,6 +860,47 @@ Deno.test("callback numbers: the tools take any number as said; every prompt cou
     );
     assert(!/ten-digit callback|callback number must be|only (?:US|U\.S\.|American) numbers/i.test(prompt), key);
   }
+});
+
+// A caller the team has no name for is asked who they should ask for, once, by escalate's own sentence; the
+// model passes the name they say back to escalate, and never asks a second time.
+Deno.test("callback names: escalate takes the name as said, and every prompt routes the name question back to it", () => {
+  const escalate = withRep.tools.escalate.function;
+  assertEquals(
+    escalate.parameters.properties.caller_name.description,
+    "The name the caller gave for the callback, exactly as they said it: a first name, or first and last. Only a name they said on this call; never guessed and never taken from an account they did not verify.",
+  );
+  assertMatch(
+    escalate.description,
+    /Call it again with callback_phone when its sentence asked for a number, and with caller_name when it asked who they should ask for\./,
+  );
+  for (const key of ASSISTANT_KEYS) {
+    const prompt = withRep.assistants[key].prompt;
+    // the phone rule names escalate's sentence (its paragraph starts with the transfer); the web rule says "its"
+    const subject = PHONE_ASSISTANTS.includes(key) ? "escalate's sentence" : "its sentence";
+    // the number line stays, and the name line follows it
+    assert(
+      prompt.includes(
+        `If ${subject} asks for the best number to reach them, ask nothing else; when they say a number, call escalate again with callback_phone set to the digits they said. If ${subject} asks who they should ask for, ask nothing else; when they say a name, call escalate again with caller_name set to the name as they said it, with no words of your own. If they'd rather not say, that's fine: never ask again, and check once whether there's anything else.`,
+      ),
+      key,
+    );
+    assertEquals(prompt.split("who they should ask for").length - 1, 1, `${key}: the name line once`);
+  }
+  // the sentences the rule is about: the name question closes the callback sentence, one question a turn
+  assertMatch(
+    sentenceFor("rep_queued", { target: "caller_id", ask_name: true }),
+    /Someone will call you back at the number you're calling from within one business day\. Who should they ask for\?$/,
+  );
+  assertMatch(
+    sentenceFor("callback_updated", { digits: "6025550177", ask_name: true }),
+    /\. Who should they ask for\?$/,
+  );
+  // and what the caller hears once the model passes the name
+  assertEquals(
+    sentenceFor("callback_name_saved", { first_name: "Priya" }),
+    "Thanks, Priya. I've added your name to the request. Anything else I can help with?",
+  );
 });
 
 // Wording a warm person at a claims desk would never use on the phone.
@@ -1335,6 +1383,13 @@ const ENDPOINTING_CASES: [string, string, string, number | null][] = [
   // names, yes or no, and the day of a loss: smart endpointing
   ["name", sentenceFor("not_found_final"), "John Smith", null],
   ["name, new caller", sentenceFor("claim_needs_contact"), "Priya Raman", null],
+  ["name for a callback", sentenceFor("rep_queued", { target: "caller_id", ask_name: true }), "Priya", null],
+  [
+    "name after a number read back",
+    sentenceFor("callback_updated", { digits: "6025550177", ask_name: true }),
+    "Priya Raman",
+    null,
+  ],
   ["yes to a read-back", sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe" }), "Yes", null],
   ["what to change", sentenceFor("claim_retry"), "The date", null],
   ["what day", sentenceFor("claim_bad_date"), "Last Tuesday", null],
@@ -1492,6 +1547,11 @@ Deno.test("endpointing: the most-heard sentences keep the cue their answer needs
       sentenceFor("claim_filed", { claim_last3: "472", emailed: true }),
       sentenceFor("claim_intake_saved", { first_name: "Jane", emailed: true }),
       sentenceFor("rep_queued", { target: "caller_id" }),
+      // the name question asks for no number, so a name (or digits) after it gets no number wait
+      sentenceFor("rep_queued", { target: "caller_id", ask_name: true }),
+      sentenceFor("rep_queued", { target: "given", digits: "0177", ask_name: true }),
+      sentenceFor("callback_updated", { digits: "6025550177", ask_name: true }),
+      sentenceFor("callback_name_saved", { first_name: "Priya" }),
     ]
   ) {
     assertEquals(endpointingWait(text, "Yes, can you try 6 0 2 5"), null, text);

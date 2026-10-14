@@ -321,7 +321,13 @@ Deno.test("upsert_escalation: one row per (call, kind); a repeat merges only a n
     callbackSource: "argument",
     details: "wants a call",
   });
-  assertEquals(second, { id: first.id, inserted: false, callbackPhone: "+16025550111", alertStatus: "pending" });
+  assertEquals(second, {
+    id: first.id,
+    inserted: false,
+    callbackPhone: "+16025550111",
+    alertStatus: "pending",
+    callerName: null,
+  });
 
   await store.setEscalationDelivery(first.id, "sent", null);
   const third = await store.upsertEscalation({
@@ -329,7 +335,13 @@ Deno.test("upsert_escalation: one row per (call, kind); a repeat merges only a n
     callbackSource: "caller_id",
     verified: true,
   });
-  assertEquals(third, { id: first.id, inserted: false, callbackPhone: "+16025550111", alertStatus: "sent" });
+  assertEquals(third, {
+    id: first.id,
+    inserted: false,
+    callbackPhone: "+16025550111",
+    alertStatus: "sent",
+    callerName: null,
+  });
   await store.upsertEscalation({ ...base, verified: false });
 
   const rows = await store.listEscalations("c1");
@@ -374,6 +386,48 @@ Deno.test("upsert_escalation and setEscalationDelivery reject values outside the
   await assertRejects(() => store.setEscalationDelivery(id, "delivered" as never, null));
   await store.setEscalationDelivery(id, "failed", "telegram 502: bad gateway");
   assertEquals((await store.listEscalations("c1"))[0].delivery_error, "telegram 502: bad gateway");
+});
+
+// 0012: the name the caller gave for the callback, merged like the other non-null values.
+Deno.test("upsert_escalation: a caller name is stored, replaced by a newer one, kept when none comes; 1 to 80 characters", async () => {
+  const store = createFakeStore();
+  const base = {
+    callKey: "c1",
+    kind: "representative" as const,
+    reason: "representative_requested" as const,
+    details: null,
+    callbackPhone: null,
+    callbackSource: "none" as const,
+    channel: "inboundPhoneCall",
+    verified: false,
+  };
+  // without one (the parameter left out, as every caller written before 0012 calls it): null
+  const first = await store.upsertEscalation(base);
+  assertEquals([first.inserted, first.callerName], [true, null]);
+  assertEquals((await store.listEscalations("c1"))[0].caller_name, null);
+  // a repeat with a name stores it and returns it
+  const named = await store.upsertEscalation({ ...base, callerName: "Priya" });
+  assertEquals([named.inserted, named.id, named.callerName], [false, first.id, "Priya"]);
+  // a repeat with none (left out, or null) keeps it; a newer name replaces it
+  assertEquals((await store.upsertEscalation(base)).callerName, "Priya");
+  assertEquals((await store.upsertEscalation({ ...base, callerName: null })).callerName, "Priya");
+  assertEquals((await store.upsertEscalation({ ...base, callerName: "Priya Raman" })).callerName, "Priya Raman");
+  assertEquals((await store.listEscalations("c1"))[0].caller_name, "Priya Raman");
+  // one given with the first request goes on the new row
+  const fresh = await store.upsertEscalation({ ...base, callKey: "c2", callerName: "Ines" });
+  assertEquals([fresh.inserted, fresh.callerName], [true, "Ines"]);
+  // the CHECK: 1 to 80 characters (counted as Postgres counts them), and nothing is written
+  await assertRejects(() => store.upsertEscalation({ ...base, callKey: "c3", callerName: "" }), Error, "23514");
+  await assertRejects(
+    () => store.upsertEscalation({ ...base, callerName: "a".repeat(81) }),
+    Error,
+    "23514",
+  );
+  assertEquals(store.tables.escalations.filter((e) => e.call_key === "c3").length, 0);
+  assertEquals((await store.listEscalations("c1"))[0].caller_name, "Priya Raman");
+  const eighty = `Ren\u00e9e ${"x".repeat(74)}`;
+  assertEquals([...eighty].length, 80);
+  assertEquals((await store.upsertEscalation({ ...base, callerName: eighty })).callerName, eighty);
 });
 
 Deno.test("email ledger: claimed exactly once per (call, kind); later claims see the outcome", async () => {
