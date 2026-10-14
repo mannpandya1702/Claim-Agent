@@ -72,10 +72,12 @@ const MAX_OUTBOX_ERROR = 300;
 // any run this long is masked whatever it is.
 const LONG_DIGITS_RE = /\d{7,}/g;
 
-/** outbox_events.last_error as stored: redacted, runs of 7+ digits masked, one line, 300 chars. */
+/** outbox_events.last_error as stored: runs of 7+ digits masked whole, then redacted, one line, 300
+ *  chars. The digit runs go first: redactPII reads a bare 7 to 15 digit run as a phone number and keeps
+ *  its last four, and an account or record number quoted in an error keeps none. */
 export function outboxErrorText(error: unknown): string {
   const text = typeof error === "string" && error.trim() ? error : "delivery failed";
-  return redactPII(text.slice(0, 2000)).replace(LONG_DIGITS_RE, "[digits]").replace(/\s+/g, " ").trim()
+  return redactPII(text.slice(0, 2000).replace(LONG_DIGITS_RE, "[digits]")).replace(/\s+/g, " ").trim()
     .slice(0, MAX_OUTBOX_ERROR);
 }
 

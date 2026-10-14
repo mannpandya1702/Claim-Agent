@@ -4,7 +4,7 @@
 
 import { assert, assertEquals, assertFalse, assertMatch, assertRejects } from "@std/assert";
 import { createFakeStore, demoSeed, numberHash } from "./fake_store.ts";
-import { OUTBOX_LEASE_MS, outboxClaimable, outboxDue } from "./store_rules.ts";
+import { OUTBOX_LEASE_MS, outboxClaimable, outboxDue, outboxErrorText } from "./store_rules.ts";
 import type { InteractionRow, OutboxRef } from "./types.ts";
 
 const TOBIAS = "6b0d6f0e-1c11-4c7a-9a01-000000000101";
@@ -1573,4 +1573,11 @@ Deno.test("emails: the two claim kinds are accepted by the ledger", async () => 
   assertEquals(await store.claimEmail("c1", "claim_received", "o***@example.com"), { claimed: true });
   assertEquals(await store.claimEmail("c1", "claim_intake", "t***@example.com"), { claimed: true });
   await assertRejects(() => store.claimEmail("c1", "claim_update" as never, "x"), Error, "23514");
+});
+
+Deno.test("outbox error text: an account or record number of 7 to 15 digits is masked whole, a phone keeps its last four", () => {
+  assertEquals(outboxErrorText("airtable 429: account 98765432101"), "airtable 429: account [digits]");
+  assertEquals(outboxErrorText("ghl 422: record 1234567 rejected"), "ghl 422: record [digits] rejected");
+  assertEquals(outboxErrorText("bad phone +1 602 555 0101"), "bad phone [phone ending 0101]");
+  assertEquals(outboxErrorText("   "), "delivery failed");
 });
