@@ -23,7 +23,7 @@
         },
         "callback_phone": {
           "type": "string",
-          "description": "Only when the caller just gave a number to be called back on, or a new caller gave one with their details: the ten digits they said, digits only."
+          "description": "Only when the caller just gave a number to be called back on, or a new caller gave one with their details: the number exactly as they said it, digits only, with a leading + and the country code if they gave one. A number from any country and of any length is taken: never reject or question one for either. Never a country code on its own, or one worked out from a country they mention: when they ask to be called back on the number they are calling from, leave it out."
         }
       },
       "required": [

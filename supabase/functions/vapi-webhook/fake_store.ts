@@ -151,9 +151,10 @@ const KEEP_ON_NULL = new Set([
   "cost_breakdown",
 ]);
 
-// caller_contacts CHECKs (0006_contacts.sql).
+// caller_contacts CHECKs (0006_contacts.sql; callback_phone as 0011_intl_callbacks.sql widened it: E.164, or
+// 7 to 15 digits noted as the caller said them).
 const CONTACT_EMAIL_RE = /^[a-z0-9._+-]+@[a-z0-9.-]+\.[a-z]{2,24}$/;
-const E164_RE = /^\+1[0-9]{10}$/;
+const CALLBACK_PHONE_RE = /^(\+[1-9][0-9]{7,14}|[0-9]{7,15})$/;
 const CONTACT_COLUMNS = [
   "call_key",
   "kind",
@@ -478,7 +479,9 @@ export function createFakeStore(
     if (r.email !== null && (typeof r.email !== "string" || r.email.length > 100 || !CONTACT_EMAIL_RE.test(r.email))) {
       throw violates("email");
     }
-    if (r.callback_phone !== null && (typeof r.callback_phone !== "string" || !E164_RE.test(r.callback_phone))) {
+    if (
+      r.callback_phone !== null && (typeof r.callback_phone !== "string" || !CALLBACK_PHONE_RE.test(r.callback_phone))
+    ) {
       throw violates("callback_phone");
     }
     if (r.confirmed !== (r.confirmed_at !== null)) throw violates("confirmed");

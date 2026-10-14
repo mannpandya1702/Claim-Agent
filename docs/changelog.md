@@ -3,6 +3,35 @@
 Build history, newest first. Times are UTC. Test counts are `deno task test` at that commit;
 "battery" is the persona battery over VAPI's chat API, "smoke" the live tool checks.
 
+## 2026-10-14
+
+### Callbacks: live battery
+Battery over the callback and escalation personas, one run each: 11 of 14 passed on the first run. Asked
+"I'm calling from Australia ... call me back on this number", the model passed `+61` as the callback
+number. The server drops a bare country code and still used the caller ID, but `escalate` and
+`capture_contact` now say never to pass a country code on its own or one worked out from a country the
+caller mentions, and `escalate` leaves the number out for "the number I'm calling from"; the persona then
+passed. `f4` and `f2` failed on a tool sentence read with words of the model's own (known flakes, nothing
+to do with callbacks) and passed on rerun. 898 tests.
+
+### Callbacks: review fixes
+On a call from abroad, a number given without a country code is read against the caller ID: the
+caller's own number in its national form is the caller ID, read back with "plus" and the country code,
+and any other is noted as said instead of being made `+1`; a stored number is never read again. A new
+caller's intake is filed only with a number to call (`confirm_claim` asks too), and a number that came
+out wrong is asked for once rather than dropped. A first callback request reads a number from abroad, or
+one noted as said, in full. Redaction takes 11 to 15 digits read back in groups whole and never joins
+numbers across a sentence end or a list of amounts or years. GoHighLevel keys a lead whose number was
+noted as said on the call's caller ID; the call page links only numbers with a country code. 898 tests.
+
+### Callbacks: any number the caller gives
+A live call from abroad asked for a callback "on this number": the caller ID (outside North America)
+was dropped, the number then said was refused, and the repeat promised a callback with no number on
+record. A callback number is now noted as given: North American as before, international with its
+country code as E.164, anything else of 7 to 15 digits as said (`0011_intl_callbacks.sql`). A repeat
+with no number anywhere asks for one. Read-backs say "plus" and the country code; redaction covers
+numbers from abroad; GoHighLevel gets E.164 only. Rule 3 counts "double five" as two digits.
+
 ## 2026-10-13
 
 ### Whole numbers said with "double" or "triple" answered in 0.5 s

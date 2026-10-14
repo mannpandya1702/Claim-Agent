@@ -1,6 +1,14 @@
 import { CircleCheck, Clock, Info, Mail, Phone } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { CALLBACK_SOURCE_LABELS, CONTACT_KIND_LABELS, formatDateTimeLong, formatPhone, formatTime } from "@/lib/format";
+import {
+  CALLBACK_SOURCE_LABELS,
+  CONTACT_KIND_LABELS,
+  formatDateTimeLong,
+  formatPhone,
+  formatTime,
+  isAsSaid,
+  isDialable,
+} from "@/lib/format";
 import type { CallerContact } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -62,14 +70,25 @@ export function CallerContactCard({ contact: c, className }: CallerContactCardPr
           <dd className="mt-0.5">
             {c.callback_phone ? (
               <>
-                <a
-                  href={`tel:${c.callback_phone}`}
-                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-sm font-medium tabular text-link outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <Phone className="size-3.5 shrink-0" aria-hidden="true" />
-                  {formatPhone(c.callback_phone)}
-                </a>
-                <span className="block text-xs text-ink-3">{CALLBACK_SOURCE_LABELS[c.callback_source] ?? c.callback_source}</span>
+                {/* A tel: link only with a country code: a number noted as said would dial as a local one. */}
+                {isDialable(c.callback_phone) ? (
+                  <a
+                    href={`tel:${c.callback_phone}`}
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-sm font-medium tabular text-link outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <Phone className="size-3.5 shrink-0" aria-hidden="true" />
+                    {formatPhone(c.callback_phone)}
+                  </a>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 whitespace-nowrap font-medium tabular text-ink-1">
+                    <Phone className="size-3.5 shrink-0 text-ink-3" aria-hidden="true" />
+                    {formatPhone(c.callback_phone)}
+                  </span>
+                )}
+                <span className="block text-xs text-ink-3">
+                  {CALLBACK_SOURCE_LABELS[c.callback_source] ?? c.callback_source}
+                  {isAsSaid(c.callback_phone) && " · as said, no country code"}
+                </span>
               </>
             ) : (
               <span className="text-ink-2">No number given</span>

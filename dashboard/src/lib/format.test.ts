@@ -23,6 +23,8 @@ import {
   formatRelative,
   formatStamp,
   formatTime,
+  isAsSaid,
+  isDialable,
   isInProgress,
   maskPhone,
   minutesBetween,
@@ -88,14 +90,40 @@ describe("money, rates, latency, counts", () => {
 describe("phone numbers", () => {
   it("masks the middle digits for lists", () => {
     expect(maskPhone("+16025550101")).toBe("+1 602 ... 0101");
-    expect(maskPhone("6025550199")).toBe("+1 602 ... 0199");
+    // bare digits are a number noted as said: never labelled +1, whatever their shape
+    expect(maskPhone("6025550199")).toBe("... 0199");
     expect(maskPhone("+44 20 7946 0958")).toBe("... 0958");
     expect(maskPhone(null)).toBe("—");
     expect(maskPhone("12")).toBe("...");
   });
+  it("masks a number from abroad or one noted as said without claiming it is +1", () => {
+    expect(maskPhone("+442079460958")).toBe("... 0958");
+    expect(maskPhone("+61491570156")).toBe("... 0156");
+    // ten digits that cannot be North American (exchange 155) are the caller's own words
+    expect(maskPhone("9601550123")).toBe("... 0123");
+    expect(maskPhone("5550177")).toBe("... 0177");
+  });
   it("shows the full number on the detail page", () => {
     expect(formatPhone("+16025550101")).toBe("+1 602 555 0101");
+    // noted as said (a caller abroad giving ten digits): shown as said, never as +1
+    expect(formatPhone("6025550101")).toBe("602 555 0101");
+    expect(formatPhone("16025550101")).toBe("160 255 501 01");
+    // written by hand with its punctuation (an env value) reads as North American when it could be
+    expect(formatPhone("(602) 555-0100")).toBe("+1 602 555 0100");
+    expect(formatPhone("+442079460958")).toBe("+442079460958");
+    expect(formatPhone("+61491570156")).toBe("+61491570156");
+    expect(formatPhone("9601550123")).toBe("960 155 0123");
+    expect(formatPhone("02079460958")).toBe("020 794 609 58");
+    expect(formatPhone("5550177")).toBe("555 0177");
     expect(formatPhone("weird")).toBe("weird");
+  });
+  it("dials only a number with its country code", () => {
+    for (const n of ["+16025550101", "+442079460958", "+61491570156"]) expect(isDialable(n)).toBe(true);
+    for (const n of ["9601550123", "6025550101", "5550177", "602-555-0101", "+4412", null, undefined]) {
+      expect(isDialable(n)).toBe(false);
+    }
+    for (const n of ["9601550123", "6025550101", "5550177", "02079460958"]) expect(isAsSaid(n)).toBe(true);
+    for (const n of ["+16025550101", "+442079460958", "555017", "1234567890123456", null]) expect(isAsSaid(n)).toBe(false);
   });
 });
 

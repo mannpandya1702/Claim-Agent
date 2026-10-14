@@ -6,6 +6,7 @@
 
 import { dashboardLink, shortCallId } from "./alert.ts";
 import { CLAIM_TYPES, type ClaimIntakeKind, ESCALATION_REASONS, MAIN_LINE_SPOKEN } from "./enums.ts";
+import { phoneGroups } from "./identity.ts";
 import { redactPII } from "./redact.ts";
 import type { CallerContact, Claim, Customer, Deps, Session, Store } from "./types.ts";
 
@@ -176,10 +177,19 @@ function documentsOf(c: Claim): string[] {
     .map((d) => d.trim());
 }
 
-/** "+16025550101" -> "(602) 555-0101"; anything else is shown as stored. */
-function writtenPhone(e164: string): string {
-  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(e164.trim());
-  return m ? `(${m[1]}) ${m[2]}-${m[3]} (${e164.trim()})` : e164.trim();
+/** A stored callback number as the team reads it, every digit kept: "+16025550101" -> "(602) 555-0101
+ *  (+16025550101)"; "+442079460958" -> "+44 207 946 0958 (international)"; a number noted as the caller
+ *  said it, with no country code, "9601550123" -> "960 155 0123 (as said, no country code)". Anything
+ *  else is shown as stored. */
+export function writtenPhone(stored: string): string {
+  const s = stored.trim();
+  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(s);
+  if (m) return `(${m[1]}) ${m[2]}-${m[3]} (${s})`;
+  const g = /^\+?\d+$/.test(s) ? phoneGroups(s) : null;
+  if (!g) return s;
+  return g.kind === "international"
+    ? `+${g.countryCode} ${g.groups.join(" ")} (international)`
+    : `${g.groups.join(" ")} (as said, no country code)`;
 }
 
 const REASON_LABELS: Record<string, string> = {

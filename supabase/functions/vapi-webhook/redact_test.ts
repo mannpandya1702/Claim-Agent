@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertFalse, assertMatch, assertNotStrictEquals } from "@std/assert";
 import { asksForSensitive, MASKED_ANSWER, redactDeep, redactPII, redactPIIAsOf } from "./redact.ts";
 import { jsonLogger } from "./log.ts";
+import { sentenceFor, speakPhone } from "./speak.ts";
 
 interface Vectors {
   ref_year: number;
@@ -210,9 +211,111 @@ Deno.test("redactPII: impossible month/day numerals are left alone", () => {
   assertEquals(redactPIIAsOf("1986-13-01", 2026), "1986-13-01");
 });
 
-Deno.test("redactPII: a long digit run that is not a phone is not partially redacted", () => {
-  assertEquals(redactPII("ref 123456789012"), "ref 123456789012");
+Deno.test("redactPII: a run of 7 to 15 digits is redacted whole; a longer run is not a phone and is never cut", () => {
+  // twelve digits may be a number from abroad said without its "+": redacted whole, never in part
+  assertEquals(redactPII("ref 123456789012"), "ref [phone ending 9012]");
   assertEquals(redactPII("id 4111 1111 1111 1111"), "id 4111 1111 1111 1111");
+  assertEquals(redactPII("1234567890123456"), "1234567890123456");
+  assertEquals(redactPII("code 123456"), "code 123456");
+});
+
+Deno.test("redactPII: international and as-said numbers, written or spoken, keep only their last four", () => {
+  const cases: [string, string][] = [
+    ["Call me on +44 20 7946 0958 please.", "Call me on [phone ending 0958] please."],
+    ["it's 0044 20 7946 0958", "it's [phone ending 0958]"],
+    ["my mobile is +61 491 570 156", "my mobile is [phone ending 0156]"],
+    ["+61491570156", "[phone ending 0156]"],
+    ["my UK number, 020 7946 0958", "my UK number, [phone ending 0958]"],
+    ["plus four four, two zero seven, nine four six, zero nine five eight", "[phone ending 0958]"],
+    ["zero zero four four two zero seven nine four six zero nine five eight", "[phone ending 0958]"],
+    [
+      "Got it, nine six zero, one five five, zero one two three. Anything else?",
+      "Got it, [phone ending 0123]. Anything else?",
+    ],
+    ["nine six zero one double five zero one two three", "[phone ending 0123]"],
+    ["my number is 555 0177", "my number is [phone ending 0177]"],
+  ];
+  for (const [input, output] of cases) {
+    assertEquals(redactPIIAsOf(input, 2026), output, input);
+    assertEquals(redactPIIAsOf(output, 2026), output, `${input} (idempotent)`);
+  }
+});
+
+Deno.test("redactPII: what only looks like a number from abroad is kept", () => {
+  for (
+    const kept of [
+      "Claim CLM-240115 was filed on 2026-10-08 at 10:30 for $4,820.",
+      "filed on 10-08-2026, written 10 08 2026 or 2026.10.08",
+      "the impossible 1986-13-01 stays",
+      "Send it to Phoenix, AZ 85004-1234.",
+      "a policy held 2019-2026",
+      "a rate of 0.0123456",
+      "Please call our main line at 1-800-555-0142, and someone there will help you.",
+      "our main line is one eight hundred, five five five, zero one four two",
+      "call 6b0d6f0e-1c11-4c7a-9a01-000000000101",
+      "trace 12345678-1234-4c7a-9a01-000000000101",
+      "Which claim do you mean, the one ending in one nine eight, one one five, zero nine zero, or eight four nine?",
+      "Your auto claim ending in one one five was paid, four thousand eight hundred twenty dollars on October eighth.",
+      "I have 2 cars plus 1 truck, and 12 photos.",
+    ]
+  ) {
+    assertEquals(redactPIIAsOf(kept, 2026), kept, kept);
+  }
+  // a word between two numbers is not a country code
+  assertEquals(redactPII("602 555 0101 plus 2 more"), "[phone ending 0101] plus 2 more");
+  assertEquals(redactPII("it's 555 0177 plus 2 extensions"), "it's [phone ending 0177] plus 2 extensions");
+});
+
+Deno.test("redactPII: claim numbers, amounts and years next to other numbers are never joined into a phone", () => {
+  for (
+    const kept of [
+      // a sentence end, a list of amounts or years, a counting word, and a policy or claim number
+      "My claim is two four zero one nine eight. Two weeks ago I sent the photos.",
+      "Claim 240115. 3 photos uploaded.",
+      "estimates 1200, 1500.",
+      "Caller has 3 claims from 2019, 2021 and 2024.",
+      "claims from twenty nineteen, twenty twenty one and twenty twenty four",
+      "The deductible is 500. 1000 for comprehensive.",
+      "The quotes were 450, 600, 725 and 900.",
+      "The policy number is 7301 2244.",
+      "claim number 1234 5678",
+      "id 4111 1111 1111 1111",
+    ]
+  ) {
+    assertEquals(redactPIIAsOf(kept, 2026), kept, kept);
+  }
+  // the number itself is still redacted whole, and what follows it stays
+  assertEquals(redactPIIAsOf("555 0177. 2 cars", 2026), "[phone ending 0177]. 2 cars");
+  assertEquals(redactPIIAsOf("my number is 555 0177, 2 cars", 2026), "my number is [phone ending 0177], 2 cars");
+  assertEquals(
+    redactPIIAsOf("Six oh two. Five five five. Oh one oh one. Two claims.", 2026),
+    "[phone ending 0101]. Two claims.",
+  );
+});
+
+Deno.test("redactPII: every read-back of a number noted as said, 7 to 15 digits, keeps only its real last four", () => {
+  const said = "960155012345678";
+  for (let n = 7; n <= 15; n++) {
+    const number = said.slice(0, n);
+    const last4 = number.slice(-4);
+    for (
+      const sentence of [
+        sentenceFor("callback_updated", { digits: number }),
+        sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe", callback_phone: number }),
+        sentenceFor("rep_queued", { target: "given", number }),
+      ]
+    ) {
+      // the whole number, and nothing else, becomes the token
+      const redacted = redactPIIAsOf(sentence, 2026);
+      assertEquals(redacted, sentence.replace(speakPhone(number), `[phone ending ${last4}]`), sentence);
+      assertEquals(redactPIIAsOf(redacted, 2026), redacted, "idempotent");
+    }
+  }
+  // and with a country code: "plus" and every digit go
+  for (const number of ["+442079460958", "+61491570156", "+861012345678901"]) {
+    const redacted = redactPIIAsOf(sentenceFor("callback_updated", { digits: number }), 2026);
+    assertEquals(redacted, `Got it, [phone ending ${number.slice(-4)}]. Anything else I can help with?`, number);
+  }
 });
 
 Deno.test("asksForSensitive vectors", () => {

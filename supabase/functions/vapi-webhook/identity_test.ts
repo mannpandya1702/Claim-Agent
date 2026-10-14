@@ -2,6 +2,7 @@ import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import { type Code, CODES } from "./enums.ts";
 import {
   callerIdNumber,
+  givenCallbackNumber,
   type IdentityEvent,
   type IdentityState,
   initialIdentity,
@@ -9,12 +10,14 @@ import {
   lastFour,
   MAX_EMAIL_CHARS,
   MAX_LOOKUP_MISSES,
+  normaliseCallbackNumber,
   normaliseEmail,
   normaliseName,
-  normaliseNanp,
   normalisePhone,
   parseDobParts,
+  phoneGroups,
   step,
+  storedCallbackNumber,
   usableCallbackNumber,
 } from "./identity.ts";
 import { sentenceFor } from "./speak.ts";
@@ -51,31 +54,171 @@ Deno.test("parseDobParts: shared DOB vectors", () => {
   assertEquals(parseDobParts(2, 29, 1988, 2026), { year: 1988, month: 2, day: 29 });
 });
 
-Deno.test("usableCallbackNumber: junk filter", () => {
+Deno.test("usableCallbackNumber: junk filter and our own line", () => {
   const own = ["+16025550100", "602 555 0111"];
   assertEquals(usableCallbackNumber("602-555-0101", own), "+16025550101");
   assertEquals(usableCallbackNumber("(602) 555 0199", own), "+16025550199"); // the fiction range is valid
   assertEquals(usableCallbackNumber(6025550101, own), "+16025550101");
-  for (const junk of ["Anonymous", "unknown", "RESTRICTED", "private", "", "   ", null, undefined]) {
+  for (
+    const junk of ["Anonymous", "unknown", "RESTRICTED", "private", "", "   ", null, undefined, {}, ["6025550101"]]
+  ) {
     assertEquals(usableCallbackNumber(junk, own), null, JSON.stringify(junk));
   }
   assertEquals(usableCallbackNumber("+1 222 222 2222", own), null); // repeated digits
-  assertEquals(usableCallbackNumber("1-012-555-0101", own), null); // area code starts with 0
+  assertEquals(usableCallbackNumber("2222222", own), null);
   assertEquals(usableCallbackNumber("+16025550100", own), null); // our own line
   assertEquals(usableCallbackNumber("6025550111", own), null); // own list entry written loosely
+  assertEquals(usableCallbackNumber("1 (602) 555-0100", own), null); // our own line written another way
   assertEquals(usableCallbackNumber("602-555-0101", undefined as unknown as string[]), "+16025550101");
+  // a number that is not North American is kept, never refused for its country or its length
+  assertEquals(usableCallbackNumber("+44 20 7946 0958", own), "+442079460958");
+  assertEquals(usableCallbackNumber("9601550123", own), "9601550123");
+  assertEquals(usableCallbackNumber("1-012-555-0101", own), "10125550101"); // not dialable in NANP: as said
+  // our own line is refused whichever list form names it
+  assertEquals(usableCallbackNumber("+442079460958", ["+44 20 7946 0958"]), null);
 });
 
-Deno.test("callerIdNumber: envelope caller id", () => {
+Deno.test("normaliseCallbackNumber: every acceptance rule and every refusal", () => {
+  const cases: [unknown, string | null][] = [
+    // a. North American: 10 digits, or 11 with a leading 1, area code and exchange starting 2-9
+    ["602-555-0101", "+16025550101"],
+    ["16025550101", "+16025550101"],
+    ["+1 602 555 0101", "+16025550101"],
+    ["001 602 555 0101", "+16025550101"],
+    [6025550101, "+16025550101"],
+    // b. international with a country code: "+", "00" or the word "plus" -> E.164 (8 to 15 digits)
+    ["+44 20 7946 0958", "+442079460958"],
+    ["0044 20 7946 0958", "+442079460958"],
+    ["plus 44 20 7946 0958", "+442079460958"],
+    ["+61491570156", "+61491570156"],
+    ["+61 491 570 156", "+61491570156"],
+    ["+86 10 1234 5678 901", "+861012345678901"], // fifteen digits, the most E.164 allows
+    // c. anything else of 7 to 15 digits, noted as said
+    ["9601550123", "9601550123"],
+    ["960 155 0123", "9601550123"],
+    ["0125550101", "0125550101"],
+    ["+1 012 555 0177", "10125550177"], // a "+1" number that is not North American
+    ["+1 602 555 017", "1602555017"], // a "+1" number one digit short
+    ["020 7946 0958", "02079460958"],
+    ["555-0177", "5550177"],
+    ["+4412345", "4412345"], // too short for E.164: as said
+    ["+0123456789", "0123456789"], // no country code starts with 0: as said
+    ["123456789012345", "123456789012345"],
+    // d. refused
+    ["555-017", null],
+    ["1234567890123456", null],
+    ["+44 1234 5678 9012 34", null],
+    ["0000000000", null],
+    ["+1 222 222 2222", null],
+    ["7777777", null],
+    ["anonymous", null],
+    ["Restricted", null],
+    ["", null],
+    ["no number", null],
+    [null, null],
+    [-6025550101, null],
+    [60255501.5, null],
+    ["9".repeat(65), null],
+  ];
+  for (const [input, expected] of cases) assertEquals(normaliseCallbackNumber(input), expected, JSON.stringify(input));
+});
+
+Deno.test("givenCallbackNumber: a number given on a call from abroad is read against its caller id", () => {
+  const own = ["+16025550100"];
+  const uk = "+442079460958";
+  // the caller's own number in its national form, with or without the trunk 0, or with the country code
+  // but no "+": that caller id, so the read-back says the country code
+  for (const said of ["020 7946 0958", "02079460958", "2079460958", "44 20 7946 0958", "+44 20 7946 0958"]) {
+    assertEquals(givenCallbackNumber(said, own, uk), uk, said);
+  }
+  assertEquals(givenCallbackNumber("0491 570 156", own, "+61491570156"), "+61491570156");
+  assertEquals(givenCallbackNumber("491570156", own, "+61491570156"), "+61491570156");
+  // any other number without a country code is noted as said, never made North American
+  assertEquals(givenCallbackNumber("602 555 0177", own, uk), "6025550177");
+  assertEquals(givenCallbackNumber("1 602 555 0177", own, uk), "16025550177");
+  assertEquals(givenCallbackNumber("07700 900123", own, uk), "07700900123");
+  assertEquals(givenCallbackNumber("79460958", own, uk), "79460958"); // part of the caller id: as said
+  // with its country code ("+", "00" or "plus") it is read as usableCallbackNumber reads it
+  assertEquals(givenCallbackNumber("+1 602 555 0177", own, uk), "+16025550177");
+  assertEquals(givenCallbackNumber("001 602 555 0177", own, uk), "+16025550177");
+  assertEquals(givenCallbackNumber("plus 61 491 570 156", own, uk), "+61491570156");
+  // refusals stand: too short, repeated digits, junk, our own line however it is written
+  for (const junk of ["555-017", "2222222222", "anonymous", "", null, undefined, "602 555 0100", "+16025550100"]) {
+    assertEquals(givenCallbackNumber(junk, own, uk), null, JSON.stringify(junk));
+  }
+  // no caller id, a North American one, or one that is not usable: the rules without a caller id
+  for (const caller of [null, undefined, "+16025550166", "anonymous", "+16025550100", "9601550123"]) {
+    assertEquals(givenCallbackNumber("602 555 0177", own, caller), "+16025550177", String(caller));
+    assertEquals(givenCallbackNumber("9601550123", own, caller), "9601550123", String(caller));
+    assertEquals(givenCallbackNumber("+44 20 7946 0958", own, caller), uk, String(caller));
+  }
+});
+
+Deno.test("storedCallbackNumber: a stored number is kept exactly as stored, never read again", () => {
+  const own = ["+16025550100"];
+  for (const stored of ["+16025550177", "+442079460958", "6025550177", "16025550177", "9601550123", "5550177"]) {
+    assertEquals(storedCallbackNumber(stored, own), stored, stored);
+  }
+  // junk and our own line are refused, in whichever form they were stored
+  for (const bad of [null, undefined, "", "0000000", "+16025550100", "6025550100", "anonymous"]) {
+    assertEquals(storedCallbackNumber(bad, own), null, String(bad));
+  }
+  // a value in no stored form is read as usableCallbackNumber reads it
+  assertEquals(storedCallbackNumber("(602) 555-0177", own), "+16025550177");
+  // each form a callback number is stored in comes back unchanged through the rules that wrote it
+  for (const said of ["602-555-0177", "+44 20 7946 0958", "960 155 0123", "555-0177"]) {
+    const n = usableCallbackNumber(said, own)!;
+    assertEquals(storedCallbackNumber(n, own), n, said);
+  }
+});
+
+Deno.test("normaliseCallbackNumber runs on its own (the chat battery's mocks embed its source)", () => {
+  const standalone = new Function(`return (${normaliseCallbackNumber.toString()});`)() as (v: unknown) => string | null;
+  for (const v of ["602-555-0101", "+44 20 7946 0958", "9601550123", "555-017", "anonymous"]) {
+    assertEquals(standalone(v), normaliseCallbackNumber(v), v);
+  }
+});
+
+Deno.test("callerIdNumber: envelope caller id, North American or from abroad", () => {
   const own = ["+16025550100"];
   assertEquals(callerIdNumber("+16025550101", own), "+16025550101");
   assertEquals(callerIdNumber(undefined, own), null); // web call: no customer number
   assertEquals(callerIdNumber("anonymous", own), null);
   assertEquals(callerIdNumber("+16025550100", own), null);
-  assertEquals(callerIdNumber("+447700900123", own), null); // outside NANP
+  // a caller id from abroad is a callback number like any other
+  assertEquals(callerIdNumber("+447700900123", own), "+447700900123");
+  assertEquals(callerIdNumber("+61491570156", own), "+61491570156");
   assertEquals(callerIdNumber("sip:user@10.0.0.12:5060", own), null);
   assertEquals(callerIdNumber("sip:22.33.44.55:5060", own), null);
+  assertEquals(callerIdNumber("sip:+61491570156@carrier.example", own), null);
   assertEquals(callerIdNumber(6025550101, own), null); // the envelope carries strings only
+});
+
+Deno.test("phoneGroups: how a callback number is read back and shown", () => {
+  assertEquals(phoneGroups("+16025550101"), {
+    kind: "north_american",
+    countryCode: "1",
+    groups: ["602", "555", "0101"],
+  });
+  assertEquals(phoneGroups("+442079460958"), {
+    kind: "international",
+    countryCode: "44",
+    groups: ["207", "946", "0958"],
+  });
+  assertEquals(phoneGroups("+61491570156"), {
+    kind: "international",
+    countryCode: "61",
+    groups: ["491", "570", "156"],
+  });
+  assertEquals(phoneGroups("+70005550100")?.countryCode, "7");
+  assertEquals(phoneGroups("+353005550100")?.countryCode, "353");
+  // only a number written with "+" has a country code: bare digits are kept whole, as said
+  assertEquals(phoneGroups("16025550177"), { kind: "as_said", countryCode: null, groups: ["160", "255", "501", "77"] });
+  assertEquals(phoneGroups("6025550177"), { kind: "as_said", countryCode: null, groups: ["602", "555", "0177"] });
+  assertEquals(phoneGroups("9601550123"), { kind: "as_said", countryCode: null, groups: ["960", "155", "0123"] });
+  assertEquals(phoneGroups("5550177"), { kind: "as_said", countryCode: null, groups: ["555", "0177"] });
+  assertEquals(phoneGroups("02079460958")?.groups, ["020", "794", "609", "58"]);
+  assertEquals(phoneGroups(""), null);
 });
 
 Deno.test("lastFour never returns more than four digits", () => {
@@ -325,16 +468,18 @@ Deno.test("system_error is distinct from not_found", () => {
   assert(!/find/i.test(sentenceFor("system_error")));
 });
 
-Deno.test("normaliseNanp and usableCallbackNumber: a callback must be dialable, a lookup key need not be", () => {
+Deno.test("callback vectors: any number the caller gives is kept; a lookup key stays North American", () => {
   assert(vectors.callbacks.length > 0);
   for (const v of vectors.callbacks) {
-    assertEquals(normaliseNanp(v.input), v.expected, v.note);
+    assertEquals(normaliseCallbackNumber(v.input), v.expected, v.note);
     assertEquals(usableCallbackNumber(v.input, []), v.expected, v.note);
   }
-  // Ten digits that break the numbering plan (a misheard number) are still looked up (the database
-  // answers not found and the caller can correct a digit), but never become a callback target.
+  // Ten digits outside the North American plan are looked up as an account number (the database answers
+  // not found and the caller can correct a digit), and as a callback number are noted as said.
   assertEquals(normalisePhone("9601550123"), "+19601550123");
-  assertEquals(usableCallbackNumber("9601550123", []), null);
+  assertEquals(usableCallbackNumber("9601550123", []), "9601550123");
+  // an account lookup key is never international
+  assertEquals(normalisePhone("+44 20 7946 0958"), null);
 });
 
 Deno.test("normaliseEmail: shared email vectors (spoken forms, spacing, and what is refused)", () => {

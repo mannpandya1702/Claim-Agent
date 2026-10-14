@@ -22,7 +22,7 @@
         },
         "callback_phone": {
           "type": "string",
-          "description": "The ten digits of the number the caller said to be called back on, digits only. Leave it out only when, on a phone call, they said to use the number they are calling from, or when they would rather not give a number."
+          "description": "The number the caller said to be called back on, exactly as they said it: digits only, with a leading + and the country code if they gave one. A number from any country and of any length is taken: never reject or question one for either. Never a country code on its own, or one worked out from a country they mention. Leave it out only when, on a phone call, they said to use the number they are calling from, or when they would rather not give a number."
         }
       },
       "additionalProperties": false

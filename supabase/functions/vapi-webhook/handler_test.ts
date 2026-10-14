@@ -804,6 +804,16 @@ Deno.test("ToolCtx comes from the envelope: call key, channel, caller id, chat f
   );
   await run(post({ message: { ...chatEnvelope("chat-1", "sess-1"), ...list } }), deps);
   await run(post({ message: { type: "tool-calls", chat: { id: "chat-only", orgId: ORG }, ...list } }), deps);
+  await run(
+    post({
+      message: {
+        type: "tool-calls",
+        call: { id: CALL_ID, orgId: ORG, type: "inboundPhoneCall", customer: { number: "+61491570156" } },
+        ...list,
+      },
+    }),
+    deps,
+  );
 
   const ctxs = seen.map((s) => ({ ...s.ctx, deps: undefined }));
   assertEquals(ctxs[0], {
@@ -820,6 +830,7 @@ Deno.test("ToolCtx comes from the envelope: call key, channel, caller id, chat f
   assertEquals(ctxs[4].channel, "unknown");
   assertEquals(ctxs[5], { callKey: "sess-1", channel: "chat", callerNumber: null, isChat: true, deps: undefined });
   assertEquals(ctxs[6].callKey, "chat-only", "chat.id when there is no sessionId");
+  assertEquals(ctxs[7].callerNumber, "+61491570156", "a caller id from abroad is a caller id");
   assert(seen.every((s) => s.ctx.deps === deps));
 });
 

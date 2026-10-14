@@ -39,11 +39,13 @@ import {
   type VerifyIntent,
 } from "./enums.ts";
 import {
+  givenCallbackNumber,
   lastFour,
   normaliseEmail,
   normaliseName,
   normalisePhone,
   parseDobParts,
+  storedCallbackNumber,
   usableCallbackNumber,
 } from "./identity.ts";
 import { parseLossDate } from "./loss_date.ts";
@@ -201,10 +203,11 @@ function ownNumbers(env: Env): string[] {
   return typeof env?.OWN_NUMBERS === "string" ? env.OWN_NUMBERS.split(",").map((s) => s.trim()).filter(Boolean) : [];
 }
 
-/** "+16025550177" -> "6025550177". */
-function nationalDigits(e164: string): string {
-  const d = e164.replace(/\D/g, "");
-  return d.length === 11 && d[0] === "1" ? d.slice(1) : d;
+/** A callback number as its read-back takes it: a North American number as its ten digits
+ *  ("+16025550177" -> "6025550177"); an international one ("+442079460958") or one noted as said
+ *  ("9601550123") as stored. */
+function readBackNumber(phone: string): string {
+  return /^\+1\d{10}$/.test(phone) ? phone.slice(2) : phone;
 }
 
 const NY_DAY = new Intl.DateTimeFormat("en-US", {
@@ -269,7 +272,7 @@ async function lookupCustomer(args: Args, ctx: Run): Promise<ToolResult> {
   });
   if (!LOOKUP_CODES.has(code)) throw new Error("lookup_customer_attempt returned an unexpected code");
   return code === "not_found" && phoneE164
-    ? answer(ctx, code, { digits: nationalDigits(phoneE164) })
+    ? answer(ctx, code, { digits: readBackNumber(phoneE164) })
     : answer(ctx, code);
 }
 
@@ -299,12 +302,16 @@ const CONTACT_RESUME_CODES: ReadonlySet<string> = new Set([
   "claim_needs_phone",
 ]);
 
-/** Whether a start_claim on this call was answered with one of `codes`: the caller already told the
- *  loss, and was sent to verify or give their details first. The next sentence then asks whether to
- *  take it down now instead of asking what happened again. A failed read asks what happened. */
+/** Whether a start_claim on this call was answered with one of `codes` (or a confirm_claim with
+ *  claim_needs_phone, when that is one of them): the caller already told the loss, and was sent to verify
+ *  or give their details first. The next sentence then asks whether to take it down now instead of asking
+ *  what happened again. A failed read asks what happened. */
 async function claimWaiting(ctx: Run, codes: ReadonlySet<string>): Promise<boolean> {
   const attempts = await readOr<AttemptRow[]>(ctx, "listAttempts", () => ctx.deps.store.listAttempts(ctx.callKey), []);
-  return attempts.some((a) => a.tool_name === "start_claim" && a.code !== null && codes.has(a.code));
+  return attempts.some((a) =>
+    a.code !== null && codes.has(a.code) &&
+    (a.tool_name === "start_claim" || (a.tool_name === "confirm_claim" && a.code === "claim_needs_phone"))
+  );
 }
 
 function claimsData(claims: Claim[]): Record<string, unknown>[] {
@@ -678,22 +685,57 @@ async function capturedContact(ctx: Run): Promise<CallerContact | null> {
 }
 
 /** The callback target when the caller gave no number with this request: the verified account's,
- *  else the number captured with their details on this call, else caller id. Never our own line. */
+ *  else the number captured with their details on this call (as stored), else caller id. Never our own
+ *  line. */
 function fallbackCallback(ctx: Run, customer: Customer | null, contact: CallerContact | null): Callback {
   const own = ownNumbers(ctx.deps.env);
   const account = usableCallbackNumber(customer?.phone_e164, own);
   if (account) return { phone: account, source: "account" };
-  const captured = usableCallbackNumber(contact?.callback_phone, own);
+  const captured = storedCallbackNumber(contact?.callback_phone, own);
   if (captured) return { phone: captured, source: contact?.callback_source === "caller_id" ? "caller_id" : "argument" };
   const caller = usableCallbackNumber(ctx.callerNumber, own);
   if (caller) return { phone: caller, source: "caller_id" };
   return { phone: null, source: "none" };
 }
 
+/** A repeat request on a row that holds no number: the number this call can give it now (the verified
+ *  account's, one captured with the caller's details, or caller id), written to the row. False when
+ *  there is none or the write failed, so the sentence asks for one instead of promising a call. The
+ *  row has no number, so nothing the caller said can be overwritten. */
+async function fillCallback(
+  ctx: Run,
+  session: Session | null,
+  contact: CallerContact | null,
+  row: { reason: EscalationReason; verified: boolean },
+): Promise<boolean> {
+  const callback = fallbackCallback(ctx, await verifiedAccount(ctx, session), contact);
+  if (!callback.phone) return false;
+  try {
+    await ctx.deps.store.upsertEscalation({
+      callKey: ctx.callKey,
+      kind: "representative",
+      reason: row.reason,
+      details: null,
+      callbackPhone: callback.phone,
+      callbackSource: callback.source,
+      channel: ctx.channel,
+      verified: row.verified,
+    });
+    return true;
+  } catch (e) {
+    logError(ctx, "upsertEscalation", e);
+    return false;
+  }
+}
+
 function queuedData(source: CallbackSource | null, phone: string): Record<string, unknown> | undefined {
   switch (source) {
     case "argument":
-      return { target: "given", digits: lastFour(phone) };
+      // A North American number is named by its last four; one from abroad or noted as said is read in
+      // full, so a wrong country code or a missing digit can still be heard (speak.ts repQueued).
+      return /^\+1\d{10}$/.test(phone)
+        ? { target: "given", digits: lastFour(phone) }
+        : { target: "given", number: phone };
     case "account":
       return { target: "account" };
     case "caller_id":
@@ -729,7 +771,9 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
   const { store, env } = ctx.deps;
   const callKey = ctx.callKey;
   const details = cleanDetails(args.details);
-  const given = usableCallbackNumber(args.callback_phone, ownNumbers(env));
+  // Read against the caller id: on a call from abroad, the caller's own number said in its national
+  // form is that caller id, and no number given without a country code is made North American.
+  const given = givenCallbackNumber(args.callback_phone, ownNumbers(env), ctx.callerNumber);
 
   // Enrichment reads are best effort: a failed read costs a label, and the row matters more.
   const [session, attempts, escalations, contact] = await Promise.all([
@@ -767,11 +811,16 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
   if (!row.inserted) {
     // A repeat never alerts again; the dashboard row now carries the new number.
     if (given && given !== existing?.callback_phone) {
-      return answer(ctx, "callback_updated", { digits: nationalDigits(given) });
+      return answer(ctx, "callback_updated", { digits: readBackNumber(given) });
     }
     // A chat answered its first request as if the team had been told, so its repeat says the same.
     const told = row.alertStatus === "sent" || (ctx.isChat && row.alertStatus === "skipped");
-    return answer(ctx, told ? "rep_already_queued" : "rep_recorded");
+    if (!told) return answer(ctx, "rep_recorded");
+    // "Someone will call you back" only with a number to call: the row's, or one this call can give it.
+    if (!row.callbackPhone && !(await fillCallback(ctx, session, contact, { reason, verified }))) {
+      return answer(ctx, "rep_queued_no_number");
+    }
+    return answer(ctx, "rep_already_queued");
   }
 
   // This call created the row, so the rest of the request can go on it without overwriting anything.
@@ -824,9 +873,9 @@ async function escalate(args: Args, ctx: Run): Promise<ToolResult> {
 async function replayEscalate(code: Code, args: Args, ctx: Run): Promise<ToolResult> {
   if (code !== "rep_queued" && code !== "callback_updated") return answer(ctx, code);
   // A retry carries the first delivery's arguments, so a number the caller gave is rebuilt from
-  // them. The row is not: a later request may have changed its number since.
-  const given = usableCallbackNumber(args.callback_phone, ownNumbers(ctx.deps.env));
-  if (code === "callback_updated") return answer(ctx, code, given ? { digits: nationalDigits(given) } : undefined);
+  // them (against the same caller id). The row is not: a later request may have changed its number since.
+  const given = givenCallbackNumber(args.callback_phone, ownNumbers(ctx.deps.env), ctx.callerNumber);
+  if (code === "callback_updated") return answer(ctx, code, given ? { digits: readBackNumber(given) } : undefined);
   if (given) return answer(ctx, code, queuedData("argument", given));
   // Without an argument the first answer named the fallback this delivery wrote when it created the
   // row. Only a number given later can have replaced it, and then that target is no longer known,
@@ -1079,11 +1128,12 @@ function callerNames(first: unknown, last: unknown): { first: string; last: stri
  *  is the account's (never asked, never taken from the model) and their capture is an email_update,
  *  which needs an address and is only for an account with none on file; anyone else is a
  *  new_customer, whose name is required and email optional. A correction that leaves the callback
- *  number out keeps the number the caller said earlier on this call. */
+ *  number out keeps the number the caller said earlier on this call. unclear: a number was passed
+ *  (it has digits) that gives no callback number (too few or too many digits, our own line). */
 async function contactInput(
   args: Args,
   ctx: Run,
-): Promise<{ ok: true; input: ContactInput } | { ok: false; code: Code }> {
+): Promise<{ ok: true; input: ContactInput; unclear: boolean } | { ok: false; code: Code }> {
   const { store, env } = ctx.deps;
   const session = await store.getSession(ctx.callKey);
   let names: { first: string; last: string } | null;
@@ -1109,11 +1159,12 @@ async function contactInput(
   if ((emailGiven || kind === "email_update") && !email) return { ok: false, code: "contact_invalid_email" };
 
   const own = ownNumbers(env);
-  let given = usableCallbackNumber(args.callback_phone, own);
+  // Read against the caller id, as escalate reads it.
+  let given = givenCallbackNumber(args.callback_phone, own, ctx.callerNumber);
   if (!given && args.callback_phone === undefined) {
-    // A correction re-sends the name and the address; a number said for an earlier capture stands.
+    // A correction re-sends the name and the address; a number said for an earlier capture stands, as stored.
     const prior = await capturedContact(ctx);
-    if (prior?.callback_source === "argument") given = usableCallbackNumber(prior.callback_phone, own);
+    if (prior?.callback_source === "argument") given = storedCallbackNumber(prior.callback_phone, own);
   }
   const callerId = given ? null : usableCallbackNumber(ctx.callerNumber, own);
   return {
@@ -1128,19 +1179,35 @@ async function contactInput(
       callbackSource: given ? "argument" : callerId ? "caller_id" : "none",
       customerId,
     },
+    unclear: !given && hasDigits(args.callback_phone),
   };
 }
 
 const PHONE_CHANNELS: ReadonlySet<string> = new Set(["inboundPhoneCall", "outboundPhoneCall"]);
 
-/** A new caller on a phone call left the number out (they said to use the one they're calling from)
- *  but the call has no usable caller id (withheld, international, junk): ask once for the best number.
- *  If they would rather not give one, the next capture is stored without a number. A web call or a
- *  chat never has a caller id, so its prompt asks for the digits and an omitted number means none. */
-async function needsCallbackNumber(input: ContactInput, ctx: Run): Promise<boolean> {
-  if (input.kind !== "new_customer" || input.callbackSource !== "none" || !PHONE_CHANNELS.has(ctx.channel)) {
-    return false;
-  }
+/** A value with at least one digit: what the model heard as a number, usable or not. */
+function hasDigits(v: unknown): boolean {
+  return (typeof v === "string" || typeof v === "number") && /\d/.test(String(v));
+}
+
+/** contact_needs_phone. unclear: the number passed gave no callback number, so the sentence says it didn't
+ *  get that number rather than that it can't see the caller id; the result keeps its usual shape. */
+function needsPhone(ctx: Run, unclear: boolean): ToolResult {
+  return unclear
+    ? { code: "contact_needs_phone", sentence: sentenceFor("contact_needs_phone", { unclear: true }, ctx.callKey) }
+    : answer(ctx, "contact_needs_phone");
+}
+
+/** The best-number question a new caller's capture asks before anything is stored, or null. Asked when a
+ *  number was passed that gives no callback number and the call has no caller id to fall back on (a
+ *  number that came out wrong is never dropped without a word), or when a phone caller left the number
+ *  out (they said to use the one they're calling from) but the call has no usable caller id (withheld or
+ *  junk). Once per call: if they would rather not give one, the next capture is stored without a number,
+ *  and a callback or a claim asks for one again before anything is promised. A web call or a chat that
+ *  leaves the number out stores none: its prompt asks for the digits, so an omitted number means none. */
+async function numberQuestion(input: ContactInput, unclear: boolean, ctx: Run): Promise<ToolResult | null> {
+  if (input.kind !== "new_customer" || input.callbackSource !== "none") return null;
+  if (!unclear && !PHONE_CHANNELS.has(ctx.channel)) return null;
   // A failed read never asks: asking twice is worse than storing no number.
   const attempts = await readOr<AttemptRow[] | null>(
     ctx,
@@ -1148,18 +1215,25 @@ async function needsCallbackNumber(input: ContactInput, ctx: Run): Promise<boole
     () => ctx.deps.store.listAttempts(ctx.callKey),
     null,
   );
-  return attempts !== null &&
-    !attempts.some((a) => a.tool_name === "capture_contact" && a.code === "contact_needs_phone");
+  if (
+    attempts === null || attempts.some((a) => a.tool_name === "capture_contact" && a.code === "contact_needs_phone")
+  ) {
+    return null;
+  }
+  return needsPhone(ctx, unclear);
 }
 
 async function captureContact(args: Args, ctx: Run): Promise<ToolResult> {
   const prepared = await contactInput(args, ctx);
   if (!prepared.ok) return answer(ctx, prepared.code);
-  if (await needsCallbackNumber(prepared.input, ctx)) return answer(ctx, "contact_needs_phone");
+  const question = await numberQuestion(prepared.input, prepared.unclear, ctx);
+  if (question) return question;
   return readback(ctx, await ctx.deps.store.upsertContact(prepared.input));
 }
 
 async function replayCapture(code: Code, args: Args, ctx: Run): Promise<ToolResult> {
+  // Only a number that came out wrong was asked about with digits passed (a usable one is never asked about).
+  if (code === "contact_needs_phone") return needsPhone(ctx, hasDigits(args.callback_phone));
   if (code !== "contact_readback") return answer(ctx, code);
   // confirm_contact confirms whatever row is stored, so the read-back is of that row: a later capture
   // may have replaced what this delivery's arguments said. Reading is not a side effect.
@@ -1336,6 +1410,14 @@ async function claimGate(ctx: Run): Promise<ClaimGate> {
   return { ok: false, code: looked ? "claim_needs_contact" : "claim_needs_lookup" };
 }
 
+/** The number a new caller's intake is called back on: the one confirmed with their details (as stored),
+ *  else caller id. null when the call has neither: then no sentence promises a specialist's call, and
+ *  start_claim and confirm_claim ask for the best number instead (claim_needs_phone). */
+function leadCallback(ctx: Run, confirmed: CallerContact | null): string | null {
+  const own = ownNumbers(ctx.deps.env);
+  return storedCallbackNumber(confirmed?.callback_phone, own) ?? usableCallbackNumber(ctx.callerNumber, own);
+}
+
 /** A date the server could not read a second time on this call is not asked for a third time: a
  *  specialist helps instead. A failed read asks again. */
 async function badDate(ctx: Run): Promise<ToolResult> {
@@ -1345,20 +1427,14 @@ async function badDate(ctx: Run): Promise<ToolResult> {
 }
 
 async function startClaim(args: Args, ctx: Run): Promise<ToolResult> {
-  const { store, env } = ctx.deps;
+  const { store } = ctx.deps;
   const gate = await claimGate(ctx);
   if (!gate.ok) return answer(ctx, gate.code);
   const existing = await store.getClaimIntake(ctx.callKey);
   if (existing?.confirmed) return alreadyFiled(ctx, existing);
   // A new caller's intake promises a call from a specialist, so it needs a number to call (a capture
   // with the number they say then needs its own read-back, which confirms it).
-  const own = ownNumbers(env);
-  if (
-    gate.kind === "lead_intake" && !usableCallbackNumber(gate.contact?.callback_phone, own) &&
-    !usableCallbackNumber(ctx.callerNumber, own)
-  ) {
-    return answer(ctx, "claim_needs_phone");
-  }
+  if (gate.kind === "lead_intake" && !leadCallback(ctx, gate.contact)) return answer(ctx, "claim_needs_phone");
 
   const claimType = claimTypeOf(args.claim_type);
   if (!claimType) return answer(ctx, "bad_args");
@@ -1445,10 +1521,9 @@ async function announceFiled(row: ClaimIntake, ctx: Run): Promise<ToolResult> {
   const to = (lead ? newCaller?.email : customer?.email)?.trim() ?? "";
   const firstName = (lead ? newCaller?.first_name : customer?.first_name)?.trim() ?? "";
   const last3 = lead ? null : claimLast3Of(row);
-  const own = ownNumbers(env);
   const phone = lead
-    ? usableCallbackNumber(newCaller?.callback_phone, own) ?? usableCallbackNumber(ctx.callerNumber, own)
-    : customer?.phone_e164 ?? usableCallbackNumber(ctx.callerNumber, own);
+    ? leadCallback(ctx, newCaller)
+    : customer?.phone_e164 ?? usableCallbackNumber(ctx.callerNumber, ownNumbers(env));
 
   const alert: ClaimIntakeAlert = {
     kind: "claim_intake",
@@ -1493,6 +1568,13 @@ async function confirmClaim(args: Args, ctx: Run): Promise<ToolResult> {
   if (!before) return answer(ctx, "claim_not_pending");
   // Filed by an earlier confirm: nothing is filed, sent or paged again.
   if (before.confirmed) return alreadyFiled(ctx, before);
+  if (before.kind === "lead_intake") {
+    // A new caller's intake promises a specialist's call, so it is filed only with a number to call. The
+    // one start_claim saw may be gone since (a correction that came out without a usable number): ask.
+    const contact = await store.getContact(ctx.callKey);
+    const confirmed = contact?.kind === "new_customer" && contact.confirmed ? contact : null;
+    if (!leadCallback(ctx, confirmed)) return answer(ctx, "claim_needs_phone");
+  }
   const filed = await store.fileClaimIntake(ctx.callKey);
   if (!filed) return answer(ctx, "claim_not_pending");
   if (!filed.intake.confirmed) throw new Error("file_claim_intake returned an unfiled intake");

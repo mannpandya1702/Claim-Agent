@@ -304,9 +304,10 @@ GoHighLevel skip reasons, in the row's `progress.skipped` and the `ghl_skipped` 
 | Reason | Meaning |
 |---|---|
 | `web_unverified` | A web call with no verified customer and no confirmed new-caller details |
-| `no_caller_id` | A phone call with no usable caller ID (withheld, or one of our own numbers) |
+| `no_caller_id` | A phone call with no usable caller ID (withheld, not E.164, or one of our own numbers) |
 | `no_matching_contact` | A caller-ID search found nothing; that path never creates a contact |
 | `locked_candidate_number` | A locked caller on the account's own number; that account is never touched |
 | `lead_number_not_caller_id` | A new caller's stated number already belongs to a contact, who may be a stranger |
-| `new_caller_without_number` | A confirmed new caller with no dialable number |
+| `new_caller_without_number` | A confirmed new caller with no callback number |
+| `new_caller_number_without_country_code` | A confirmed new caller whose number was noted as said, without a country code, on a call with no caller ID to key on (a web call): GHL takes E.164 only, so the lead stays on the dashboard and in the team email |
 | `verified_customer_missing`, `verified_without_phone` | The verified customer's row is unreadable or has no number: a data problem |

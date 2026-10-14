@@ -314,12 +314,181 @@ Deno.test("callback number: the argument, else the verified account, else caller
   assertEquals(c.data, { target: "caller_id" });
   assertEquals([caller.rows()[0].callback_phone, caller.rows()[0].callback_source], ["+16025550188", "caller_id"]);
 
-  // an unusable argument falls through to the next source instead of being stored
-  for (const junk of ["anonymous", "555-0177", "0000000000", "1234567890"]) {
+  // an argument that is no number at all falls through to the next source instead of being stored
+  for (const junk of ["anonymous", "555-017", "0000000000", "1234567890123456", "+1 222 222 2222"]) {
     const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550188" });
     await h.run("escalate", { callback_phone: junk });
     assertEquals([h.rows()[0].callback_phone, h.rows()[0].callback_source], ["+16025550188", "caller_id"], junk);
   }
+});
+
+// A live call: an unverified caller asked to be called back "on this number" from a mobile outside North
+// America. The caller id was dropped, the number they then said (no country code) was refused, and the
+// repeat promised a callback with no number on record. Any number the caller gives is noted as given.
+Deno.test("callback number from abroad: the argument with its country code is kept and read back", async () => {
+  const h = harness();
+  const first = await h.run("escalate", { reason: "representative_requested", callback_phone: "+44 20 7946 0958" });
+  // read in full, country code first, so a wrong country code or a missing digit can still be heard
+  assertEquals(first, {
+    code: "rep_queued",
+    sentence: queuedAt("the number you gave me, plus four four, two zero seven, nine four six, zero nine five eight,"),
+    data: { target: "given", number: "+442079460958" },
+  });
+  assertEquals([h.rows()[0].callback_phone, h.rows()[0].callback_source], ["+442079460958", "argument"]);
+  // the team email carries every digit, readably
+  assertStringIncludes(body(h.resendCalls()[0]).html, "+44 207 946 0958 (international)");
+  const updated = await h.run("escalate", { callback_phone: "0061 491 570 156" });
+  assertEquals(updated, {
+    code: "callback_updated",
+    sentence: `Got it, plus six one, four nine one, five seven zero, one five six. ${ANYTHING_ELSE}`,
+    data: { digits: "+61491570156" },
+  });
+  assertEquals(h.rows()[0].callback_phone, "+61491570156");
+});
+
+Deno.test("callback number said without a country code: noted as said and read back, never refused", async () => {
+  const h = harness();
+  assertEquals((await h.run("escalate", { reason: "representative_requested" })).code, "rep_queued_no_number");
+  // "nine six zero, one five five, zero one two three": ten digits no North American number can have
+  const given = await h.run("escalate", { callback_phone: "9601550123" });
+  assertEquals(given, {
+    code: "callback_updated",
+    sentence: `Got it, nine six zero, one five five, zero one two three. ${ANYTHING_ELSE}`,
+    data: { digits: "9601550123" },
+  });
+  assertEquals([h.rows()[0].callback_phone, h.rows()[0].callback_source], ["9601550123", "argument"]);
+  assertEquals(await h.run("escalate", {}), { code: "rep_already_queued", sentence: REP_ALREADY_QUEUED });
+  // a first request with one is queued on it, and the number is read back in full
+  const fresh = harness();
+  const r = await fresh.run("escalate", { callback_phone: "960 155 0123" });
+  assertEquals(r, {
+    code: "rep_queued",
+    sentence: queuedAt("the number you gave me, nine six zero, one five five, zero one two three,"),
+    data: { target: "given", number: "9601550123" },
+  });
+  assertStringIncludes(body(fresh.resendCalls()[0]).html, "960 155 0123 (as said, no country code)");
+  // seven digits (no area code) are noted too, and heard in full, so the caller can add what is missing
+  const seven = harness();
+  const s = await seven.run("escalate", { callback_phone: "555-0177" });
+  assertStringIncludes(s.sentence, "the number you gave me, five five five, zero one seven seven,");
+  assertEquals(seven.rows()[0].callback_phone, "5550177");
+  // a retry of the same delivery rebuilds the same answer from its arguments
+  assertEquals(await fresh.run("escalate", { callback_phone: "960 155 0123" }, "tc_1"), r);
+});
+
+// On a call from abroad the number a caller gives without a country code is read against the caller id:
+// their own number in its national form is that caller id (said back with its country code), and any
+// other is noted as said. A bare ten digits are never made North American there.
+Deno.test("a call from abroad: the caller's own number in its national form is the caller id", async () => {
+  for (const said of ["020 7946 0958", "2079460958", "44 20 7946 0958", "+44 20 7946 0958", "0044 20 7946 0958"]) {
+    const h = harness({ channel: "inboundPhoneCall", callerNumber: "+442079460958" });
+    const r = await h.run("escalate", { callback_phone: said });
+    assertEquals(r, {
+      code: "rep_queued",
+      sentence: queuedAt(
+        "the number you gave me, plus four four, two zero seven, nine four six, zero nine five eight,",
+      ),
+      data: { target: "given", number: "+442079460958" },
+    }, said);
+    assertEquals(h.rows()[0].callback_phone, "+442079460958", said);
+  }
+  // queued on the caller id, then the caller says that number: nothing changes, the call stays promised
+  const h = harness({ channel: "inboundPhoneCall", callerNumber: "+61491570156" });
+  assertEquals((await h.run("escalate", {})).data, { target: "caller_id" });
+  assertEquals(await h.run("escalate", { callback_phone: "0491 570 156" }), {
+    code: "rep_already_queued",
+    sentence: REP_ALREADY_QUEUED,
+  });
+  assertEquals(h.rows()[0].callback_phone, "+61491570156");
+  assertEquals(h.telegramCalls().length, 1, "a repeat never pages again");
+});
+
+Deno.test("a call from abroad: another number without a country code is noted as said, never made +1", async () => {
+  const h = harness({ channel: "inboundPhoneCall", callerNumber: "+61491570156" });
+  assertEquals((await h.run("escalate", {})).data, { target: "caller_id" });
+  // ten digits that would pass for a North American number replace the caller id as said, with the digits read back
+  const ten = await h.run("escalate", { callback_phone: "602 555 0177" });
+  assertEquals(ten, {
+    code: "callback_updated",
+    sentence: `Got it, six zero two, five five five, zero one seven seven. ${ANYTHING_ELSE}`,
+    data: { digits: "6025550177" },
+  });
+  assertEquals([h.rows()[0].callback_phone, h.rows()[0].callback_source], ["6025550177", "argument"]);
+  // eleven digits starting with 1 keep their 1; only a "+" (or "00") says the country code
+  assertEquals((await h.run("escalate", { callback_phone: "1 602 555 0177" })).data, { digits: "16025550177" });
+  assertEquals((await h.run("escalate", { callback_phone: "+1 602 555 0177" })).data, { digits: "6025550177" });
+  assertEquals(h.rows()[0].callback_phone, "+16025550177");
+  // a first request with such a number: read back in full, and the team sees it as said
+  const fresh = harness({ channel: "inboundPhoneCall", callerNumber: "+442079460958" });
+  const r = await fresh.run("escalate", { callback_phone: "6025550177" });
+  assertEquals(r.data, { target: "given", number: "6025550177" });
+  assertStringIncludes(r.sentence, "the number you gave me, six zero two, five five five, zero one seven seven,");
+  assertStringIncludes(body(fresh.resendCalls()[0]).html, "602 555 0177 (as said, no country code)");
+  // our own line said without its country code is still never a callback number
+  const own = harness({ channel: "inboundPhoneCall", callerNumber: "+442079460958" });
+  await own.run("escalate", { callback_phone: "520 521 0277" });
+  assertEquals([own.rows()[0].callback_phone, own.rows()[0].callback_source], ["+442079460958", "caller_id"]);
+});
+
+Deno.test("a caller id from abroad on the phone line is the callback target", async () => {
+  const h = harness({ channel: "inboundPhoneCall", callerNumber: "+61491570156" });
+  const r = await h.run("escalate", { reason: "representative_requested" });
+  assertEquals(r, {
+    code: "rep_queued",
+    sentence: queuedAt("the number you're calling from"),
+    data: { target: "caller_id" },
+  });
+  assertEquals([h.rows()[0].callback_phone, h.rows()[0].callback_source], ["+61491570156", "caller_id"]);
+  assertStringIncludes(body(h.resendCalls()[0]).html, "+61 491 570 156 (international)");
+  // the card stays ids and enums: no number reaches Telegram
+  assertFalse(body(h.telegramCalls()[0]).text.includes("0156"));
+  assertEquals(await h.run("escalate", {}), { code: "rep_already_queued", sentence: REP_ALREADY_QUEUED });
+});
+
+Deno.test("a repeat with no number anywhere asks for one, never promises a call", async () => {
+  for (const opts of [{}, { channel: "chat" as Channel, isChat: true }, { channel: "inboundPhoneCall" as Channel }]) {
+    const h = harness(opts);
+    const what = JSON.stringify(opts);
+    assertEquals((await h.run("escalate", {})).code, "rep_queued_no_number", what);
+    // the caller asks again without giving one: no "someone will call you back"
+    assertEquals(await h.run("escalate", {}), { code: "rep_queued_no_number", sentence: REP_QUEUED_NO_NUMBER }, what);
+    assertEquals(await h.run("escalate", { details: "Still waiting" }), {
+      code: "rep_queued_no_number",
+      sentence: REP_QUEUED_NO_NUMBER,
+    }, what);
+    // a number given on a repeat is saved and read back; only then is the call promised
+    assertEquals((await h.run("escalate", { callback_phone: "+44 20 7946 0958" })).code, "callback_updated", what);
+    assertEquals((await h.run("escalate", {})).code, "rep_already_queued", what);
+    assertEquals(h.rows().length, 1, what);
+  }
+});
+
+Deno.test("a repeat on a row with no number writes the number the call has now, then promises the call", async () => {
+  // the caller verified after the first request: the account's number goes on the row
+  const h = harness();
+  assertEquals((await h.run("escalate", {})).code, "rep_queued_no_number");
+  await verifyTobias(h);
+  assertEquals(await h.run("escalate", {}), { code: "rep_already_queued", sentence: REP_ALREADY_QUEUED });
+  assertEquals([h.rows()[0].callback_phone, h.rows()[0].callback_source], ["+16025550101", "account"]);
+  assertEquals(h.telegramCalls().length, 1, "a repeat never pages again");
+
+  // a number captured with the caller's details after the first request
+  const c = harness();
+  assertEquals((await c.run("escalate", {})).code, "rep_queued_no_number");
+  await c.run("capture_contact", { first_name: "Jane", last_name: "Doe", callback_phone: "9601550123" });
+  assertEquals((await c.run("escalate", {})).code, "rep_already_queued");
+  assertEquals([c.rows()[0].callback_phone, c.rows()[0].callback_source], ["9601550123", "argument"]);
+
+  // the write fails: nothing is promised, the sentence asks for a number
+  const f = harness();
+  assertEquals((await f.run("escalate", {})).code, "rep_queued_no_number");
+  await verifyTobias(f);
+  const upsert = f.store.upsertEscalation;
+  let writes = 0;
+  f.store.upsertEscalation = (p) => (++writes === 2 ? Promise.reject(new Error("connection reset")) : upsert(p));
+  assertEquals((await f.run("escalate", {})).code, "rep_queued_no_number");
+  assertEquals(f.rows()[0].callback_phone, null);
+  assert(f.logs.some((l) => l.event === "tool_error" && l.step === "upsertEscalation"));
 });
 
 Deno.test("the callback fallback never uses our own line, whichever way it arrives", async () => {

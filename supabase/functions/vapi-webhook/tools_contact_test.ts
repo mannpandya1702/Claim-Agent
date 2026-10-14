@@ -224,11 +224,21 @@ Deno.test("new caller: the callback number is the one said, else the caller id, 
     phone.contact()?.callback_phone,
     phone.contact()?.callback_source,
   ], ["+16025550177", "argument"]);
-  // a number that cannot be dialled back falls back to the caller id
+  // a number from abroad, or one said without a country code, is noted as given
+  for (
+    const [said, stored] of [["+44 20 7946 0958", "+442079460958"], ["9601550123", "9601550123"], [
+      "555-0177",
+      "5550177",
+    ]]
+  ) {
+    await phone.run("capture_contact", { first_name: "Jane", last_name: "Doe", callback_phone: said });
+    assertEquals([phone.contact()?.callback_phone, phone.contact()?.callback_source], [stored, "argument"], said);
+  }
+  // only something that is no number at all (too few digits, junk) falls back to the caller id
   await phone.run("capture_contact", {
     first_name: "Jane",
     last_name: "Doe",
-    callback_phone: "555-0177",
+    callback_phone: "555-017",
   });
   assertEquals([
     phone.contact()?.callback_phone,
@@ -237,11 +247,12 @@ Deno.test("new caller: the callback number is the one said, else the caller id, 
 
   const own = harness({ channel: "inboundPhoneCall", callerNumber: OUR_LINE });
   const args = { first_name: "Jane", last_name: "Doe", callback_phone: OUR_LINE };
-  // nothing usable to call back on a phone call: the tool asks once for the best number
+  // nothing usable to call back on a phone call: the tool asks once for the best number (the number
+  // given was not one, so it says it didn't get that number)
   const ask = await own.run("capture_contact", args);
   assertEquals([ask.code, ask.sentence], [
     "contact_needs_phone",
-    "Sorry, I can't see the number you're calling from. What's the best number to reach you?",
+    "Sorry, I didn't quite get that number. What's the best number to reach you?",
   ]);
   assertEquals(own.contact(), undefined);
   // asked once: a caller who would rather not give one is stored without a number
@@ -282,6 +293,89 @@ Deno.test("capture_contact: the number a caller said is read back; a caller id n
   assertEquals(phone.contact()?.callback_source, "caller_id");
 });
 
+Deno.test("capture_contact: a number from abroad or one said without a country code is read back in full", async () => {
+  const h = harness();
+  const abroad = await h.run("capture_contact", {
+    first_name: "Jane",
+    last_name: "Doe",
+    callback_phone: "+44 20 7946 0958",
+  });
+  assertEquals(
+    abroad.sentence,
+    "Thanks! Just to confirm, that's Jane Doe, and the best number is plus four four, two zero seven, nine four six, zero nine five eight. Did I get that right?",
+  );
+  assertEquals([h.contact()?.callback_phone, h.contact()?.callback_source], ["+442079460958", "argument"]);
+  const asSaid = await h.run("capture_contact", { first_name: "Jane", last_name: "Doe", callback_phone: "9601550123" });
+  assertEquals(
+    asSaid.sentence,
+    "Thanks! Just to confirm, that's Jane Doe, and the best number is nine six zero, one five five, zero one two three. Did I get that right?",
+  );
+  assertEquals(h.contact()?.callback_phone, "9601550123");
+  // a caller id from abroad is the caller's own line: stored as one, never asked for again, not read back
+  const phone = harness({ channel: "inboundPhoneCall", callerNumber: "+61491570156" });
+  const fromCallerId = await phone.run("capture_contact", { first_name: "Jane", last_name: "Doe" });
+  assertEquals(fromCallerId.code, "contact_readback");
+  assertEquals([phone.contact()?.callback_phone, phone.contact()?.callback_source], ["+61491570156", "caller_id"]);
+  assertFalse(fromCallerId.sentence.includes("number"));
+});
+
+Deno.test("capture_contact on a call from abroad: the caller's own number said nationally is the caller id", async () => {
+  const h = harness({ channel: "inboundPhoneCall", callerNumber: "+442079460958" });
+  const read = await h.run("capture_contact", {
+    first_name: "Jane",
+    last_name: "Doe",
+    callback_phone: "020 7946 0958",
+  });
+  // stored as the caller id, and read back with its country code for the caller to confirm
+  assertEquals([h.contact()?.callback_phone, h.contact()?.callback_source], ["+442079460958", "argument"]);
+  assertEquals(
+    read.sentence,
+    "Thanks! Just to confirm, that's Jane Doe, and the best number is plus four four, two zero seven, nine four six, zero nine five eight. Did I get that right?",
+  );
+  // any other number without a country code is noted as said, never made North American
+  const other = await h.run("capture_contact", { first_name: "Jane", last_name: "Doe", callback_phone: "6025550177" });
+  assertEquals([h.contact()?.callback_phone, h.contact()?.callback_source], ["6025550177", "argument"]);
+  assertStringIncludes(other.sentence, "the best number is six zero two, five five five, zero one seven seven.");
+  // a correction that leaves the number out keeps it as stored
+  await h.run("capture_contact", { first_name: "Jayne", last_name: "Doe" });
+  assertEquals(h.contact()?.callback_phone, "6025550177");
+  // the same digits on a call with no caller id from abroad are a North American number
+  const web = harness();
+  await web.run("capture_contact", { first_name: "Jane", last_name: "Doe", callback_phone: "6025550177" });
+  assertEquals(web.contact()?.callback_phone, "+16025550177");
+});
+
+Deno.test("capture_contact: a number that came out wrong is asked for once, never dropped without a word", async () => {
+  // a web call has no caller id to fall back on: "96015" (cut short) asks for the number again
+  const h = harness();
+  const args = { first_name: "Jane", last_name: "Doe", callback_phone: "96015" };
+  const ask = await h.run("capture_contact", args, "tc_short");
+  assertEquals(ask, {
+    code: "contact_needs_phone",
+    sentence: "Sorry, I didn't quite get that number. What's the best number to reach you?",
+  });
+  assertEquals(h.contact(), undefined);
+  assertEquals(await h.run("capture_contact", args, "tc_short"), ask, "a replay");
+  // the number they then say is stored and read back
+  const read = await h.run("capture_contact", { ...args, callback_phone: "9601550123" });
+  assertEquals([read.code, h.contact()?.callback_phone], ["contact_readback", "9601550123"]);
+  // asked once per call: another number that is no number is stored without one (a claim or a
+  // callback asks for one again before anything is promised)
+  const again = await h.run("capture_contact", { ...args, callback_phone: "12" });
+  assertEquals([again.code, h.contact()?.callback_phone, h.contact()?.callback_source], [
+    "contact_readback",
+    null,
+    "none",
+  ]);
+  // words with no digit are no number at all: nothing is asked
+  const words = harness();
+  assertEquals((await words.run("capture_contact", { ...args, callback_phone: "none" })).code, "contact_readback");
+  // with a caller id to fall back on, the caller id is used, as before
+  const phone = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550166" });
+  assertEquals((await phone.run("capture_contact", args)).code, "contact_readback");
+  assertEquals([phone.contact()?.callback_phone, phone.contact()?.callback_source], ["+16025550166", "caller_id"]);
+});
+
 Deno.test("capture_contact: a correction that leaves the number out keeps the number said earlier", async () => {
   const h = harness({ channel: "inboundPhoneCall", callerNumber: "+16025550166" });
   await h.run("capture_contact", {
@@ -308,7 +402,7 @@ Deno.test("capture_contact: a correction that leaves the number out keeps the nu
   assertEquals(h.contact()?.callback_phone, "+16025550188");
 });
 
-Deno.test("capture_contact: only a phone call with no usable caller id asks for the number", async () => {
+Deno.test("capture_contact: a number left out is asked for only on a phone call with no usable caller id", async () => {
   // a web call or a chat never has a caller id: its prompt asks for the digits, so a capture without
   // a number is a caller who would rather not give one
   for (const opts of [{ channel: "webCall" as Channel }, { channel: "chat" as Channel, isChat: true }]) {

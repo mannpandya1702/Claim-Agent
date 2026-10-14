@@ -281,19 +281,20 @@ it to GitHub Pages on every push to `main` that touches `dashboard/`.
 
 | Suite | Command | Size | What it covers |
 |---|---|---|---|
-| Unit and conformance | `deno task test` | 863 tests in 33 files, 47 of them conformance | Every tool code and sentence, identity rules, claim gate, loss-date parsing, call-reason precedence, redaction, outbox, GoHighLevel against an in-memory twin; rendered prompts, tools and voice settings pinned |
+| Unit and conformance | `deno task test` | 898 tests in 33 files, 48 of them conformance | Every tool code and sentence, identity rules, claim gate, loss-date parsing, call-reason precedence, redaction, outbox, GoHighLevel against an in-memory twin; rendered prompts, tools and voice settings pinned |
 | Recording link | `deno test --allow-env supabase/functions/recording-url/` | 13 tests | Staff-only link logic |
-| Dashboard | `npm test` | 343 tests in 35 files | Pages, data mapping, empty and error states |
-| Persona battery | `deno task battery` | 42 personas x 3 runs = 126 conversations | The rendered Core prompt on VAPI `/chat` with mocked tools that return the real server sentences: tool order, arguments, no disclosure before verification, emergency scoping, injection, line trouble. `--dry-run` builds every request offline |
+| Dashboard | `npm test` | 347 tests in 35 files | Pages, data mapping, empty and error states |
+| Persona battery | `deno task battery` | 45 personas x 3 runs = 135 conversations | The rendered Core prompt on VAPI `/chat` with mocked tools that return the real server sentences: tool order, arguments, no disclosure before verification, emergency scoping, injection, line trouble. `--dry-run` builds every request offline |
 | Smoke | `deno task smoke` | 25 cases | The deployed webhook with real auth: identity ladder, smuggled arguments, contact capture, status details, claim filing, post-call writers; deletes the call rows it wrote |
-| Database | `deno task db:test` | 30 cases | Rolled-back SQL assertions plus concurrent deliveries, lockout, claim filing races, outbox lease, grants and RLS |
+| Database | `deno task db:test` | 31 cases | Rolled-back SQL assertions plus concurrent deliveries, lockout, claim filing races, outbox lease, grants and RLS |
 | Voice | `deno task voice <scenario>` | 11 scenarios | Real VAPI calls with a synthetic caller (Google TTS) over WebSocket, both sides recorded; includes two barge-in measurements |
 
 CI (`.github/workflows/ci.yml`) runs `check`, `test`, `lint`, the recording-link tests and the
 clean-room guard on every push and pull request. The battery runs there on manual dispatch because
 it spends VAPI credit; the other live suites run on demand. Last full live runs: smoke 23 of 23 and
-the DB suite 28 of 28, before the two newest cases of each were added. The latest live battery, on
-the 14 line-trouble and related personas, passed 13 of 14; the one failure was wording only.
+the DB suite 28 of 28, before the newest cases of each were added (two for smoke, three for the DB
+suite). The latest live battery, on the 14 line-trouble and related personas, passed 13 of 14; the one
+failure was wording only.
 
 ## Documentation
 

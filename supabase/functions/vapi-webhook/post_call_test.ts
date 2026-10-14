@@ -1127,6 +1127,16 @@ Deno.test("caller_phone: caller id for an unverified phone caller, never junk or
   anonymous.customer = { number: "anonymous" };
   assertEquals(buildInteractionRow(anonymous, facts()).caller_phone, null);
   assertEquals(buildInteractionRow(fixture("structured_outputs_only"), facts()).caller_phone, null);
+  // a caller id from abroad is the caller's number like any other
+  const abroad = fixture("escalation");
+  abroad.call!.customer = { number: "+61491570156" };
+  abroad.customer = { number: "+61491570156" };
+  assertEquals(buildInteractionRow(abroad, facts()).caller_phone, "+61491570156");
+  // a SIP address is still never read as a number
+  const sip = fixture("escalation");
+  sip.call!.customer = { number: "sip:+61491570156@carrier.example" };
+  sip.customer = { number: "sip:+61491570156@carrier.example" };
+  assertEquals(buildInteractionRow(sip, facts()).caller_phone, null);
 });
 
 Deno.test("flags: computed from what the agent said and the server facts", () => {
@@ -1973,6 +1983,11 @@ Deno.test("name chain: a new caller's confirmed name comes before the analysis' 
   ]);
   // a web call has no caller id: the number they gave with their details stands in
   assertEquals(row.caller_phone, "+16025550177");
+  // as stored, whatever its form: from abroad, or noted as said without a country code
+  for (const callback_phone of ["+442079460958", "9601550123"]) {
+    const r = buildInteractionRow(fixture("not_found"), newCallerFacts(contact(NOT_FOUND_ID, { callback_phone })));
+    assertEquals(r.caller_phone, callback_phone);
+  }
 
   // unconfirmed: the analysis' name, still a new caller, and no address in the record
   const unconfirmed = buildInteractionRow(
@@ -2134,6 +2149,30 @@ Deno.test("status-update forwarding: a number the caller said with their details
   assertStringIncludes(html, "(602) 555-0177 (+16025550177)");
   assertFalse(html.includes("555-0104"), "the caller id they said not to use is not the callback number");
   assertStringIncludes(html, "Jane Doe (caller-provided, unverified)");
+});
+
+Deno.test("status-update forwarding: a number noted as said on a call from abroad stays as said", async () => {
+  // a caller abroad gave ten digits without a country code: never turned into a North American number
+  const { store, deps, calls } = harness({ env: ALERT_ENV });
+  await store.upsertContact({
+    callKey: PHONE_CALL_ID,
+    kind: "new_customer",
+    firstName: "Jane",
+    lastName: "Doe",
+    email: null,
+    callbackPhone: "6025550177",
+    callbackSource: "argument",
+    customerId: null,
+  });
+  await store.setContactConfirmed(PHONE_CALL_ID, true);
+  const abroad = statusUpdate("forwarding");
+  abroad.call!.customer = { number: "+442079460958" };
+  await onStatusUpdate(abroad, deps);
+  const [row] = store.tables.escalations;
+  assertEquals([row.callback_phone, row.callback_source], ["6025550177", "argument"]);
+  const html = JSON.parse(String(calls.find((c) => c.url === "https://api.resend.com/emails")!.init.body)).html;
+  assertStringIncludes(html, "602 555 0177 (as said, no country code)");
+  assertFalse(html.includes("+16025550177"));
 });
 
 Deno.test("status-update forwarding: a contact from caller id, or a failed contact read, keeps the caller id", async () => {

@@ -832,7 +832,7 @@ Deno.test("outbox: finishing records delivery, or a masked capped error; dead sp
   const row = store.tables.outbox_events[0];
   let [claimed] = await store.claimOutbox(1);
 
-  const long = `airtable 422: Cannot parse value for account 98765432101 near +1 602 555 0101 ${"x".repeat(400)}`;
+  const long = `airtable 422: Cannot parse value for account 9876543210987654 near +1 602 555 0101 ${"x".repeat(400)}`;
   assert(await store.finishOutbox(claimed.id, { delivered: false, error: long }));
   assertEquals([row.attempts, row.delivered_at], [1, null]);
   assertEquals(row.last_error.length, 300);
@@ -1404,7 +1404,11 @@ Deno.test("caller_contacts rejects what Postgres would reject", async () => {
     [{ lastName: "x".repeat(41) }, "23514"],
     [{ email: "Jane@Example.com" }, "23514"],
     [{ email: "jane@example" }, "23514"],
-    [{ callbackPhone: "6025550177" }, "23514"],
+    // 0011: E.164, or 7 to 15 digits as said; nothing shorter, longer, spaced or with a "+0"
+    [{ callbackPhone: "123456" }, "23514"],
+    [{ callbackPhone: "1234567890123456" }, "23514"],
+    [{ callbackPhone: "+0123456789" }, "23514"],
+    [{ callbackPhone: "+44 20 7946 0958" }, "23514"],
     [{ customerId: "not-a-uuid" as never }, "22P02"],
     [{ customerId: "6b0d6f0e-1c11-4c7a-9a01-000000000999" as never }, "23503"],
   ];
@@ -1412,6 +1416,11 @@ Deno.test("caller_contacts rejects what Postgres would reject", async () => {
     await assertRejects(() => store.upsertContact({ ...CONTACT, ...change } as typeof CONTACT), Error, sqlstate);
   }
   assertEquals(store.tables.caller_contacts.length, 0);
+  // every form a callback number is stored in (identity.ts normaliseCallbackNumber) is accepted
+  for (const callbackPhone of ["+16025550177", "+442079460958", "+61491570156", "9601550123", "5550177"]) {
+    const row = await store.upsertContact({ ...CONTACT, callbackPhone });
+    assertEquals(row.callback_phone, callbackPhone);
+  }
   // an email_update carries the verified customer
   const update = await store.upsertContact({ ...CONTACT, kind: "email_update", customerId: TOBIAS as never });
   assertEquals([update.kind, update.customer_id], ["email_update", TOBIAS]);

@@ -1,13 +1,20 @@
-// Identity helpers: phone and DOB normalisation, the callback-number junk filter, and a pure mirror
-// of the SQL identity state machine. Postgres stays the source of truth in production; the mirror
-// lets fake_store.ts and the unit tests walk the same ladder without a database.
+// Identity helpers: phone and DOB normalisation, the callback-number rules, and a pure mirror of the
+// SQL identity state machine. Postgres stays the source of truth in production; the mirror lets
+// fake_store.ts and the unit tests walk the same ladder without a database.
+//
+// Two kinds of phone number, kept apart on purpose:
+//   lookup key       normalisePhone: the number on an account, always North American (+1XXXXXXXXXX)
+//   callback number  normaliseCallbackNumber: any number a caller can be called back on. A number the
+//                    caller gives is noted as given: never refused for its country or its length.
+// A callback number is stored in one of three forms: "+1XXXXXXXXXX" (North American), "+" and 8 to 15
+// digits (international) or 7 to 15 bare digits (noted as said, no country code). A number given on a
+// call from abroad is read against its caller id (givenCallbackNumber), and a stored one is never read
+// again (storedCallbackNumber): only a number written with "+" carries a country code.
 import type { Code, Level } from "./enums.ts";
 
-// Caller-ID placeholders carriers send instead of a number.
-const JUNK_CALLER_ID = /^(anonymous|unknown|restricted|private|unavailable|withheld|blocked)$/i;
-
-/** Caller-stated phone -> E.164 (+1XXXXXXXXXX) or null. Strip non-digits; 11 digits only with a leading 1;
- *  require exactly 10 after that; reject all-same digits and NANP-invalid area/exchange (first digit 0/1). */
+/** Caller-stated phone -> account lookup key, E.164 (+1XXXXXXXXXX) or null. Strip non-digits; 11 digits
+ *  only with a leading 1; require exactly 10 after that; reject all-same digits. Accounts are North
+ *  American; a callback number is a different thing (normaliseCallbackNumber). */
 export function normalisePhone(raw: unknown): string | null {
   let digits: string;
   if (typeof raw === "string") digits = raw.replace(/\D/g, "");
@@ -19,19 +26,41 @@ export function normalisePhone(raw: unknown): string | null {
   // No numbering-plan rule here: this is a lookup key, and any ten digits the caller said deserve
   // an answer from the database ("I'm not finding an account under ..."), which lets them correct
   // a digit. Rejecting a full ten digits as unreadable told a real caller "I need the full
-  // ten-digit number" after they had said ten digits. Dialability is checked only for callbacks.
+  // ten-digit number" after they had said ten digits.
   return `+1${digits}`;
 }
 
-/** A number the claims team can dial back: normalisePhone plus the NANP rule (neither the area
- *  code nor the exchange may start with 0 or 1). 555-01xx stays valid on purpose, since the demo
- *  data lives in the fiction range. */
-export function normaliseNanp(raw: unknown): string | null {
-  const e164 = normalisePhone(raw);
-  if (!e164) return null;
-  const d = e164.slice(2);
-  if (d[0] === "0" || d[0] === "1" || d[3] === "0" || d[3] === "1") return null;
-  return e164;
+/** A callback number as it is stored, or null (a number given on a call from abroad is first read against
+ *  its caller id: givenCallbackNumber). In order:
+ *  - North American: 10 digits, or 11 with a leading 1 (with or without "+"), neither the area code nor
+ *    the exchange starting with 0 or 1 -> "+1XXXXXXXXXX". 555-01xx is valid on purpose: the demo data
+ *    lives in the fiction range.
+ *  - International, given with its country code ("+44 20 7946 0958", "0044 20 7946 0958", or a
+ *    carrier's caller id such as "+61491570156") -> E.164, "+" and 8 to 15 digits. A "+1" number
+ *    that is not North American falls to the next rule.
+ *  - Anything else of 7 to 15 digits is noted exactly as said, as its digits ("9601550123"): placing a
+ *    number without a country code is the team's job, and a caller is never refused for it.
+ *  Refused: fewer than 7 or more than 15 digits, one digit repeated throughout, and the placeholders a
+ *  carrier sends for a withheld caller id ("anonymous", "restricted"). Self-contained (no references
+ *  outside the function), so the chat battery's mock tools can run this very function. */
+export function normaliseCallbackNumber(raw: unknown): string | null {
+  let text: string;
+  if (typeof raw === "string") text = raw.trim().replace(/^plus\b\s*/i, "+");
+  else if (typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0) text = String(raw);
+  else return null;
+  if (text.length > 64 || /^(anonymous|unknown|restricted|private|unavailable|withheld|blocked)$/i.test(text)) {
+    return null;
+  }
+  const all = text.replace(/\D/g, "");
+  // The digits after an international prefix ("+", or "00" before a country code), else null.
+  const afterPrefix = text.startsWith("+") ? all : /^00[1-9]/.test(all) ? all.slice(2) : null;
+  const core = afterPrefix ?? all;
+  if (/^(\d)\1*$/.test(core.length === 11 && core[0] === "1" ? core.slice(1) : core)) return null;
+  const nanp = (d: string) => (/^[2-9]\d{2}[2-9]\d{6}$/.test(d) ? `+1${d}` : null);
+  if (core.length === 11 && core[0] === "1" && nanp(core.slice(1))) return nanp(core.slice(1));
+  if (afterPrefix === null && core.length === 10 && nanp(core)) return nanp(core);
+  if (afterPrefix !== null && /^[2-9]\d{7,14}$/.test(afterPrefix)) return `+${afterPrefix}`;
+  return all.length >= 7 && all.length <= 15 ? all : null;
 }
 
 function toInt(v: unknown): number | null {
@@ -62,22 +91,104 @@ export function parseDobParts(
   return { year, month, day };
 }
 
-/** A usable callback number: normalisePhone + junk filter (Anonymous/unknown/restricted, repeated digits, any of ownNumbers). */
+/** A usable callback number: normaliseCallbackNumber, and never our own line (any of ownNumbers,
+ *  however the env list writes it). Junk caller ids, repeated digits and too few or too many digits
+ *  are null; a number outside North America is kept. */
 export function usableCallbackNumber(raw: unknown, ownNumbers: string[]): string | null {
-  if (typeof raw === "string" && JUNK_CALLER_ID.test(raw.trim())) return null;
-  const e164 = normaliseNanp(raw);
-  if (!e164) return null;
-  // Our own line must never become a callback target, however the env list was written.
-  const own = (Array.isArray(ownNumbers) ? ownNumbers : []).map(normalisePhone);
-  return own.includes(e164) ? null : e164;
+  const number = normaliseCallbackNumber(raw);
+  if (!number) return null;
+  const listed = Array.isArray(ownNumbers) ? ownNumbers : [];
+  const own = listed.flatMap((n) => [normaliseCallbackNumber(n), normalisePhone(n)]);
+  return own.includes(number) ? null : number;
 }
 
-/** Real caller id from the envelope (call.customer.number) or null for web calls / junk. */
+/** A callback number the caller gave on this call (escalate's or capture_contact's callback_phone), read
+ *  against the call's caller id. On a call from abroad (a caller id with a country code other than 1), a
+ *  number given without a country code is never taken for a North American one: the caller's own number
+ *  in its national form ("020 7946 0958" or "2079460958" from +442079460958, or the same digits after the
+ *  country code without the "+") is that caller id, so its read-back says the country code; any other is
+ *  noted exactly as said ("6025550177", not "+16025550177"). A number given with its country code, and any
+ *  number on a call with no caller id or a North American one, is read as usableCallbackNumber reads it. */
+export function givenCallbackNumber(raw: unknown, ownNumbers: string[], callerId: unknown): string | null {
+  const read = usableCallbackNumber(raw, ownNumbers);
+  const caller = usableCallbackNumber(callerId, ownNumbers);
+  if (!read || !caller || !/^\+[2-9]/.test(caller)) return read;
+  const text = typeof raw === "string" ? raw.trim().replace(/^plus\b\s*/i, "+") : String(raw);
+  const digits = text.replace(/\D/g, "");
+  if (text.startsWith("+") || /^00[1-9]/.test(digits)) return read;
+  const callerDigits = caller.slice(1);
+  const national = callerDigits.slice(countryCodeLength(callerDigits));
+  if (digits === national || digits === `0${national}` || digits === callerDigits) return caller;
+  return digits;
+}
+
+// The forms a callback number is stored in: E.164, or 7 to 15 digits noted as said (0011's CHECK).
+const STORED_CALLBACK_RE = /^(?:\+[1-9]\d{7,14}|\d{7,15})$/;
+
+/** A callback number read back from a row (caller_contacts, escalations), kept exactly as stored: a stored
+ *  number is never read again, so "6025550177" noted as said on a call from abroad stays as said instead
+ *  of turning into a North American number. null for what usableCallbackNumber refuses (junk, our own
+ *  line); a value in no stored form is read as usableCallbackNumber reads it. */
+export function storedCallbackNumber(stored: unknown, ownNumbers: string[]): string | null {
+  const read = usableCallbackNumber(stored, ownNumbers);
+  return read && typeof stored === "string" && STORED_CALLBACK_RE.test(stored) ? stored : read;
+}
+
+/** Real caller id from the envelope (call.customer.number), North American or international, or null
+ *  for web calls and junk. */
 export function callerIdNumber(raw: unknown, ownNumbers: string[]): string | null {
   // Only phone characters: stripping the non-digits out of a SIP URI could assemble a plausible
-  // ten-digit number from a host or port.
+  // number from a host or port.
   if (typeof raw !== "string" || !/^\s*\+?[\d\s().-]+$/.test(raw)) return null;
   return usableCallbackNumber(raw, ownNumbers);
+}
+
+// ITU-T E.164 country codes of one and two digits; every other country code has three.
+const ONE_DIGIT_COUNTRY_CODES: ReadonlySet<string> = new Set(["1", "7"]);
+const TWO_DIGIT_COUNTRY_CODES: ReadonlySet<string> = new Set(
+  ("20 27 30 31 32 33 34 36 39 40 41 43 44 45 46 47 48 49 51 52 53 54 55 56 57 58 60 61 62 63 64 65 66 " +
+    "81 82 84 86 90 91 92 93 94 95 98").split(" "),
+);
+
+/** How many of an international number's digits (after the "+") are its country code. */
+function countryCodeLength(digits: string): number {
+  return ONE_DIGIT_COUNTRY_CODES.has(digits[0]) ? 1 : TWO_DIGIT_COUNTRY_CODES.has(digits.slice(0, 2)) ? 2 : 3;
+}
+
+/** Digits in groups of three, the last group taking up to four ("9601550123" -> 960 155 0123). */
+function digitGroups(digits: string): string[] {
+  const groups: string[] = [];
+  let i = 0;
+  for (; digits.length - i > 4; i += 3) groups.push(digits.slice(i, i + 3));
+  if (i < digits.length) groups.push(digits.slice(i));
+  return groups;
+}
+
+export interface PhoneGroups {
+  kind: "north_american" | "international" | "as_said";
+  countryCode: string | null; // "1" for North American, the E.164 country code for international
+  groups: string[]; // the number after its country code
+}
+
+/** How a stored callback number is read back and shown: a North American one ("+1" and ten digits) as
+ *  area code, exchange and line ("602", "555", "0101"); an international one as its country code, then
+ *  the rest in groups of three with a last group of up to four; one noted as said the same way from its
+ *  first digit. Only a number written with "+" has a country code: bare digits are kept whole as said,
+ *  so "16025550177" keeps its 1 and ten digits read 3-3-4. null without a digit. */
+export function phoneGroups(number: string): PhoneGroups | null {
+  const text = typeof number === "string" ? number.trim() : "";
+  const d = text.replace(/\D/g, "");
+  if (!d) return null;
+  const plus = text.startsWith("+");
+  if (plus && d.length === 11 && d[0] === "1") {
+    const n = d.slice(1);
+    return { kind: "north_american", countryCode: "1", groups: [n.slice(0, 3), n.slice(3, 6), n.slice(6)] };
+  }
+  if (plus && d.length >= 8) {
+    const size = countryCodeLength(d);
+    return { kind: "international", countryCode: d.slice(0, size), groups: digitGroups(d.slice(size)) };
+  }
+  return { kind: "as_said", countryCode: null, groups: digitGroups(d) };
 }
 
 // ---------------------------------------------------------------------------------------------

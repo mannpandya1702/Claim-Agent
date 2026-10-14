@@ -71,6 +71,21 @@ describe("CallerContactCard", () => {
     expect(screen.getByRole("note")).toHaveTextContent(/not on the account until staff check it and add it/);
   });
 
+  it("shows a number noted as said, with no country code, as text with a note: never a tel: link", () => {
+    // a tel: link would dial it as a local number wherever the phone is
+    for (const [stored, shown] of [["9601550123", "960 155 0123"], ["6025550177", "602 555 0177"], ["5550177", "555 0177"]]) {
+      const { unmount } = render(<CallerContactCard contact={contact({ callback_phone: stored })} />);
+      expect(screen.getByText(shown)).toBeInTheDocument();
+      expect(screen.getByText("Given by caller · as said, no country code")).toBeInTheDocument();
+      for (const link of screen.queryAllByRole("link")) expect(link.getAttribute("href") ?? "").not.toMatch(/^tel:/);
+      unmount();
+    }
+    // a number from abroad with its country code is dialled as written
+    render(<CallerContactCard contact={contact({ callback_phone: "+442079460958" })} />);
+    expect(screen.getByRole("link", { name: "+442079460958" })).toHaveAttribute("href", "tel:+442079460958");
+    expect(screen.getByText("Given by caller")).toBeInTheDocument();
+  });
+
   it("says when no email or callback number was given", () => {
     render(<CallerContactCard contact={contact({ email: null, callback_phone: null, callback_source: "none" })} />);
     expect(screen.getByText("No email given")).toBeInTheDocument();

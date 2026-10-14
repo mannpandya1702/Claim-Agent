@@ -37,7 +37,7 @@ import {
   STATUS_READ_CODES,
 } from "./enums.ts";
 import { computeFlags } from "./flags.ts";
-import { callerIdNumber, usableCallbackNumber } from "./identity.ts";
+import { callerIdNumber, storedCallbackNumber } from "./identity.ts";
 import { deliverSoon, enqueueInteraction } from "./outbox.ts";
 import type { CallFacts } from "./post_call_facts.ts";
 import { asksForSensitive, MASKED_ANSWER, REASK_RE, redactDeep, redactPII } from "./redact.ts";
@@ -1054,8 +1054,8 @@ async function onForwarding(message: VapiMessage, deps: Deps, callKey: string): 
   const verified = level === "verified";
   const reason = forwardingReason(level, attempts);
   // A number the caller said with their details beats the caller id they may have said not to use
-  // ("Is the number you're calling from the best one?" "No, it's ..."), as in escalate.
-  const captured = contact?.callback_source === "argument" ? usableCallbackNumber(contact.callback_phone, own) : null;
+  // ("Is the number you're calling from the best one?" "No, it's ..."), as in escalate; kept as stored.
+  const captured = contact?.callback_source === "argument" ? storedCallbackNumber(contact.callback_phone, own) : null;
   const callbackPhone = captured ?? callerNumber;
 
   // upsert_escalation merges every non-null value into an existing row, so this first write

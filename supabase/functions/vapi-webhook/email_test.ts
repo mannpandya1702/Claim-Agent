@@ -17,6 +17,7 @@ import {
   type TeamCaller,
   teamCallerOf,
   writtenDate,
+  writtenPhone,
 } from "./email.ts";
 import { createFakeStore } from "./fake_store.ts";
 import type { CallerContact, Claim, Customer, Deps, Env, Store } from "./types.ts";
@@ -543,6 +544,50 @@ Deno.test("callbackRequestEmail: call id, reason, verified flag, callback number
   assertStringIncludes(t.html, "CLM-240198");
   assertStringIncludes(t.html, `href="${DASHBOARD}#/calls/${CALL_KEY}"`);
   assertStringIncludes(t.html, "webCall");
+});
+
+Deno.test("team emails: a number from abroad, or one noted as said, is shown readably with every digit", () => {
+  assertEquals(writtenPhone("+16025550101"), "(602) 555-0101 (+16025550101)");
+  assertEquals(writtenPhone("+442079460958"), "+44 207 946 0958 (international)");
+  assertEquals(writtenPhone("+61491570156"), "+61 491 570 156 (international)");
+  assertEquals(writtenPhone("9601550123"), "960 155 0123 (as said, no country code)");
+  assertEquals(writtenPhone("02079460958"), "020 794 609 58 (as said, no country code)");
+  // bare digits never carry a country code, whatever their shape: every digit kept, the leading 1 included
+  assertEquals(writtenPhone("6025550177"), "602 555 0177 (as said, no country code)");
+  assertEquals(writtenPhone("16025550177"), "160 255 501 77 (as said, no country code)");
+  assertEquals(writtenPhone("weird"), "weird");
+  const cases: [string, string][] = [
+    ["+442079460958", "+44 207 946 0958 (international)"],
+    ["9601550123", "960 155 0123 (as said, no country code)"],
+  ];
+  for (const [callbackPhone, shown] of cases) {
+    const callback = callbackRequestEmail({
+      callKey: CALL_KEY,
+      reason: "representative_requested",
+      verified: false,
+      callbackPhone,
+      details: null,
+      channel: "inboundPhoneCall",
+    });
+    assertAsciiTemplate(callback);
+    assertStringIncludes(callback.html, shown);
+    const emergency = emergencyEmail({
+      callKey: CALL_KEY,
+      note: null,
+      channel: "inboundPhoneCall",
+      verified: false,
+      callbackPhone,
+    });
+    assertStringIncludes(emergency.html, shown);
+    const realert = slaRealertEmail({
+      callKey: CALL_KEY,
+      kind: "representative",
+      reason: "representative_requested",
+      minutesOpen: 31,
+      callbackPhone,
+    });
+    assertStringIncludes(realert.html, shown);
+  }
 });
 
 Deno.test("callbackRequestEmail: verified caller, no number yet, no details, no dashboard", () => {

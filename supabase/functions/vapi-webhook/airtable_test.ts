@@ -56,6 +56,15 @@ Deno.test("interactionToFields: slim, redacted mapping with the merge key and a 
   assertFalse("Transcript" in f);
 });
 
+Deno.test("interactionToFields: a caller number from abroad, or one noted as said, crosses as its last four only", () => {
+  const at = new Date("2026-10-12T15:03:00Z");
+  for (const [phone, ending] of [["+61491570156", "ending 0156"], ["9601550123", "ending 0123"]]) {
+    const f = interactionToFields({ ...row, caller_phone: phone }, at);
+    assertEquals(f["Caller Phone"], ending, phone);
+    assertFalse(JSON.stringify(f).includes(phone.replace("+", "")), phone);
+  }
+});
+
 Deno.test("interactionToFields: the dashboard link goes through the alerts' guard (no credentials, http(s) only)", () => {
   const at = new Date("2026-10-12T15:03:00Z");
   for (

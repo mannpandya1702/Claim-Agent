@@ -2,7 +2,7 @@
 // Everything here is pure and timezone-independent: dates arrive as YYYY-MM-DD strings and are
 // read by hand, so neither the server clock nor a TZ setting can shift a spoken date by a day.
 import { CLAIM_TYPES, CLAIMS_URL_SPOKEN, type Code, MAIN_LINE_SPOKEN } from "./enums.ts";
-import { isPlainEmail } from "./identity.ts";
+import { isPlainEmail, phoneGroups } from "./identity.ts";
 import type { Claim } from "./types.ts";
 
 const SMALL = (
@@ -83,6 +83,9 @@ const CONTACT_INVALID_EMAIL =
 const CONTACT_NEEDS_NAME = "Sorry, could I get your first and last name?";
 // A phone caller said to use the number they're calling from, but the call carries no usable caller id.
 const CONTACT_NEEDS_PHONE = "Sorry, I can't see the number you're calling from. What's the best number to reach you?";
+// The number passed with the details gave no callback number (too few or too many digits), and the call
+// has no caller id to fall back on: asked once rather than dropped without a word.
+const CONTACT_UNCLEAR_PHONE = "Sorry, I didn't quite get that number. What's the best number to reach you?";
 const NOT_PENDING = "Sorry about that, let me take your details again. What's your first and last name?";
 // A verified caller's name comes from the account, so only the address is asked for again.
 const NOT_PENDING_EMAIL = "Sorry, could you spell that email for me one more time, letter by letter?";
@@ -233,14 +236,17 @@ export function speakDigits(digits: string): string {
   return [...digitsOf(digits)].map((c) => SMALL[Number(c)]).join(" ");
 }
 
-/** "+16025550199" or "6025550199" -> "six zero two, five five five, zero one nine nine". */
+/** A phone number read back digit by digit, in short groups with a comma between them, the way a
+ *  person reads one: a comma gives a short, even pause, where an ellipsis made the voice trail off and
+ *  sound unsure. "+16025550199" or "6025550199" -> "six zero two, five five five, zero one nine nine";
+ *  an international number says "plus" and its country code first ("+442079460958" -> "plus four
+ *  four, two zero seven, nine four six, zero nine five eight"); any other number is read in groups of
+ *  three with a last group of up to four ("5550199" -> "five five five, zero one nine nine"). */
 export function speakPhone(phone: string): string {
-  let d = digitsOf(phone);
-  if (d.length === 11 && d[0] === "1") d = d.slice(1);
-  // Three groups with a comma between them, the way a person reads a number back: a comma gives a
-  // short, even pause, where an ellipsis made the voice trail off and sound unsure.
-  if (d.length !== 10) return speakDigits(d);
-  return `${speakDigits(d.slice(0, 3))}, ${speakDigits(d.slice(3, 6))}, ${speakDigits(d.slice(6))}`;
+  const g = phoneGroups(typeof phone === "string" ? phone : String(phone ?? ""));
+  if (!g) return "";
+  const groups = g.groups.map(speakDigits).join(", ");
+  return g.kind === "international" ? `plus ${speakDigits(g.countryCode ?? "")}, ${groups}` : groups;
 }
 
 function belowThousand(n: number): string {
@@ -1053,12 +1059,21 @@ function fromClaims(d: Record<string, unknown>, compose: (claims: Claim[], refDa
   }
 }
 
+/** rep_queued from {target, digits?, number?}. A number the caller gave is named by its last four (digits)
+ *  when it is North American, and read in full (number) when it is from abroad or noted as said, so a
+ *  wrong country code or a missing digit can still be heard. */
 function repQueued(d: Record<string, unknown>, callKey?: string): string {
-  const last4 = digitsOf(d.digits).slice(-4);
+  const full = callbackNumberOf(d.number);
+  const northAmerican = full !== null && /^\+1\d{10}$/.test(full);
+  const last4 = digitsOf(northAmerican ? full : d.digits).slice(-4);
   let at = "";
   if (d.target === "account") at = " at the number on your account";
   else if (d.target === "given") {
-    at = last4 ? ` at the number you gave me, ending in ${speakDigits(last4)},` : " at the number you gave me";
+    at = full && !northAmerican
+      ? ` at the number you gave me, ${speakPhone(full)},`
+      : last4
+      ? ` at the number you gave me, ending in ${speakDigits(last4)},`
+      : " at the number you gave me";
   } else if (d.target === "caller_id") at = " at the number you're calling from";
   const i = variantIndex(callKey, "rep_queued");
   return `${REP_QUEUED_LEADS[i]} Someone will call you back${at} within one business day. ${ANYTHING_ELSES[i]}`;
@@ -1143,6 +1158,16 @@ function nationalDigits(v: unknown): string | null {
   return d.length === 10 ? d : null;
 }
 
+/** A callback number as a read-back says it: North American ("+16025550177" or its ten digits),
+ *  international ("+442079460958"), or noted as said, 7 to 15 digits ("9601550123"); null otherwise. */
+function callbackNumberOf(v: unknown): string | null {
+  if (typeof v !== "string" && typeof v !== "number") return null;
+  const text = String(v).trim();
+  const d = digitsOf(text);
+  if (d.length < 7 || d.length > 15) return null;
+  return text.startsWith("+") ? `+${d}` : d;
+}
+
 /** capture_contact's read-back from {first_name, last_name, email?, callback_phone?}: the names as
  *  spoken words, the address letter by letter and a callback number the caller said, digit by digit
  *  (a number taken from caller id is not read back: nobody said it, so nothing can be misheard).
@@ -1162,8 +1187,8 @@ function contactReadback(d: Record<string, unknown>, callKey?: string): string {
       return CONTACT_READBACK_PLAIN;
     }
   }
-  const digits = nationalDigits(d.callback_phone);
-  const number = digits ? `the best number is ${speakPhone(digits)}` : "";
+  const callback = callbackNumberOf(d.callback_phone);
+  const number = callback ? `the best number is ${speakPhone(callback)}` : "";
   // The full name is the first thing read back, so the thanks before it does not say the name too.
   const { spelled, plain } = pick(CONTACT_READBACK_OPENERS, callKey, "contact_readback");
   let text: string;
@@ -1251,8 +1276,8 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>, callKey?
     case "rep_queued_no_number":
       return REP_QUEUED_NO_NUMBER;
     case "callback_updated": {
-      const digits = nationalDigits(d.digits);
-      return digits ? `Got it, ${speakPhone(digits)}. ${ANYTHING_ELSE}` : `Got it. ${ANYTHING_ELSE}`;
+      const callback = callbackNumberOf(d.digits);
+      return callback ? `Got it, ${speakPhone(callback)}. ${ANYTHING_ELSE}` : `Got it. ${ANYTHING_ELSE}`;
     }
     case "rep_recorded":
       return REP_RECORDED;
@@ -1279,7 +1304,7 @@ export function sentenceFor(code: Code, data?: Record<string, unknown>, callKey?
     case "contact_needs_name":
       return CONTACT_NEEDS_NAME;
     case "contact_needs_phone":
-      return CONTACT_NEEDS_PHONE;
+      return d.unclear === true ? CONTACT_UNCLEAR_PHONE : CONTACT_NEEDS_PHONE;
     case "email_on_file":
       return EMAIL_ON_FILE;
     case "not_pending":

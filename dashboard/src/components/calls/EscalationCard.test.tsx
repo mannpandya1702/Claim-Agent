@@ -96,6 +96,20 @@ describe("EscalationCard", () => {
     expect(document.body.innerHTML).not.toContain("6025550102");
   });
 
+  it("shows a number noted as said, with no country code, as text with a note: never a tel: link", () => {
+    for (const [stored, shown] of [["9601550123", "960 155 0123"], ["6025550177", "602 555 0177"]]) {
+      const { unmount } = renderCard(esc({ callback_phone: stored, callback_phone_masked: `... ${stored.slice(-4)}`, callback_source: "argument" }));
+      expect(screen.getByText(shown)).toBeInTheDocument();
+      expect(screen.getByText("Given by caller · as said, no country code")).toBeInTheDocument();
+      for (const link of screen.queryAllByRole("link")) expect(link.getAttribute("href") ?? "").not.toMatch(/^tel:/);
+      unmount();
+    }
+    // a number from abroad with its country code is dialled as written
+    renderCard(esc({ callback_phone: "+442079460958", callback_phone_masked: "... 0958", callback_source: "caller_id" }));
+    expect(screen.getByRole("link", { name: "+442079460958" })).toHaveAttribute("href", "tel:+442079460958");
+    expect(screen.getByText("Caller ID")).toBeInTheDocument();
+  });
+
   it("shows the delivery error when a channel failed", () => {
     renderCard(esc({ alert_status: "failed", delivery_error: "telegram: 401 Unauthorized" }));
     expect(screen.getByRole("note")).toHaveTextContent("Delivery error: telegram: 401 Unauthorized");

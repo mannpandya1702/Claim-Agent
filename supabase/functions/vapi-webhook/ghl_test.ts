@@ -455,6 +455,59 @@ Deno.test("ghl new caller with a confirmed contact: created with that name and e
   assertStringIncludes(note, "Email (caller-provided, confirmed on the call): j***@example.com");
 });
 
+Deno.test("ghl new caller with a number from abroad: created on that E.164 number; one noted as said is never sent", async () => {
+  // the number confirmed with its country code is a key like any other
+  const h = harness();
+  await seedCall(h.store, CALL_A, {
+    identity: "miss",
+    callerId: STRANGER_PHONE,
+    contact: { first: "Jane", last: "Okafor", phone: "+442079460958" },
+    intake: "lead_intake",
+    reason: "file_claim",
+  });
+  await queue(h.store, CALL_A);
+  assertEquals(await deliver(h, CALL_A), { delivered: 1, retried: 0, dead: 0, errors: 0 });
+  assertEquals(h.twin.requests[0].body.filters[0].value, "+442079460958");
+  assertEquals(h.twin.contacts.map((c) => c.phone), ["+442079460958"]);
+
+  // a number noted as said, without a country code, never goes into GHL's phone field (no 4xx to retry):
+  // the phone call's own caller id keys the lead, and the note and the claim task name the number by its
+  // last four, as said
+  const s = harness();
+  await seedCall(s.store, CALL_B, {
+    identity: "miss",
+    callerId: "+61491570156",
+    contact: { first: "Jane", last: "Okafor", phone: "9601550123" },
+    intake: "lead_intake",
+    reason: "file_claim",
+  });
+  await queue(s.store, CALL_B);
+  assertEquals(await deliver(s, CALL_B), { delivered: 1, retried: 0, dead: 0, errors: 0 });
+  assertEquals(s.twin.requests[0].body.filters[0].value, "+61491570156");
+  assertEquals(s.twin.contacts.map((c) => [c.phone, c.firstName]), [["+61491570156", "Jane"]]);
+  assertFalse(allBodies(s.twin).includes("9601550123"));
+  const note = s.twin.notes[0].body;
+  assertStringIncludes(note, "Caller: new caller, name confirmed on the call; contact keyed on the caller ID");
+  assertStringIncludes(note, "Callback number ending 0123 (as said, no country code)");
+  assertEquals(s.twin.tasks.map((t) => t.title), ["New claim: auto loss on October 10, 2026"]);
+  assertStringIncludes(s.twin.tasks[0].body, "Callback number ending 0123 (as said, no country code)");
+  assertEquals(row(s.store, CALL_B).progress.contact_created, true);
+
+  // a web call has no caller id to key on: the row is done with the reason, nothing sent
+  const w = harness();
+  await seedCall(w.store, CALL_B, {
+    channel: "webCall",
+    identity: "miss",
+    contact: { first: "Jane", last: "Okafor", phone: "9601550123" },
+    intake: "lead_intake",
+    reason: "file_claim",
+  });
+  await queue(w.store, CALL_B);
+  assertEquals(await deliver(w, CALL_B), { delivered: 1, retried: 0, dead: 0, errors: 0 });
+  assertEquals(w.twin.requests.length, 0);
+  assertEquals(row(w.store, CALL_B).progress.skipped, "new_caller_number_without_country_code");
+});
+
 Deno.test("ghl new caller whose caller id matches a contact: additive only (tags, note, tasks), oi-phone-matched", async () => {
   const h = harness();
   const existing = h.twin.addContact({ phone: NEW_CALLER_PHONE, firstName: "J", lastName: "O" });
@@ -769,6 +822,77 @@ Deno.test("ghl planCaller: verified, lead and caller-id search on trusted number
     interaction: { ...facts().interaction, caller_phone: STRANGER_PHONE },
   }, own);
   assertEquals([noSession.mode, noSession.key], ["search_only", STRANGER_PHONE]);
+});
+
+Deno.test("ghl planCaller: a caller id from abroad is a trusted key; a number without a country code is never a key", () => {
+  const own = ["+18005550142"];
+  const abroad = planCaller(facts({ level: "none", callerNumber: "+61491570156" }), own);
+  assertEquals([abroad.mode, abroad.key], ["search_only", "+61491570156"]);
+  const lead = planCaller(
+    facts({ level: "none", callerNumber: null, contact: { callback_phone: "+442079460958" } }),
+    own,
+  );
+  assertEquals([lead.mode, lead.key, lead.createOnly], ["lead", "+442079460958", true]);
+  const fromCallerId = planCaller(
+    facts({
+      level: "none",
+      callerNumber: "+61491570156",
+      contact: { callback_phone: "+61491570156", callback_source: "caller_id" },
+    }),
+    own,
+  );
+  assertEquals([fromCallerId.mode, fromCallerId.key, fromCallerId.createOnly], ["lead", "+61491570156", undefined]);
+  // noted as said: GHL's phone field takes E.164 only, so the call's caller id (the caller's own line) keys
+  // the lead; a web call has no caller id and is skipped
+  const asSaid = planCaller(
+    facts({ level: "none", callerNumber: "+61491570156", contact: { callback_phone: "9601550123" } }),
+    own,
+  );
+  assertEquals([asSaid.mode, asSaid.key, asSaid.createOnly], ["lead", "+61491570156", undefined]);
+  const asSaidWeb = planCaller(
+    facts({ level: "none", channel: "webCall", callerNumber: null, contact: { callback_phone: "9601550123" } }),
+    own,
+  );
+  assertEquals([asSaidWeb.mode, asSaidWeb.reason], ["skip", "new_caller_number_without_country_code"]);
+  // the number the caller said is the call's own caller id: their own line, so additive writes are fine
+  const ownLine = planCaller(
+    facts({ level: "none", callerNumber: "+442079460958", contact: { callback_phone: "+442079460958" } }),
+    own,
+  );
+  assertEquals([ownLine.mode, ownLine.key, ownLine.createOnly], ["lead", "+442079460958", undefined]);
+  // a caller id written without its "+" is no key either
+  const bare = planCaller(facts({ level: "none", callerNumber: "9601550123" }), own);
+  assertEquals([bare.mode, bare.reason], ["skip", "no_caller_id"]);
+  // every key planCaller hands out is E.164
+  for (const plan of [abroad, lead, fromCallerId, asSaid, ownLine]) assertMatch(plan.key ?? "", /^\+[1-9]\d{7,14}$/);
+});
+
+Deno.test("ghl note and callback task: a number from abroad or one noted as said shows its last four only", () => {
+  for (const [phone, last4] of [["+442079460958", "0958"], ["9601550123", "0123 (as said, no country code)"]]) {
+    const rep = {
+      id: crypto.randomUUID(),
+      call_key: CALL_A,
+      kind: "representative" as const,
+      reason: "representative_requested" as const,
+      details: null,
+      callback_phone: phone,
+      channel: "inboundPhoneCall",
+      verified: false,
+      callback_source: "argument" as const,
+      alert_status: "sent" as const,
+      delivery_error: null,
+      status: "open" as const,
+      created_at: "2026-10-13T14:55:00.000Z",
+    };
+    const f = facts({ level: "none", callerNumber: "+61491570156", escalations: [rep] });
+    const plan = planCaller(f, []);
+    const note = renderNote(f, plan, DASHBOARD);
+    assertStringIncludes(note, `Callback number ending ${last4}`);
+    assertFalse(note.includes(phone.replace("+", "")), phone);
+    const task = tasksFor(f, plan, { DASHBOARD_URL: DASHBOARD }, NOW).callback!;
+    assertStringIncludes(task.body, `Callback number ending ${last4}`);
+    assertFalse(task.body.includes(phone.replace("+", "")), phone);
+  }
 });
 
 Deno.test("ghl tagsFor: every tag it can produce is one of GHL_TAGS", () => {

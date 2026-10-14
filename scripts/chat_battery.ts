@@ -8,8 +8,9 @@
 //   deno task battery --list               persona ids
 //   deno task battery --dry-run            build every first request offline and print the plan
 //
-// Options: --cap <conversations> (default 126, a hard ceiling checked before anything is spent),
-// --concurrency <k> (default 3). Every chat is named "INTERNAL ...", every number is a 555 number,
+// Options: --cap <conversations> (default 135, a hard ceiling checked before anything is spent),
+// --concurrency <k> (default 3). Every chat is named "INTERNAL ...", every number is a 555 number
+// (or one of the fictional numbers from abroad in FICTION_NUMBERS),
 // and a one-turn 402 probe runs first: an empty wallet halts the run before any persona starts.
 // The JSON report lands in fixtures/raw/battery/ (gitignored).
 //
@@ -31,9 +32,9 @@ import { computeFlags } from "../supabase/functions/vapi-webhook/flags.ts";
 import {
   type IdentityState,
   initialIdentity,
+  normaliseCallbackNumber,
   normaliseEmail,
   normaliseName,
-  normaliseNanp,
   normalisePhone,
   parseDobParts,
   step,
@@ -79,7 +80,7 @@ import { vapiClient, VapiError } from "./lib/vapi.ts";
 import { deepMerge, loadVariant, paths, promptPath, renderPrompt, sha256Hex } from "./render.ts";
 
 export const ASSISTANT_KEY = "solo-core" as const;
-export const DEFAULTS = { n: 3, cap: 126, concurrency: 3 };
+export const DEFAULTS = { n: 3, cap: 135, concurrency: 3 };
 const MAX_N = 20;
 const MAX_CONCURRENCY = 6;
 // A conversation never needs more requests than turns plus confirmations; this bounds a runaway.
@@ -143,27 +144,50 @@ const DIGIT_WORDS: Record<string, string> = {
   nine: "9",
 };
 
-/** Digit runs in an utterance, numerals and spoken digits alike ("six zero two, 555 0101"). */
-export function digitRuns(text: string): string[] {
+/** Digit runs in an utterance, numerals and spoken digits alike ("six zero two, 555 0101"); "double
+ *  five" is two digits and "triple five" three. With plus, a run said after "+" or "plus" starts
+ *  with "+". */
+export function digitRuns(text: string, plus = false): string[] {
   const runs: string[] = [];
   let run = "";
-  for (const token of text.toLowerCase().split(/[^a-z0-9]+/)) {
+  let repeat = 1;
+  for (const token of text.toLowerCase().replace(/\+(?=\s*\d)/g, " plus ").split(/[^a-z0-9]+/)) {
     if (token === "") continue;
     const digits = /^\d+$/.test(token) ? token : DIGIT_WORDS[token];
     if (digits !== undefined) {
-      run += digits;
+      run += digits[0].repeat(repeat) + digits.slice(1);
+      repeat = 1;
       continue;
     }
-    if (run) runs.push(run);
-    run = "";
+    if (token === "double" || token === "triple") {
+      repeat = token === "double" ? 2 : 3;
+      continue;
+    }
+    repeat = 1;
+    if (run && run !== "+") runs.push(run);
+    run = plus && token === "plus" ? "+" : "";
   }
-  if (run) runs.push(run);
+  if (run && run !== "+") runs.push(run);
   return runs;
 }
 
 /** Ten-digit phone numbers spoken in an utterance. */
 export function phonesIn(text: string): string[] {
   return digitRuns(text).map((r) => (r.length === 11 && r[0] === "1" ? r.slice(1) : r)).filter((r) => r.length === 10);
+}
+
+/** A callback number as the mocks key it and read it back: the form tools.ts stores
+ *  (identity.ts normaliseCallbackNumber), a North American number as its ten digits (tools.ts
+ *  readBackNumber); "" when the server would not take it. */
+export function callbackKey(v: unknown): string {
+  const n = normaliseCallbackNumber(v);
+  return n === null ? "" : /^\+1\d{10}$/.test(n) ? n.slice(2) : n;
+}
+
+/** Callback numbers said in an utterance, in callbackKey's form: North American, from abroad with
+ *  "+" or "plus" and a country code, or 7 to 15 digits as said. */
+export function callbacksIn(text: string): string[] {
+  return digitRuns(text, true).map(callbackKey).filter(Boolean);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -256,10 +280,12 @@ export interface ContactPlan {
   other: MockResult;
   placeholders: string[];
   priorPhone: string;
+  // tools.ts numberQuestion: a number passed that gives none, with no caller id to fall back on, asked once
+  unclearPhone: MockResult | null;
 }
 
-/** The call's caller_contacts row as the server would hold it. phone: ten digits the caller said
- *  (callback_source 'argument'); a chat has no caller id, so otherwise there is none. */
+/** The call's caller_contacts row as the server would hold it. phone: the number the caller said, in
+ *  callbackKey's form (callback_source 'argument'); a chat has no caller id, so otherwise there is none. */
 export interface SimContact {
   kind: "new_customer" | "email_update";
   first: string;
@@ -281,6 +307,8 @@ export interface SimIntake {
 export interface SimState {
   identity: IdentityState;
   escalated: boolean;
+  escalationNumber: boolean; // the representative row holds a callback number
+  phoneAsked: boolean; // a capture already asked for the best number (contact_needs_phone)
   emailed: string[];
   contact: SimContact | null;
   intake: SimIntake | null;
@@ -288,7 +316,16 @@ export interface SimState {
 }
 
 export function initialState(): SimState {
-  return { identity: initialIdentity(), escalated: false, emailed: [], contact: null, intake: null, startCodes: [] };
+  return {
+    identity: initialIdentity(),
+    escalated: false,
+    escalationNumber: false,
+    phoneAsked: false,
+    emailed: [],
+    contact: null,
+    intake: null,
+    startCodes: [],
+  };
 }
 
 // tools.ts VERIFY_RESUME_CODES / CONTACT_RESUME_CODES: the loss was told to a start_claim that sent the
@@ -316,12 +353,15 @@ export interface PersonaOptions {
   contacts?: ScriptedContact[];
   /** How the caller says when a loss happened, so the mock reads those phrases exactly as the server. */
   lossDates?: string[];
+  /** The caller id the phone line would carry (E.164). A chat has none; this stands in for it, so a
+   *  persona can be a phone caller whose number the server already knows. */
+  callerId?: string;
 }
 
 export interface PlanCtx {
   state: SimState;
   persona: PersonaOptions;
-  phones: string[]; // every ten-digit number the persona says, so read-backs use real digits
+  phones: string[]; // every number the persona says (callbacksIn and phonesIn), so read-backs use real digits
   requestId: string;
   now: Date;
   // The conversation's stand-in for a call key, passed wherever the server passes its call key (speak.ts
@@ -348,7 +388,7 @@ function lookupPlan(ctx: PlanCtx): MockPlan {
   };
   const known: Record<string, MockResult> = {};
   for (const d of new Set([...ctx.phones, ...SEED.customers.map((c) => digitsOf(c.phone_e164))])) {
-    const e164 = normalisePhone(d);
+    const e164 = d.startsWith("+") ? null : normalisePhone(d);
     if (e164) known[d] = answer(e164, d);
   }
   // Any other valid number misses; it is read back as "that number" because its digits are unknown here.
@@ -474,21 +514,42 @@ function claimStatusPlan(ctx: PlanCtx): MockPlan {
   };
 }
 
+/** tools.ts queuedData for a number the caller gave, from its callbackKey: a North American number (ten
+ *  digits that can be one) by its last four, any other (from abroad, or noted as said) in full. */
+function givenTarget(key: string): Obj {
+  return /^[2-9]\d{2}[2-9]\d{6}$/.test(key)
+    ? { target: "given", digits: key.slice(-4) }
+    : { target: "given", number: key };
+}
+
 function escalatePlan(ctx: PlanCtx): MockPlan {
   if (ctx.persona.escalateCode) return { fixed: result(ctx, ctx.persona.escalateCode) };
-  const { escalated } = ctx.state;
+  const { escalated, escalationNumber } = ctx.state;
   const verified = ctx.state.identity.level === "verified";
   // An existing row only merges a new callback number; a new row is answered as notified.
-  const withNumber = (digits: string | null) =>
+  const withNumber = (number: string | null) =>
     escalated
-      ? result(ctx, "callback_updated", digits ? { digits } : undefined)
-      : result(ctx, "rep_queued", digits ? { target: "given", digits: digits.slice(-4) } : { target: "given" });
+      ? result(ctx, "callback_updated", number ? { digits: number } : undefined)
+      : result(ctx, "rep_queued", number ? givenTarget(number) : { target: "given" });
   const known: Record<string, MockResult> = {};
-  for (const d of ctx.phones) if (normalisePhone(d)) known[d] = withNumber(d);
+  for (const d of ctx.phones) {
+    const key = callbackKey(d);
+    if (key) known[key] = withNumber(key);
+  }
+  // tools.ts fallbackCallback: the account's number, else one captured with the caller's details, else
+  // caller id. Without any, a repeat asks for a number rather than promise a call.
+  const captured = ctx.state.contact?.phone ?? null;
+  const fallback = verified
+    ? { target: "account" }
+    : captured
+    ? givenTarget(captured)
+    : ctx.persona.callerId
+    ? { target: "caller_id" }
+    : null;
   const none = escalated
-    ? result(ctx, "rep_already_queued")
-    : verified
-    ? result(ctx, "rep_queued", { target: "account" })
+    ? result(ctx, escalationNumber || fallback ? "rep_already_queued" : "rep_queued_no_number")
+    : fallback
+    ? result(ctx, "rep_queued", fallback)
     : result(ctx, "rep_queued_no_number");
   return { callback: { known, other: withNumber(null), none } };
 }
@@ -534,19 +595,19 @@ export function contactKey(
   return verified ? `@${email ?? ""}` : `${first.toLowerCase()}|${last.toLowerCase()}|${email ?? ""}|${phone ?? ""}`;
 }
 
-/** The number a capture stores as said by the caller (tools.ts contactInput): the digits passed when
- *  they can be dialled, else, when none was passed at all, the number said for an earlier capture. */
+/** The number a capture stores as said by the caller (tools.ts contactInput), in callbackKey's form:
+ *  the number passed when the server takes it, else, when none was passed at all, the number said for
+ *  an earlier capture. */
 function capturedPhone(a: Args, prior: string | null): string | null {
   if (a.callback_phone === undefined) return prior;
-  const e164 = normaliseNanp(a.callback_phone);
-  return e164 ? digitsOf(e164).slice(-10) : null;
+  return callbackKey(a.callback_phone) || null;
 }
 
 function contactPlan(ctx: PlanCtx): MockPlan {
   const s = ctx.state.identity;
   const customer = s.level === "verified" ? customerById(s.verified) : null;
   const known: Record<string, MockResult> = {};
-  const phones = [...new Set(ctx.phones.filter((d) => normaliseNanp(d) !== null))];
+  const phones = [...new Set(ctx.phones.map(callbackKey).filter(Boolean))];
   for (const c of ctx.persona.contacts ?? []) {
     const email = c.email ? normaliseEmail(c.email) : null;
     if (customer) {
@@ -584,6 +645,12 @@ function contactPlan(ctx: PlanCtx): MockPlan {
       other: result(ctx, "contact_readback", {}),
       placeholders: NAME_PLACEHOLDERS,
       priorPhone: ctx.state.contact?.phone ?? "",
+      unclearPhone: customer || ctx.persona.callerId || ctx.state.phoneAsked ? null : result(
+        ctx,
+        "contact_needs_phone",
+        undefined,
+        sentenceFor("contact_needs_phone", { unclear: true }, ctx.callKey),
+      ),
     },
   };
 }
@@ -789,8 +856,10 @@ function claimGate(ctx: PlanCtx): { gate: MockResult | null; kind: SimIntake["ki
   else return { gate: result(ctx, s.misses > 0 ? "claim_needs_contact" : "claim_needs_lookup"), kind };
   const intake = ctx.state.intake;
   if (intake?.confirmed) return { gate: alreadyFiled(ctx, intake), kind };
-  // a new caller's intake promises a call: a chat has no caller id, so only a number they said counts
-  if (kind === "lead_intake" && !ctx.state.contact?.phone) return { gate: result(ctx, "claim_needs_phone"), kind };
+  // a new caller's intake promises a call: a number they said, or the caller id a persona stands in for
+  if (kind === "lead_intake" && !ctx.state.contact?.phone && !ctx.persona.callerId) {
+    return { gate: result(ctx, "claim_needs_phone"), kind };
+  }
   return { gate: null, kind };
 }
 
@@ -848,7 +917,10 @@ function claimConfirmPlan(ctx: PlanCtx): MockPlan {
   let yes: MockResult;
   if (intake.kind === "lead_intake") {
     const c = ctx.state.contact;
-    yes = result(ctx, "claim_intake_saved", { first_name: c?.first ?? "", emailed: !!c?.email });
+    // tools.ts confirmClaim: a specialist's call is promised only with a number to call
+    yes = (c?.confirmed && c.phone) || ctx.persona.callerId
+      ? result(ctx, "claim_intake_saved", { first_name: c?.first ?? "", emailed: !!c?.email })
+      : result(ctx, "claim_needs_phone");
   } else {
     const customer = customerById(ctx.state.identity.verified);
     const last3 = SIM_CLAIM_NUMBER.slice(-3);
@@ -903,7 +975,7 @@ export function mockCode(plan: MockPlan): string {
       `}`,
     ],
     callback: [
-      `if (P.callback) { const d = digits(a.callback_phone); r = validPhone(d) ? (P.callback.known[d] ?? P.callback.other) : P.callback.none; }`,
+      `if (P.callback) { const k = callback(a.callback_phone); r = k ? (P.callback.known[k] ?? P.callback.other) : P.callback.none; }`,
     ],
     topic: [
       `if (P.topic) { r = P.topic.known[String(a.topic ?? "")] ?? P.topic.other; }`,
@@ -916,11 +988,11 @@ export function mockCode(plan: MockPlan): string {
       `  const name = (v) => { if (typeof v !== "string") return null; const s = v.replace(/\\./g, " ").replace(/\\s+/g, " ").trim(); return /^[A-Za-z]+(?:[' -][A-Za-z]+)*$/.test(s) && s.length <= 40 && !C.placeholders.includes(s.toLowerCase()) ? s.toLowerCase() : null; };`,
       `  const given = typeof a.email === "string" && a.email.trim() !== "";`,
       `  const e = given ? email(a.email) : null;`,
-      `  const pd = digits(a.callback_phone);`,
-      `  const ph = a.callback_phone === undefined ? C.priorPhone : validPhone(pd) ? pd : "";`,
+      `  const ph = a.callback_phone === undefined ? C.priorPhone : callback(a.callback_phone);`,
+      `  const unclear = !ph && (typeof a.callback_phone === "string" || typeof a.callback_phone === "number") && /\\d/.test(String(a.callback_phone));`,
       `  if (C.onFile) r = C.onFile;`,
       `  else if (C.verified) r = e ? (C.known["@" + e] ?? C.other) : C.invalidEmail;`,
-      `  else { const f = name(a.first_name), l = name(a.last_name); r = !f || !l ? C.needsName : given && !e ? C.invalidEmail : (C.known[f + "|" + l + "|" + (e ?? "") + "|" + ph] ?? C.other); }`,
+      `  else { const f = name(a.first_name), l = name(a.last_name); r = !f || !l ? C.needsName : given && !e ? C.invalidEmail : unclear && C.unclearPhone ? C.unclearPhone : (C.known[f + "|" + l + "|" + (e ?? "") + "|" + ph] ?? C.other); }`,
       `}`,
     ],
     confirm: [
@@ -969,6 +1041,7 @@ export function mockCode(plan: MockPlan): string {
     `const a = typeof args === "object" && args !== null ? args : {};`,
     `const digits = (v) => { let d = String(v ?? "").replace(/\\D/g, ""); if (d.length === 11 && d[0] === "1") d = d.slice(1); return d; };`,
     `const validPhone = (d) => d.length === 10 && !/^(\\d)\\1{9}$/.test(d) && d[0] > "1" && d[3] > "1";`,
+    `const callback = (v) => { const n = (${normaliseCallbackNumber.toString()})(v); return n === null ? "" : /^\\+1\\d{10}$/.test(n) ? n.slice(2) : n; };`,
     `const int = (v) => typeof v === "number" && Number.isInteger(v) ? v : typeof v === "string" && /^\\s*\\d{1,4}\\s*$/.test(v) ? Number(v) : null;`,
     `let r = P.fixed;`,
     ...used.flatMap((k) => branches[k]),
@@ -1237,12 +1310,18 @@ export function advance(state: SimState, turn: TurnRecord, now: Date): string[] 
       }
       state.identity = next.state;
     } else if (call.name === "escalate") {
-      if (ESCALATION_ROW_CODES.has(call.result.code)) state.escalated = true;
+      const code = call.result.code;
+      if (ESCALATION_ROW_CODES.has(code)) state.escalated = true;
+      if (code === "rep_queued" || code === "callback_updated" || code === "rep_already_queued") {
+        state.escalationNumber = true;
+      }
+      if (ESCALATION_ROW_CODES.has(code) && callbackKey(a.callback_phone)) state.escalationNumber = true;
     } else if (call.name === "send_info_email") {
       if (call.result.code === "email_sent" && typeof a.topic === "string") state.emailed.push(a.topic);
     } else if (call.name === "capture_contact") {
       // A read-back means the row was stored (or replaced) unconfirmed, as the server would.
       if (call.result.code === "contact_readback") state.contact = capturedContact(state, a);
+      if (call.result.code === "contact_needs_phone") state.phoneAsked = true;
     } else if (call.name === "confirm_contact") {
       const code = call.result.code;
       if (state.contact && (code === "contact_saved_new" || code === "contact_saved_existing")) {
@@ -1272,6 +1351,8 @@ export function advance(state: SimState, turn: TurnRecord, now: Date): string[] 
       }
     } else if (call.name === "confirm_claim") {
       const code = call.result.code;
+      // tools.ts claimWaiting counts confirm_claim's claim_needs_phone as a loss waiting on the caller's details
+      if (code === "claim_needs_phone") state.startCodes.push(code);
       if (state.intake && (code === "claim_filed" || code === "claim_intake_saved")) {
         state.intake.confirmed = true;
         state.intake.number = state.intake.kind === "claim" ? SIM_CLAIM_NUMBER : null;
@@ -1428,6 +1509,15 @@ const moreThanWords = (n: number) => new RegExp(`(?:\\S+\\s+){${n}}\\S`);
 const JORDAN_EMAIL_SPELLED = /\bJ,? O,? R,? D,? A,? N,? dot,? E,? L,? L,? I,? S,? at gmail dot com\b/;
 const JORDAN_NUMBER_SAID = /six zero two, five five five, zero one seven seven/;
 const READBACK_QUESTION = /\b(get|got) (that|it|everything|all of that) right\?|\bright\?|\bcorrect\?/i;
+// A callback number is taken as the caller gives it (rules.md rule 3): never refused for its country or its
+// length. US_ONLY is case-sensitive, so "call us" is not "a US number".
+const NUMBER_REFUSED =
+  /\b(?:not|isn't|is not|wasn't|doesn't look like) (?:a )?valid\b|\binvalid\b|\b(?:American|North American|domestic|local) (?:phone )?number|\bonly (?:call|accept|take|use|dial)\b|\b(?:can't|cannot|can not|unable to) (?:call|accept|take|use|dial) (?:an? |that |this |your )?(?:international|overseas|foreign|non)/i;
+const US_ONLY = /\bU\.?S\.?(?![A-Za-z])/;
+// "double five" is two digits: a whole number said with one is never short of a digit (a live call was told
+// "I didn't catch 1 digit" after a number said like "9 6 0 1 double 5 0 1 2 3").
+const MISSING_DIGIT =
+  /\b(?:didn't|did not|couldn't|could not) (?:quite )?(?:catch|get|hear) (?:the |one |a |that |1 )?(?:last |final )?digit|\b(?:one|a|1) digit (?:short|missing)|\bmissing (?:a |one )?digit|\b(?:only )?(?:nine|9) digits\b/i;
 
 const TOBIAS_SAYS_PHONE = "six zero two, five five five, zero one zero one";
 const TOBIAS_DOB = "March fourteenth, nineteen eighty-six.";
@@ -1730,6 +1820,76 @@ export const PERSONAS: Persona[] = [
       },
     ],
     neverTools: ["verify_identity", "get_claim_status"],
+  },
+  // Live call: a caller from abroad asked to be called back "on this number". Their caller id, a mobile
+  // outside North America, was dropped, and the request reached the team with no number. A caller id from
+  // abroad is a callback number like any other (callerId stands in for the phone line's).
+  {
+    id: "callback-international",
+    title: "Callback on this number from a caller id abroad (unverified): queued on that number, never refused",
+    callerId: "+61491570156",
+    turns: [
+      {
+        user:
+          "Hi, I'm calling from Australia and I don't have a policy with you. Could someone from your claims team call me back on this number, please?",
+        confirm: { tool: "escalate", say: "Yes, please, a callback on the number I'm calling from." },
+        tools: ["escalate"],
+        codes: ["rep_queued"],
+        args: { escalate: all(reasonListed, noCallback) },
+        heardSays: [/number you're calling from/],
+      },
+    ],
+    neverTools: ["lookup_customer", "verify_identity", "get_claim_status"],
+    modelNever: [NUMBER_REFUSED, US_ONLY],
+    heardNever: [NUMBER_REFUSED, US_ONLY],
+  },
+  {
+    id: "callback-as-said",
+    title:
+      "A callback number without a country code (nine six zero, one five five, zero one two three) is taken and read back",
+    turns: [
+      {
+        user: "Hi, I'm not a customer yet. Could a representative call me back, please?",
+        tools: ["escalate"],
+        codes: ["rep_queued_no_number"],
+        args: { escalate: all(reasonListed, noCallback) },
+        heardSays: [NUMBER_ASK],
+      },
+      {
+        user: "Sure, it's nine six zero, one five five, zero one two three.",
+        tools: ["escalate"],
+        codes: ["callback_updated"],
+        args: { escalate: callbackIs("9601550123") },
+        heardSays: [/nine six zero, one five five, zero one two three/],
+      },
+    ],
+    neverTools: ["lookup_customer", "verify_identity", "get_claim_status"],
+    modelNever: [NUMBER_REFUSED, US_ONLY],
+    heardNever: [NUMBER_REFUSED, US_ONLY],
+  },
+  {
+    id: "callback-double-digits",
+    title: 'A callback number with "double five" in it: all ten digits go to escalate, none is said to be missing',
+    turns: [
+      {
+        user: "Hello, I'd like a representative to call me back, please.",
+        tools: ["escalate"],
+        codes: ["rep_queued_no_number"],
+        args: { escalate: all(reasonListed, noCallback) },
+        heardSays: [NUMBER_ASK],
+      },
+      {
+        user: "It's nine six zero one double five zero one two three.",
+        tools: ["escalate"],
+        codes: ["callback_updated"],
+        args: { escalate: callbackIs("9601550123") },
+        heardSays: [/nine six zero, one five five, zero one two three/],
+        modelNever: [MISSING_DIGIT],
+      },
+    ],
+    neverTools: ["lookup_customer", "verify_identity", "get_claim_status"],
+    modelNever: [NUMBER_REFUSED, US_ONLY, MISSING_DIGIT],
+    heardNever: [NUMBER_REFUSED, US_ONLY],
   },
   {
     id: "emergency",
@@ -2729,14 +2889,20 @@ export const PERSONAS: Persona[] = [
 ];
 
 /** Every digit run of seven or more in a persona is a 555 number (or the main line). */
+// Numbers from abroad, and one said without a country code, that are fictional: the UK's drama range
+// (020 7946 0xxx), Australia's fiction range (0491 570 xxx), and ten digits no North American number
+// can have (exchange 155).
+export const FICTION_NUMBERS: ReadonlySet<string> = new Set(["442079460958", "61491570156", "9601550123"]);
+
 export function fictionProblems(personas: Persona[]): string[] {
   const problems: string[] = [];
   for (const p of personas) {
-    const texts = p.turns.flatMap((t) => [t.user, t.confirm?.say ?? ""]);
-    for (const run of texts.flatMap(digitRuns)) {
+    const texts = [...p.turns.flatMap((t) => [t.user, t.confirm?.say ?? ""]), p.callerId ?? ""];
+    for (const run of texts.flatMap((t) => digitRuns(t))) {
       if (run.length < 7) continue;
       const national = run.length === 11 && run[0] === "1" ? run.slice(1) : run;
-      const ok = (national.length === 10 && national.slice(3, 6) === "555") || run === "18005550142";
+      const ok = (national.length === 10 && national.slice(3, 6) === "555") || run === "18005550142" ||
+        FICTION_NUMBERS.has(run);
       if (!ok) problems.push(`${p.id}: ${run} is not a 555 number`);
     }
   }
@@ -2973,7 +3139,8 @@ export interface RunReport {
 }
 
 export function personaPhones(persona: Persona): string[] {
-  return [...new Set(persona.turns.flatMap((t) => [...phonesIn(t.user), ...phonesIn(t.confirm?.say ?? "")]))];
+  const said = (text: string) => [...phonesIn(text), ...callbacksIn(text)];
+  return [...new Set(persona.turns.flatMap((t) => [...said(t.user), ...said(t.confirm?.say ?? "")]))];
 }
 
 /** The stand-in call key of one conversation, the same on every turn and on a rerun, so a report

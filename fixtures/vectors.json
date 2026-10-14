@@ -330,34 +330,104 @@
   ],
   "callbacks": [
     {
+      "input": "602-555-0101",
+      "expected": "+16025550101",
+      "note": "North American, dialable"
+    },
+    {
+      "input": "1-602-555-0101",
+      "expected": "+16025550101",
+      "note": "North American with a leading 1"
+    },
+    {
+      "input": "+1 (602) 555-0199",
+      "expected": "+16025550199",
+      "note": "North American E.164; the fiction range is valid"
+    },
+    {
       "input": "0125550101",
-      "expected": null,
-      "note": "area code starts with 0 (not dialable)"
+      "expected": "0125550101",
+      "note": "ten digits, area code starts with 0: not North American, kept as said"
     },
     {
       "input": "1025550101",
-      "expected": null,
-      "note": "area code starts with 1 (not dialable)"
+      "expected": "1025550101",
+      "note": "ten digits, area code starts with 1: kept as said"
     },
     {
       "input": "6020550101",
-      "expected": null,
-      "note": "exchange starts with 0 (not dialable)"
+      "expected": "6020550101",
+      "note": "ten digits, exchange starts with 0: kept as said"
     },
     {
       "input": "6021550101",
-      "expected": null,
-      "note": "exchange starts with 1 (not dialable)"
-    },
-    {
-      "input": "602-555-0101",
-      "expected": "+16025550101",
-      "note": "dialable"
+      "expected": "6021550101",
+      "note": "ten digits, exchange starts with 1: kept as said"
     },
     {
       "input": "9601550123",
+      "expected": "9601550123",
+      "note": "ten digits outside North America, no country code: kept as said"
+    },
+    {
+      "input": "+44 20 7946 0958",
+      "expected": "+442079460958",
+      "note": "international with its country code: E.164"
+    },
+    {
+      "input": "0044 20 7946 0958",
+      "expected": "+442079460958",
+      "note": "international with 00 before the country code: E.164"
+    },
+    {
+      "input": "+61491570156",
+      "expected": "+61491570156",
+      "note": "a carrier's caller id from abroad: E.164"
+    },
+    {
+      "input": "plus 61 491 570 156",
+      "expected": "+61491570156",
+      "note": "plus said as a word"
+    },
+    {
+      "input": "+1 012 555 0177",
+      "expected": "10125550177",
+      "note": "a +1 number that is not North American: kept as said"
+    },
+    {
+      "input": "020 7946 0958",
+      "expected": "02079460958",
+      "note": "eleven digits without a country code: kept as said"
+    },
+    {
+      "input": "555-0177",
+      "expected": "5550177",
+      "note": "seven digits: kept as said"
+    },
+    {
+      "input": "555-017",
       "expected": null,
-      "note": "exchange starts with 1: not dialable in NANP"
+      "note": "six digits: too few"
+    },
+    {
+      "input": "1234567890123456",
+      "expected": null,
+      "note": "sixteen digits: too many"
+    },
+    {
+      "input": "0000000000",
+      "expected": null,
+      "note": "one digit repeated"
+    },
+    {
+      "input": "+1 222 222 2222",
+      "expected": null,
+      "note": "one digit repeated after +1"
+    },
+    {
+      "input": "anonymous",
+      "expected": null,
+      "note": "a withheld caller id"
     }
   ],
   "emails": [

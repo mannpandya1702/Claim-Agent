@@ -203,10 +203,16 @@ filed, sent or paged before that yes.
 
 `capture_contact {first_name, last_name, email?, callback_phone?}` stores names (1 to 40 characters),
 a lowercase pattern-checked email (at most 100 characters) and a callback number with its source
-(`argument`, `caller_id` or `none`; a stated number is NANP-checked and never the service's own
-line). The read-back spells the email letter by letter and reads a stated number digit by digit; a
-caller-ID number was never said, so it is not read back. `confirm_contact {correct}` sets
-`confirmed` and `confirmed_at` (a CHECK keeps them consistent).
+(`argument`, `caller_id` or `none`; never the service's own line). A callback number is kept as the
+caller gives it (`identity.ts` `normaliseCallbackNumber`, `0011_intl_callbacks.sql`): North American as
+`+1XXXXXXXXXX`, international with its country code as E.164, anything else of 7 to 15 digits noted as
+said; a caller ID from abroad counts like any other. On a call from abroad, a number given without a
+country code is read against the caller ID (`givenCallbackNumber`): the caller's own number said in its
+national form is the caller ID, read back with its country code; any other is noted as said, never
+made `+1`. A number that came out wrong (too few or too many digits), with no caller ID to fall back
+on, is asked for once (`contact_needs_phone`) rather than dropped. The read-back spells the email letter
+by letter and reads a stated number digit by digit; a caller-ID number was never said, so it is not read
+back. `confirm_contact {correct}` sets `confirmed` and `confirmed_at` (a CHECK keeps them consistent).
 
 - Any change needs a new yes. `upsert_caller_contact` keeps a confirmation only when kind, names,
   email, number and number source are unchanged, because the claim intake and GoHighLevel key on a
@@ -387,14 +393,16 @@ membership and row visibility with the caller's JWT, then returns the presigned 
 
 ### 4.8 Masking
 
-`redactPII` runs on every stored text: phone-like runs become `[phone ending NNNN]`, birth-plausible
-dates `[date of birth]`, emails (written or spelled) `[email]`. Speech-to-text splits a spoken date
-or number into fragments no pattern catches, so a caller turn answering a sensitive question
-(`SENSITIVE_ASK_RE`: date of birth, phone number, email, spelling, digits in pieces) is stored whole
-as `[answer withheld]`. `REASK_RE` keeps masking on through a re-ask, a line check ("Yes, I can hear
-you.") or a hold line ("No rush, I'm right here."). The same rule covers stored messages, the stored
-transcript and the live `transcript_lines` path, which reads the latest 6 assistant lines because
-VAPI can split one turn into several final transcripts.
+`redactPII` runs on every stored text: phone-like runs become `[phone ending NNNN]` (North American,
+international with its country code, and any other stretch of 7 to 15 digits, written or read back,
+taken whole; a stretch never joins across a sentence end or a comma list of amounts or years, so claim
+numbers, amounts and dates stay), birth-plausible dates `[date of birth]`, emails (written or spelled)
+`[email]`. Speech-to-text splits a spoken date or number into fragments no pattern catches, so a caller
+turn answering a sensitive question (`SENSITIVE_ASK_RE`: date of birth, phone number, email, spelling,
+digits in pieces) is stored whole as `[answer withheld]`. `REASK_RE` keeps masking on through a re-ask,
+a line check ("Yes, I can hear you.") or a hold line ("No rush, I'm right here."). The same rule covers
+stored messages, the stored transcript and the live `transcript_lines` path, which reads the latest 6
+assistant lines because VAPI can split one turn into several final transcripts.
 
 ---
 
@@ -511,7 +519,7 @@ recorded as `"unknown"` so a retry does not duplicate it.
 | Mode | When | Key | Miss | Hit |
 |---|---|---|---|---|
 | `verified` | session verified | the customer's phone on file | create with account name and email | fill-only enrichment |
-| `lead` | confirmed new caller, no account match | the confirmed callback number | create with confirmed name and email | writes only if the number is the caller ID; a stated number is skipped (`lead_number_not_caller_id`) |
+| `lead` | confirmed new caller, no account match | the confirmed callback number, if E.164; for one noted as said, a phone call's caller ID (the note names the number by its last four; a web call is skipped: `new_caller_number_without_country_code`) | create with confirmed name and email | writes only if the key is the caller ID; a stated number is skipped (`lead_number_not_caller_id`) |
 | `search_only` | anyone else on a phone call | caller ID | skipped, nothing created | tags, a note without summary or names, tasks |
 | `skip` | nothing trusted | - | - | - |
 
@@ -656,7 +664,7 @@ inside and take the actor from the JWT. List views read masked generated columns
 | Decision | Why |
 |---|---|
 | `call_key = call.id ?? chat.sessionId ?? chat.id` | over `/chat`, `chat.id` changes every turn but `sessionId` does not |
-| Phones as E.164 with a CHECK | one canonical form; spoken formats normalised in code; GHL search matches only E.164 |
+| Account phones as E.164 with a CHECK; callback numbers as E.164 or noted as said | one canonical form for lookups; a callback number keeps what the caller said; GHL gets E.164 only |
 | DOB as three integers, compared in SQL | no month/day ambiguity; the DOB never travels back |
 | Loss date as the caller's words, parsed on the server | no date arithmetic in the model; the read-back speaks the weekday |
 | Claim number spoken as its last three digits | enough to tell claims apart by voice |

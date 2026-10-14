@@ -1251,6 +1251,81 @@ Deno.test("lead intake: no number to call back on asks for one before the claim 
   assertEquals((await p.run("start_claim", loss)).code, "claim_readback");
 });
 
+Deno.test("lead intake: a number from abroad or one said without a country code is a number to call", async () => {
+  const loss = { claim_type: "auto", loss_date: "yesterday", description: "I hit a deer on the highway." };
+  // a caller id from abroad on the phone line: no question, and the team is told that number
+  const abroad = harness({ channel: "inboundPhoneCall", callerNumber: "+61491570156" });
+  await notFoundTwice(abroad);
+  await abroad.run("capture_contact", { first_name: "Jane", last_name: "Doe" });
+  await abroad.run("confirm_contact", { correct: true });
+  assertEquals((await abroad.run("start_claim", loss)).code, "claim_readback");
+  assertEquals((await abroad.run("confirm_claim", { correct: true })).code, "claim_intake_saved");
+  const abroadNotice = abroad.resendCalls().map((c) => body(c)).find((b) => b.to?.[0] === "team@example.com");
+  assertStringIncludes(abroadNotice?.html, "+61 491 570 156 (international)");
+
+  // a number said without a country code on a web call, confirmed on its read-back
+  const asSaid = harness();
+  await confirmedNewCaller(asSaid, { callback_phone: "960 155 0123" });
+  assertEquals((await asSaid.run("start_claim", loss)).code, "claim_readback");
+  assertEquals((await asSaid.run("confirm_claim", { correct: true })).code, "claim_intake_saved");
+  const notice = asSaid.resendCalls().map((c) => body(c)).find((b) => b.to?.[0] === "team@example.com");
+  assertStringIncludes(notice?.html, "960 155 0123 (as said, no country code)");
+});
+
+Deno.test("lead intake: confirm_claim promises a specialist's call only with a number to call", async () => {
+  const loss = { claim_type: "auto", loss_date: "yesterday", description: "I hit a deer on the highway." };
+  const h = harness();
+  await confirmedNewCaller(h, { callback_phone: "9601550123" });
+  assertEquals((await h.run("start_claim", loss)).code, "claim_readback");
+  // the caller corrects the number after the read-back and it comes out wrong twice: asked once, then
+  // stored without a number, and the details are confirmed again
+  const cut = { first_name: "Jane", last_name: "Doe", email: "jane.doe42@gmail.com", callback_phone: "96015" };
+  assertEquals((await h.run("capture_contact", cut)).code, "contact_needs_phone");
+  assertEquals((await h.run("capture_contact", { ...cut, callback_phone: "" })).code, "contact_readback");
+  assertEquals((await h.run("confirm_contact", { correct: true })).code, "contact_saved_new");
+  const teamBefore = h.resendCalls().length;
+  // nothing to call: the claim is not taken yet, and no "a specialist will call you"
+  assertEquals(await h.run("confirm_claim", { correct: true }, "tc_no_number"), {
+    code: "claim_needs_phone",
+    sentence: "Before I take this down, what's the best number for our claims team to reach you?",
+  });
+  assertEquals((await h.run("confirm_claim", { correct: true }, "tc_no_number")).code, "claim_needs_phone", "a replay");
+  assertEquals(h.intake()?.confirmed, false);
+  assertEquals(h.resendCalls().length, teamBefore, "no team notice, no confirmation");
+  assertEquals(h.telegramCalls().length, 0);
+  // the number is captured with its own read-back; the yes asks to take the claim down, which files it
+  await h.run("capture_contact", { ...cut, callback_phone: "+44 20 7946 0958" });
+  assertEquals(
+    (await h.run("confirm_contact", { correct: true })).sentence,
+    "Perfect, I've saved your details. Shall I go ahead and take down that claim now?",
+  );
+  assertEquals((await h.run("start_claim", loss)).code, "claim_readback");
+  assertEquals((await h.run("confirm_claim", { correct: true })).code, "claim_intake_saved");
+  const notice = h.resendCalls().map((c) => body(c)).find((b) => b.to?.[0] === "team@example.com");
+  assertStringIncludes(notice?.html, "+44 207 946 0958 (international)");
+  // a phone call's caller id is a number to call: no question
+  const p = harness({ channel: "inboundPhoneCall", callerNumber: "+61491570156" });
+  await notFoundTwice(p);
+  await p.run("capture_contact", { first_name: "Jane", last_name: "Doe" });
+  await p.run("confirm_contact", { correct: true });
+  assertEquals((await p.run("start_claim", loss)).code, "claim_readback");
+  assertEquals((await p.run("confirm_claim", { correct: true })).code, "claim_intake_saved");
+});
+
+Deno.test("lead intake on a call from abroad: a number noted as said reaches the team as said", async () => {
+  const loss = { claim_type: "home", loss_date: "Saturday", description: "Storm damage to the roof of my house." };
+  const h = harness({ channel: "inboundPhoneCall", callerNumber: "+442079460958" });
+  await notFoundTwice(h);
+  await h.run("capture_contact", { first_name: "Jane", last_name: "Doe", callback_phone: "602 555 0177" });
+  await h.run("confirm_contact", { correct: true });
+  assertEquals((await h.run("start_claim", loss)).code, "claim_readback");
+  assertEquals((await h.run("confirm_claim", { correct: true })).code, "claim_intake_saved");
+  const notice = h.resendCalls().map((c) => body(c)).find((b) => b.to?.[0] === "team@example.com");
+  // as said: never "(602) 555-0177 (+16025550177)"
+  assertStringIncludes(notice?.html, "602 555 0177 (as said, no country code)");
+  assertFalse(notice?.html.includes("+16025550177"));
+});
+
 Deno.test("the claim sentences: speakable, one question, at most sixty words, no 'oh' for zero", () => {
   const variants: [Parameters<typeof sentenceFor>[0], Record<string, unknown> | undefined][] = [
     ["claim_readback", { claim_type: "auto", loss_date: "2026-10-10", summary: "a cracked windshield", today: TODAY }],

@@ -112,13 +112,15 @@ const splitWords = (s: string) => s.toLowerCase().split(/[\s,-]+/).filter((w) =>
 // Phone numbers
 // ---------------------------------------------------------------------------------------------
 // One piece of a written or spoken number. A numeric piece glued to letters (a UUID segment,
-// "14th") is never part of a phone; a word piece is a whole word.
+// "14th") is never part of a phone; a word piece is a whole word. "plus" starts an international
+// number said aloud ("plus four four, two zero seven, ...").
 const PHONE_PIECE = [
   String.raw`\+?(?:\(\d+(?!\d)\)|\d+(?!\d))(?![A-Za-z_])`,
   String.raw`\b(?:double|triple)${J}(?:${UNIT_ALT}|\d)\b`,
   String.raw`\b(?:${TENS_ALT})(?:${J}(?:${CARD_UNIT_ALT}))?\b`,
   String.raw`\b(?:${TEEN_ALT})\b`,
   String.raw`\b(?:${UNIT_ALT})\b`,
+  String.raw`\bplus\b`,
 ].join("|");
 // Between pieces: spaces, a dash, a dot or an ellipsis ("six zero two... five five five"), a
 // comma followed by a space (so "4,820" stays two numbers), or nothing right after a closing
@@ -130,9 +132,19 @@ const PHONE_RUN_RE = new RegExp(
   "gi",
 );
 const PHONE_PIECE_RE = new RegExp(PHONE_PIECE, "gi");
+// The fewest and the most digits a number given without the North American shape can have (E.164
+// allows 15 after the country code).
+const MIN_OTHER_DIGITS = 7;
+const MAX_OTHER_DIGITS = 15;
+// Right after these words a stretch of digits is something other than a phone, so only a full North
+// American number counts: the claim endings a status sentence lists ("ending in one nine eight, one one
+// five, zero nine zero") and a policy or claim number ("The policy number is 7301 2244.").
+const CLAIM_ENDING_LEAD = /\b(?:ending|ends)(?:[ \t]+in)?[ \t,:]*$/i;
+const REFERENCE_LEAD = /\b(?:policy|claim)[ \t]+(?:number|no\.?|#)(?:[ \t]+(?:is|was))?[ \t,:#]*$/i;
 
 function pieceDigits(piece: string): string {
   const p = piece.toLowerCase();
+  if (p === "plus") return "";
   if (!/[a-z]/.test(p)) return p.replace(/\D/g, "");
   const words = p.split(/[\s-]+/).filter(Boolean);
   if (words[0] === "double" || words[0] === "triple") {
@@ -148,43 +160,214 @@ interface Piece {
   start: number;
   end: number;
   digits: string;
+  numeric: boolean; // written in figures
+  spoken: boolean; // one digit said aloud ("zero" to "nine", "oh"), or "double" or "triple" and one
+  plus: boolean; // "+44" or the word "plus": a country code follows
+}
+
+interface Hit {
+  first: number;
+  last: number;
+  digits: string;
 }
 
 /** The phone starting at piece i: consecutive pieces adding up to exactly 10 digits, or 11 with
  *  a leading 1 (preferred). Aligning to piece boundaries keeps an adjacent year or count out. */
-function phoneAt(pieces: Piece[], i: number): { last: number; digits: string } | null {
+function phoneAt(pieces: Piece[], i: number): Hit | null {
   let digits = "";
-  let ten: { last: number; digits: string } | null = null;
+  let ten: Hit | null = null;
   for (let j = i; j < pieces.length; j++) {
+    // "plus" leads a number; later on it is a word between two numbers
+    if (j > i && pieces[j].digits === "") break;
     digits += pieces[j].digits;
-    if (digits.length === 10) ten = { last: j, digits };
-    else if (digits.length === 11 && digits[0] === "1") return { last: j, digits };
+    if (digits.length === 10) ten = { first: i, last: j, digits };
+    else if (digits.length === 11 && digits[0] === "1") return { first: i, last: j, digits };
     if (digits.length >= 11) break;
   }
   return ten;
 }
 
+const sepBefore = (run: string, pieces: Piece[], j: number) => run.slice(pieces[j - 1].end, pieces[j].start);
+// A piece a number given digit by digit is made of: figures, or one digit said aloud. A counting word
+// ("twenty", "fifteen") belongs to a year or an amount, and "plus" is a word between two numbers.
+const phoneLike = (p: Piece) => p.numeric || p.spoken;
+const single = (p: Piece) => p.spoken || (p.numeric && p.digits.length === 1);
+
+/** Whether piece j continues the number piece j - 1 is part of. A sentence end (". " after a digit: "five
+ *  eight. Two weeks ago") never joins; a comma joins digits said or written one at a time ("nine six zero,
+ *  one five five"), never figures of two or more ("1200, 1500" and "2019, 2021" are lists); spaces, dashes,
+ *  dots without a space and ellipses join. */
+function joins(run: string, pieces: Piece[], j: number): boolean {
+  const sep = sepBefore(run, pieces, j);
+  if (/^[ \t]*\.[ \t]+$/.test(sep)) return false;
+  return !sep.includes(",") || (single(pieces[j - 1]) && single(pieces[j]));
+}
+
+/** Where the stretch of pieces from i that reads as one number ends (exclusive): phone-like pieces that
+ *  join (joins), stopping before a piece in stop. Piece i itself is the caller's to check. */
+function stretchEnd(run: string, pieces: Piece[], i: number, stop: (k: number) => boolean): number {
+  let end = i + 1;
+  while (end < pieces.length && !stop(end) && phoneLike(pieces[end]) && joins(run, pieces, end)) end++;
+  return end;
+}
+
+/** stretchEnd from every piece, stopping before a protected one, worked out once per run from the right,
+ *  so a long run costs linear time. */
+function stretchEnds(run: string, pieces: Piece[], blocked: Set<number>): number[] {
+  const ends: number[] = new Array(pieces.length);
+  for (let i = pieces.length - 1; i >= 0; i--) {
+    const next = i + 1;
+    const joined = next < pieces.length && !blocked.has(next) && phoneLike(pieces[next]) && joins(run, pieces, next);
+    ends[i] = joined ? ends[next] : next;
+  }
+  return ends;
+}
+
+/** The most pieces from i whose digits stay within 15 (after an international "00"), if they reach
+ *  seven; null otherwise. */
+function longestAt(pieces: Piece[], i: number, end: number): Hit | null {
+  let digits = "";
+  let best: Hit | null = null;
+  for (let j = i; j < end; j++) {
+    if (j > i && pieces[j].digits === "") break;
+    const next = digits + pieces[j].digits;
+    if (next.replace(/^00(?=[1-9])/, "").length > MAX_OTHER_DIGITS) break;
+    digits = next;
+    if (digits.replace(/^00(?=[1-9])/, "").length >= MIN_OTHER_DIGITS) best = { first: i, last: j, digits };
+  }
+  return best;
+}
+
+/** An international number said with its country code ("+44 20 7946 0958", "plus six one ...",
+ *  "0044 20 ..."), within its stretch (ending at end), so a number after a sentence end or a list never
+ *  joins it; a "+1" number is North American and left to phoneAt. */
+function internationalAt(pieces: Piece[], i: number, end: number): Hit | null {
+  let head = "";
+  for (let j = i; j < end && head.length < 3; j++) head += pieces[j].digits;
+  const prefixed = pieces[i].plus ? /^[2-9]/.test(head) : /^00[1-9]/.test(head);
+  return prefixed ? longestAt(pieces, i, end) : null;
+}
+
+/** Whether the first ten digits of a longer stretch end on piece j at the close of a group: figures of
+ *  two or more ("602 555 0101"), or a comma, a dash, a dot or an ellipsis after it rather than a space. */
+function groupEnds(run: string, pieces: Piece[], j: number): boolean {
+  if (pieces[j].numeric && pieces[j].digits.length > 1) return true;
+  return j + 1 < pieces.length && !/^[ \t]+$/.test(sepBefore(run, pieces, j + 1));
+}
+
+/** A number of 11 to 15 digits given without a country code, said or read back in groups ("zero two
+ *  zero, seven nine four, six zero nine, five eight", "0 2 0 7 9 4 6 0 9 5 8"), taken whole: a ten-digit
+ *  match would leave its last digits in clear and name the wrong last four. Not a North American number
+ *  with its 1 (phoneAt), and not one whose first ten digits close a group: that is a full North American
+ *  number with something else after it ("602 555 0101 2 claims"). */
+function longNumberAt(run: string, pieces: Piece[], i: number, end: number): Hit | null {
+  if (!phoneLike(pieces[i])) return null;
+  let digits = "";
+  for (let j = i; j < end; j++) {
+    digits += pieces[j].digits;
+    if (digits.length > MAX_OTHER_DIGITS) return null; // longer: not a phone (every piece has a digit)
+  }
+  if (digits.length < 11 || (digits.length === 11 && digits[0] === "1")) return null;
+  let count = 0;
+  for (let j = i; j < end && count < 10; j++) {
+    count += pieces[j].digits.length;
+    if (count === 10 && groupEnds(run, pieces, j)) return null;
+  }
+  return { first: i, last: end - 1, digits };
+}
+
+const year = (p: Piece) => p.numeric && /^(?:19|20)\d\d$/.test(p.digits);
+const short = (p: Piece | undefined) => !!p && p.numeric && p.digits.length >= 1 && p.digits.length <= 2;
+
+/** Pieces that are something other than a phone even when their digits add up to one: a date
+ *  (2026-10-08, 10 08 2026), a ZIP+4 (85004-1234), a span of years (2019-2026) or a decimal number
+ *  (0.0123456). */
+function protectedPieces(run: string, pieces: Piece[]): Set<number> {
+  const out = new Set<number>();
+  const sep = (j: number) => sepBefore(run, pieces, j);
+  for (let j = 0; j < pieces.length; j++) {
+    const [a, b, c] = [pieces[j], pieces[j + 1], pieces[j + 2]];
+    if ((year(a) && short(b) && short(c)) || (short(a) && short(b) && c && year(c))) {
+      out.add(j).add(j + 1).add(j + 2);
+    }
+    if (!b || !a.numeric || !b.numeric) continue;
+    if (sep(j + 1) === "-" && a.digits.length === 5 && b.digits.length === 4) out.add(j).add(j + 1);
+    if (year(a) && year(b) && /^\s*-?\s*$/.test(sep(j + 1))) out.add(j).add(j + 1);
+    if (sep(j + 1) === "." && pieces.length === 2) out.add(j).add(j + 1);
+  }
+  return out;
+}
+
+/** Numbers given without the North American shape, in the pieces no full number took: a stretch
+ *  (stretchEnd) of 7 to 15 digits, as a number from abroad or one said without its country code would
+ *  be. A longer stretch is not a phone and is left whole (never partly redacted). */
+function otherNumbers(run: string, pieces: Piece[], taken: boolean[], blocked: Set<number>): Hit[] {
+  const stop = (k: number) => taken[k] || blocked.has(k);
+  const hits: Hit[] = [];
+  let i = 0;
+  while (i < pieces.length) {
+    if (stop(i) || !phoneLike(pieces[i])) {
+      i++;
+      continue;
+    }
+    const end = stretchEnd(run, pieces, i, stop);
+    const digits = pieces.slice(i, end).map((p) => p.digits).join("");
+    const count = digits.replace(/^00(?=[1-9])/, "").length;
+    // Our own published line, however it was split ("five five five, zero one four two"), stays.
+    const ownLine = digits.length < 11 && MAIN_LINE_DIGITS.endsWith(digits);
+    if (count >= MIN_OTHER_DIGITS && count <= MAX_OTHER_DIGITS && !ownLine) {
+      hits.push({ first: i, last: end - 1, digits });
+    }
+    i = end;
+  }
+  return hits;
+}
+
 function redactPhones(text: string): string {
-  return text.replace(PHONE_RUN_RE, (run) => {
+  return text.replace(PHONE_RUN_RE, (run: string, offset: number) => {
     const pieces: Piece[] = [...run.matchAll(PHONE_PIECE_RE)].map((m) => ({
       start: m.index,
       end: m.index + m[0].length,
       digits: pieceDigits(m[0]),
+      numeric: !/[a-z]/i.test(m[0]),
+      spoken: /^(?:double|triple)\b/i.test(m[0]) || UNIT_VALUE.has(m[0].toLowerCase()),
+      plus: m[0].startsWith("+") || m[0].toLowerCase() === "plus",
     }));
-    let out = "";
-    let cursor = 0;
+    const blocked = protectedPieces(run, pieces);
+    const ends = stretchEnds(run, pieces, blocked);
+    // A run glued to an identifier (a UUID segment), or right after claim endings or a policy or claim
+    // number, holds only full numbers: North American, or international with its country code.
+    const before = text.slice(Math.max(0, offset - 40), offset);
+    const after = text.slice(offset + run.length, offset + run.length + 2);
+    const guarded = CLAIM_ENDING_LEAD.test(before) || REFERENCE_LEAD.test(before) || /[A-Za-z0-9]-$/.test(before) ||
+      /^-[A-Za-z0-9]/.test(after);
+    // A full number: international with its country code, one of 11 to 15 digits without one, or North
+    // American (our own line is kept).
+    const taken = pieces.map(() => false);
+    const hits: Hit[] = [];
     let i = 0;
     while (i < pieces.length) {
-      const hit = phoneAt(pieces, i);
+      // A stretch is taken whole from its first piece only: never the tail of a longer one (a card number).
+      const free = !blocked.has(i);
+      const starts = i === 0 || taken[i - 1] || blocked.has(i - 1) || !phoneLike(pieces[i - 1]) ||
+        !joins(run, pieces, i);
+      const hit = (free ? internationalAt(pieces, i, ends[i]) : null) ??
+        (free && starts && !guarded ? longNumberAt(run, pieces, i, ends[i]) : null) ?? phoneAt(pieces, i);
       if (!hit) {
         i++;
         continue;
       }
-      if (hit.digits.slice(-10) !== MAIN_LINE_DIGITS) {
-        out += run.slice(cursor, pieces[i].start) + phoneToken(hit.digits);
-        cursor = pieces[hit.last].end;
-      }
+      for (let k = hit.first; k <= hit.last; k++) taken[k] = true;
+      if (hit.digits.slice(-10) !== MAIN_LINE_DIGITS) hits.push(hit);
       i = hit.last + 1;
+    }
+    if (!guarded) hits.push(...otherNumbers(run, pieces, taken, blocked));
+    hits.sort((a, b) => a.first - b.first);
+    let out = "";
+    let cursor = 0;
+    for (const hit of hits) {
+      out += run.slice(cursor, pieces[hit.first].start) + phoneToken(hit.digits);
+      cursor = pieces[hit.last].end;
     }
     return out + run.slice(cursor);
   });
@@ -360,6 +543,9 @@ export function redactPIIAsOf(text: string, refYear: number): string {
 }
 
 /** Phone-like digit runs (602-555-0101, (602) 555 0101, +16025550101, 6025550101, spaced digits) -> "[phone ending 0101]";
+ *  international numbers with a country code (+44 20 7946 0958, 0044 ..., "plus four four, ...") and any other
+ *  stretch of 7 to 15 digits (a number said without its country code, 9601550123) the same way, except a date,
+ *  a ZIP+4, a span of years, a decimal, a UUID segment, claim endings and our own main line;
  *  DOB-shaped dates (March 14, 1986 / 3/14/1986 / 1986-03-14 / 14 March 1986 / march fourteenth nineteen eighty six /
  *  march 14th 86 / 3 14 86) -> "[date of birth]"; email addresses, written or spelled aloud
  *  ("j, a, n, e, at gmail dot com", "jane at gmail dot com") -> "[email]".

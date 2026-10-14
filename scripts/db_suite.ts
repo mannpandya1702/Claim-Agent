@@ -597,13 +597,86 @@ await test("caller_contacts: captured unconfirmed, confirmed once, kept by an id
     assert false, 'upper-case email'; exception when check_violation then null; end;
   begin perform upsert_caller_contact(${k}, 'new_customer', 'A', 'B', 'jane@example', null, 'none', null);
     assert false, 'email without a top-level domain'; exception when check_violation then null; end;
-  begin perform upsert_caller_contact(${k}, 'new_customer', 'A', 'B', null, '6025550177', 'argument', null);
-    assert false, 'callback not E.164'; exception when check_violation then null; end;
+  begin perform upsert_caller_contact(${k}, 'new_customer', 'A', 'B', null, '602555', 'argument', null);
+    assert false, 'callback of six digits'; exception when check_violation then null; end;
   begin update caller_contacts set confirmed = true, confirmed_at = null where call_key = ${k};
     assert false, 'confirmed without a time'; exception when check_violation then null; end;`,
       "r record;",
     ),
   ));
+});
+
+// 0011: a callback number is whatever number the caller gives. The whole case is one rolled-back
+// transaction, so nothing it writes outlives it.
+await test("0011: a callback number from abroad, or noted as said, is stored as given and masked without +1", async () => {
+  const f = fixture("intl");
+  const k = lit(f.callKey);
+  const contact = (phone: string, source = "argument") =>
+    `upsert_caller_contact(${k}, 'new_customer', 'Jane', 'Doe', null, ${lit(phone)}, ${lit(source)}, null)`;
+  const escalate = (phone: string) =>
+    `upsert_escalation(${k}, 'representative', 'representative_requested', null, ${
+      lit(phone)
+    }, 'argument', 'webCall', false)`;
+  const j = (v: Record<string, unknown>) => `${lit(JSON.stringify({ vapi_call_id: f.callKey, ...v }))}::jsonb`;
+  await sql(tx(doBlock(
+    `
+  -- caller_contacts: E.164 from anywhere, and 7 to 15 digits as said
+  select * into r from ${contact("+442079460958")};
+  assert r.callback_phone = '+442079460958', format('international: %s', row_to_json(r));
+  select * into r from ${contact("+61491570156", "caller_id")};
+  assert r.callback_phone = '+61491570156' and r.callback_source = 'caller_id', format('caller id: %s', row_to_json(r));
+  select * into r from ${contact("9601550123")};
+  assert r.callback_phone = '9601550123', format('as said: %s', row_to_json(r));
+  select * into r from ${contact("5550177")};
+  assert r.callback_phone = '5550177', format('seven digits: %s', row_to_json(r));
+  select * into r from ${contact("+16025550177")};
+  assert r.callback_phone = '+16025550177', format('North American: %s', row_to_json(r));
+  -- ten digits noted as said on a call from abroad keep their bare form
+  select * into r from ${contact("6025550177")};
+  assert r.callback_phone = '6025550177', format('as said, ten digits: %s', row_to_json(r));
+  begin perform ${contact("602555")};
+    assert false, 'six digits'; exception when check_violation then null; end;
+  begin perform ${contact("1234567890123456")};
+    assert false, 'sixteen digits'; exception when check_violation then null; end;
+  begin perform ${contact("+44 20 7946 0958")};
+    assert false, 'spaces are never stored'; exception when check_violation then null; end;
+
+  -- escalations: a number as said, then one from abroad, then a North American one; the list mask
+  -- says "+1" only for the last
+  select * into r from ${escalate("9601550123")};
+  select callback_phone, callback_phone_masked into e from escalations where id = r.id;
+  assert e.callback_phone = '9601550123' and e.callback_phone_masked = '... 0123', format('as said: %s', row_to_json(e));
+  perform ${escalate("+442079460958")};
+  select callback_phone, callback_phone_masked into e from escalations where id = r.id;
+  assert e.callback_phone = '+442079460958' and e.callback_phone_masked = '... 0958',
+    format('international: %s', row_to_json(e));
+  perform ${escalate("+16025550177")};
+  select callback_phone, callback_phone_masked into e from escalations where id = r.id;
+  assert e.callback_phone_masked = '+1 602 ... 0177', format('North American: %s', row_to_json(e));
+  -- bare digits have no country code, whatever their shape: never masked as +1
+  perform ${escalate("6025550177")};
+  select callback_phone, callback_phone_masked into e from escalations where id = r.id;
+  assert e.callback_phone = '6025550177' and e.callback_phone_masked = '... 0177',
+    format('as said, ten digits: %s', row_to_json(e));
+  perform ${escalate("16025550177")};
+  select callback_phone_masked into e from escalations where id = r.id;
+  assert e.callback_phone_masked = '... 0177', format('as said, eleven digits: %s', row_to_json(e));
+
+  -- call_interactions: a caller id from abroad, and a number as said, keep their last four only
+  perform upsert_interaction(${j({ outcome: "in_progress", caller_phone: "+61491570156" })});
+  select caller_phone, caller_phone_masked into e from call_interactions where vapi_call_id = ${k};
+  assert e.caller_phone = '+61491570156' and e.caller_phone_masked = '... 0156', format('caller id: %s', row_to_json(e));
+  update call_interactions set caller_phone = '9601550123' where vapi_call_id = ${k};
+  select caller_phone_masked into e from call_interactions where vapi_call_id = ${k};
+  assert e.caller_phone_masked = '... 0123', format('as said: %s', row_to_json(e));
+  update call_interactions set caller_phone = '6025550177' where vapi_call_id = ${k};
+  select caller_phone_masked into e from call_interactions where vapi_call_id = ${k};
+  assert e.caller_phone_masked = '... 0177', format('as said, ten digits: %s', row_to_json(e));
+  update call_interactions set caller_phone = '+16025550177' where vapi_call_id = ${k};
+  select caller_phone_masked into e from call_interactions where vapi_call_id = ${k};
+  assert e.caller_phone_masked = '+1 602 ... 0177', format('North American: %s', row_to_json(e));`,
+    "r record; e record;",
+  )));
 });
 
 await test("upsert_interaction: caller_type replaces unknown, never downgrades; caller_email kept; search_calls returns both", async () => {

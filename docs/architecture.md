@@ -476,6 +476,7 @@ migration is never edited; changes go in a new file.
 | `0008_ghl.sql` | Outbox destination `ghl`, `progress`, `next_attempt_at`, delayed enqueue, `save_outbox_progress` |
 | `0009_review_fixes.sql` | A changed callback number needs a new confirmation; `file_claim_intake_once` returns `filed_now` |
 | `0010_lookup_retries.sql` | `lookup_numbers`; lookups counted by distinct number |
+| `0011_intl_callbacks.sql` | A callback number from abroad or noted as said passes the `caller_contacts` CHECK; masked columns say `+1` only for a number stored with its `+1` |
 
 Tables not covered in section 7.1:
 

@@ -54,7 +54,10 @@ const MAX_SUMMARY = 1500;
 const MAX_DESCRIPTION = 500;
 const SEARCH_PAGE_LIMIT = 20;
 const LONG_DIGITS_RE = /\d{7,}/g;
-const E164_RE = /^\+1\d{10}$/;
+// What GHL's phone field takes: E.164, "+" and 8 to 15 digits (North American or international). A
+// callback number noted as the caller said it, without a country code, is never sent there: GHL
+// refuses it, and the refusal would come back on every retry of the outbox row.
+const E164_RE = /^\+[1-9]\d{7,14}$/;
 const PHONE_CHANNELS: ReadonlySet<string> = new Set(["inboundPhoneCall", "outboundPhoneCall"]);
 // The two requests whose body names the location; every other one acts on a contact id.
 const LOCATION_PATHS: ReadonlySet<string> = new Set(["/contacts/", "/contacts/search"]);
@@ -257,7 +260,8 @@ export async function loadGhlFacts(store: Store, callKey: string): Promise<GhlFa
 // lead         a new caller who confirmed their details on the read-back: searched on that number,
 //              created with that name and email on a miss; on a hit, additive writes only when the
 //              number is the call's caller id (createOnly otherwise: a number the caller said may
-//              be anyone's, so a hit is skipped)
+//              be anyone's, so a hit is skipped). A number noted as said (no country code) is never a
+//              key: a phone call's caller id keys the lead instead, and the note names the number
 // search_only  anyone else on a phone call: searched on the caller id; a hit gets tags and a note of
 //              server facts, a miss is skipped
 // skip         nothing trusted to key on (a web caller, no caller id, the locked candidate's number)
@@ -293,6 +297,17 @@ const skip = (reason: string, status: CallerPlan["status"] = "unverified"): Call
   reason,
 });
 
+/** A phone call's caller id as a key (E.164, own numbers left out), or null. The session holds the
+ *  envelope's caller id; without a session no tool ran, so the record's caller_phone can only be that
+ *  same caller id. */
+function phoneCallerId(facts: GhlFacts, own: string[]): string | null {
+  const session = facts.session;
+  const channel = facts.interaction.channel ?? session?.channel ?? null;
+  if (!channel || !PHONE_CHANNELS.has(channel)) return null;
+  const raw = session ? session.caller_number : facts.contact ? null : facts.interaction.caller_phone;
+  return e164(callerIdNumber(raw, own));
+}
+
 /** Pure: who the call's contact is and what may be written to it, from server facts only. */
 export function planCaller(facts: GhlFacts, own: string[]): CallerPlan {
   const session = facts.session;
@@ -316,26 +331,25 @@ export function planCaller(facts: GhlFacts, own: string[]): CallerPlan {
   // number would most likely be the account holder's (post_call.ts has the same guard).
   const contact = facts.contact;
   if (level === "none" && !session?.candidate_customer_id && contact?.kind === "new_customer" && contact.confirmed) {
+    const create = { firstName: contact.first_name, lastName: contact.last_name, email: str(contact.email) };
+    const callerId = phoneCallerId(facts, own);
     const key = e164(contact.callback_phone);
-    if (!key) return skip("new_caller_without_number", "lead");
-    // The envelope's caller id is the caller's own line; a number they said is only what they said.
-    const createOnly = contact.callback_source !== "caller_id";
-    return {
-      mode: "lead",
-      key,
-      create: { firstName: contact.first_name, lastName: contact.last_name, email: str(contact.email) },
-      enrich: false,
-      ...(createOnly ? { createOnly } : {}),
-      status: "lead",
-    };
+    if (key) {
+      // The envelope's caller id is the caller's own line; a number they said is only what they said,
+      // unless it is that same caller id.
+      const createOnly = contact.callback_source !== "caller_id" && key !== callerId;
+      return { mode: "lead", key, create, enrich: false, ...(createOnly ? { createOnly } : {}), status: "lead" };
+    }
+    if (!contact.callback_phone) return skip("new_caller_without_number", "lead");
+    // A number noted as said, without a country code, never goes into GHL's phone field (the note carries
+    // its last four): the call's own caller id keys the lead instead, as the caller's own line.
+    if (callerId) return { mode: "lead", key: callerId, create, enrich: false, status: "lead" };
+    return skip("new_caller_number_without_country_code", "lead");
   }
   const status = level === "locked" ? "locked" : "unverified";
   const channel = facts.interaction.channel ?? session?.channel ?? null;
   if (!channel || !PHONE_CHANNELS.has(channel)) return skip("web_unverified", status);
-  // The session holds the envelope's caller id (own numbers already left out). Without a session no
-  // tool ran, so the record's caller_phone can only be that same caller id.
-  const raw = session ? session.caller_number : contact ? null : facts.interaction.caller_phone;
-  const callerId = callerIdNumber(raw, own);
+  const callerId = phoneCallerId(facts, own);
   if (!callerId) return skip("no_caller_id", status);
   // A locked caller never touches the account they failed to verify, even from its own number.
   if (level === "locked" && facts.candidatePhone && callerId === facts.candidatePhone) {
@@ -490,9 +504,27 @@ function channelLabel(channel: string | null): string {
   return "unknown channel";
 }
 
-function callerLine(plan: CallerPlan, level: string): string {
+/** A lead keyed on its caller id: the number the caller confirmed instead (one noted as said, never a key),
+ *  or null. */
+function leadNumber(facts: GhlFacts, plan: CallerPlan): string | null {
+  const phone = facts.contact?.confirmed === true ? facts.contact.callback_phone : null;
+  return plan.mode === "lead" && phone && phone !== plan.key ? phone : null;
+}
+
+/** "Callback number ending 0123", with "(as said, no country code)" after a number noted as said, so the
+ *  team knows to work out where to dial it. null without four digits. */
+function callbackLine(phone: string | null | undefined): string | null {
+  if (!phone || lastFour(phone).length !== 4) return null;
+  return `Callback number ending ${lastFour(phone)}${e164(phone) ? "" : " (as said, no country code)"}`;
+}
+
+function callerLine(plan: CallerPlan, level: string, keyedOnCallerId: boolean): string {
   if (plan.mode === "verified") return "Caller: existing customer, identity verified on the call";
-  if (plan.mode === "lead") return "Caller: new caller, name and number confirmed on the call";
+  if (plan.mode === "lead") {
+    return keyedOnCallerId
+      ? "Caller: new caller, name confirmed on the call; contact keyed on the caller ID"
+      : "Caller: new caller, name and number confirmed on the call";
+  }
   if (plan.status === "locked") return "Caller: matched by caller ID only; identity verification failed (locked)";
   return level === "phone_found"
     ? "Caller: matched by caller ID only; an account was found but identity was not verified"
@@ -524,7 +556,9 @@ export function renderNote(facts: GhlFacts, plan: CallerPlan, dashboardUrl?: str
   if (i.call_reason && (CALL_REASONS as readonly string[]).includes(i.call_reason)) {
     header.push(`reason ${i.call_reason}`);
   }
-  const lines = [header.join(" · "), callerLine(plan, facts.session?.level ?? "none")];
+  const contact = facts.contact?.confirmed === true ? facts.contact : null;
+  const keyedOnCallerId = plan.mode === "lead" && contact?.callback_phone !== plan.key;
+  const lines = [header.join(" · "), callerLine(plan, facts.session?.level ?? "none", keyedOnCallerId)];
   const own = plan.mode === "verified" || plan.mode === "lead";
   const summary = own && i.summary ? redactPII(i.summary).replace(/\s+/g, " ").trim() : "";
   if (summary) lines.push(`Summary: ${cap(summary, MAX_SUMMARY)}`);
@@ -533,9 +567,11 @@ export function renderNote(facts: GhlFacts, plan: CallerPlan, dashboardUrl?: str
   const rep = representative(facts);
   if (rep) lines.push(`Callback requested: ${reasonLabel(rep.reason)}`);
   if (emergency(facts)) lines.push("Emergency reported on the call");
-  const callback = [rep, emergency(facts)].find((e) => e?.callback_phone)?.callback_phone;
-  if (callback && lastFour(callback).length === 4) lines.push(`Callback number ending ${lastFour(callback)}`);
-  const contact = facts.contact?.confirmed === true ? facts.contact : null;
+  // The escalation's number; else, for a lead keyed on its caller id, the number the caller confirmed.
+  const callback = callbackLine(
+    [rep, emergency(facts)].find((e) => e?.callback_phone)?.callback_phone ?? leadNumber(facts, plan),
+  );
+  if (callback) lines.push(callback);
   if (own && contact?.email) {
     lines.push(
       contact.kind === "new_customer"
@@ -616,9 +652,8 @@ export function tasksFor(
   const rep = representative(facts);
   if (rep) {
     const created = Date.parse(rep.created_at);
-    const number = rep.callback_phone && lastFour(rep.callback_phone).length === 4
-      ? [`Callback number ending ${lastFour(rep.callback_phone)}`]
-      : [];
+    const line = callbackLine(rep.callback_phone);
+    const number = line ? [line] : [];
     out.callback = {
       title: `Call back: ${reasonLabel(rep.reason)}`,
       body: [
@@ -648,12 +683,15 @@ export function tasksFor(
     const loss = writtenDate(intake.loss_date) ?? intake.loss_date;
     const number = intake.kind === "claim" && intake.claim_number ? ` (${intake.claim_number})` : "";
     const filed = Date.parse(intake.confirmed_at ?? "");
+    // A lead keyed on its caller id: the number the caller confirmed for the call back, by its last four.
+    const callback = callbackLine(leadNumber(facts, plan));
     out.claim = {
       title: `New claim: ${intake.claim_type} loss on ${loss}${number}`,
       body: [
         intake.kind === "claim"
           ? "Filed by phone by a verified customer. Assign an adjuster."
           : "A new caller reported a loss. Call them back to set up the claim.",
+        ...(callback ? [callback] : []),
         ...tail,
       ].join("\n"),
       dueDate: nextBusinessDayDue(new Date(Number.isFinite(filed) ? filed : now.getTime())).toISOString(),

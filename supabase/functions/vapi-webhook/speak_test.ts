@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertNotEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertFalse, assertNotEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { CLAIM_DOCUMENTS, CLAIM_STATUSES, type Code, CODES, MAIN_LINE_SPOKEN } from "./enums.ts";
 import type { Claim } from "./types.ts";
 import { asksForSensitive } from "./redact.ts";
@@ -881,7 +881,92 @@ Deno.test("speakPhone reads three groups with a comma between them", () => {
   assertEquals(speakPhone("+16025550199"), spoken);
   assertEquals(speakPhone("6025550199"), spoken);
   assertEquals(speakPhone("(602) 555-0199"), spoken);
-  assertEquals(speakPhone("5550199"), "five five five zero one nine nine");
+  // without a "+" there is no country code: eleven digits are read as said, the 1 kept
+  assertEquals(speakPhone("16025550199"), "one six zero, two five five, five zero one, nine nine");
+  // any other number in groups of three, the last group up to four
+  assertEquals(speakPhone("5550199"), "five five five, zero one nine nine");
+});
+
+Deno.test("speakPhone: a number from abroad says plus and its country code; one noted as said keeps every digit", () => {
+  assertEquals(speakPhone("+442079460958"), "plus four four, two zero seven, nine four six, zero nine five eight");
+  assertEquals(speakPhone("+61491570156"), "plus six one, four nine one, five seven zero, one five six");
+  // country codes of one and of three digits (fictional national numbers)
+  assertEquals(speakPhone("+70005550100"), "plus seven, zero zero zero, five five five, zero one zero zero");
+  assertEquals(speakPhone("+353005550100"), "plus three five three, zero zero five, five five zero, one zero zero");
+  // noted as said (no country code): ten digits stay 3-3-4; others in threes with a last group up to four
+  assertEquals(speakPhone("9601550123"), "nine six zero, one five five, zero one two three");
+  assertEquals(speakPhone("02079460958"), "zero two zero, seven nine four, six zero nine, five eight");
+  assertEquals(speakPhone("10125550177"), "one zero one, two five five, five zero one, seven seven");
+  assertEquals(
+    speakPhone("123456789012345"),
+    "one two three, four five six, seven eight nine, zero one two, three four five",
+  );
+  for (const n of ["+442079460958", "9601550123", "02079460958", "+861012345678901"]) {
+    const said = speakPhone(n);
+    assertFalse(/\boh\b|\d/.test(said), said);
+    assertEquals(said.replace(/plus |,/g, "").split(" ").length, n.replace(/\D/g, "").length, n);
+  }
+});
+
+Deno.test("callback read-backs: a number from abroad or one noted as said, read in full, same wording", () => {
+  assertEquals(
+    sentenceFor("callback_updated", { digits: "+442079460958" }),
+    "Got it, plus four four, two zero seven, nine four six, zero nine five eight. Anything else I can help with?",
+  );
+  assertEquals(
+    sentenceFor("callback_updated", { digits: "9601550123" }),
+    "Got it, nine six zero, one five five, zero one two three. Anything else I can help with?",
+  );
+  // a number too short to be one is not read at all
+  assertEquals(sentenceFor("callback_updated", { digits: "123456" }), "Got it. Anything else I can help with?");
+  // rep_queued names a North American number by its last four; one from abroad or noted as said is read in
+  // full, the rest of the sentence unchanged
+  assertStringIncludes(
+    sentenceFor("rep_queued", { target: "given", digits: "0177" }),
+    "at the number you gave me, ending in zero one seven seven,",
+  );
+  assertStringIncludes(
+    sentenceFor("rep_queued", { target: "given", number: "+16025550177" }),
+    "at the number you gave me, ending in zero one seven seven,",
+  );
+  assertEquals(
+    sentenceFor("rep_queued", { target: "given", number: "+442079460958" }),
+    "I've passed this to our claims team. Someone will call you back at the number you gave me, plus four four, two zero seven, nine four six, zero nine five eight, within one business day. Anything else I can help with?",
+  );
+  assertStringIncludes(
+    sentenceFor("rep_queued", { target: "given", number: "5550177" }),
+    "at the number you gave me, five five five, zero one seven seven, within one business day.",
+  );
+  // too few digits to be a number: named by nothing rather than read
+  assertStringIncludes(
+    sentenceFor("rep_queued", { target: "given", number: "0177" }),
+    "at the number you gave me within",
+  );
+  for (const n of ["+861012345678901", "960155012345678"]) {
+    const queued = sentenceFor("rep_queued", { target: "given", number: n });
+    assert(spokenWords(queued) <= MAX_TURN_WORDS, queued);
+    assertFalse(/\boh\b|\d/.test(queued), queued);
+  }
+  assertEquals(
+    sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe", callback_phone: "+61491570156" }),
+    "Thanks! Just to confirm, that's Jane Doe, and the best number is plus six one, four nine one, five seven zero, one five six. Did I get that right?",
+  );
+  assertEquals(
+    sentenceFor("contact_readback", {
+      first_name: "Jane",
+      last_name: "Doe",
+      email: "jane.doe@gmail.com",
+      callback_phone: "9601550123",
+    }),
+    "Thanks! Let me read that back. Jane Doe, your email is J, A, N, E, dot, D, O, E, at gmail dot com, and the best number is nine six zero, one five five, zero one two three. Did I get that right?",
+  );
+  // the longest number E.164 allows still fits a turn, and the masking cue words stay
+  const longest = sentenceFor("callback_updated", { digits: "+861012345678901" });
+  assert(spokenWords(longest) <= MAX_TURN_WORDS, longest);
+  assertStringIncludes(
+    sentenceFor("contact_readback", { first_name: "Jane", last_name: "Doe", callback_phone: "+861012345678901" }),
+    "the best number is plus eight six,",
+  );
 });
 
 Deno.test("speakDate is pure: ordinals in words, year only when it differs", () => {
@@ -1047,9 +1132,13 @@ Deno.test("contact sentences: exact wording", () => {
     sentenceFor("contact_readback", { first_name: "Jane", last_name: "O'Brien", callback_phone: "6025550177" }),
     "Thanks! Just to confirm, that's Jane O'Brien, and the best number is six zero two, five five five, zero one seven seven. Did I get that right?",
   );
-  // a number that is not ten digits is left out rather than read wrong
+  // any number of 7 to 15 digits is read back; one too short to be a number is left out
   assertEquals(
     sentenceFor("contact_readback", { first_name: "Jane", last_name: "O'Brien", callback_phone: "5550177" }),
+    "Thanks! Just to confirm, that's Jane O'Brien, and the best number is five five five, zero one seven seven. Did I get that right?",
+  );
+  assertEquals(
+    sentenceFor("contact_readback", { first_name: "Jane", last_name: "O'Brien", callback_phone: "555017" }),
     "Thanks! Just to confirm, that's Jane O'Brien. Did I get that right?",
   );
   assertEquals(
@@ -1079,6 +1168,11 @@ Deno.test("contact sentences: exact wording", () => {
   assertEquals(
     sentenceFor("contact_needs_phone"),
     "Sorry, I can't see the number you're calling from. What's the best number to reach you?",
+  );
+  // the number passed was no number (too few digits) and there is no caller id to fall back on
+  assertEquals(
+    sentenceFor("contact_needs_phone", { unclear: true }),
+    "Sorry, I didn't quite get that number. What's the best number to reach you?",
   );
   assertEquals(
     sentenceFor("email_on_file"),
@@ -1321,6 +1415,7 @@ const CLOSINGS: [Code, Record<string, unknown> | undefined, string][] = [
   ["contact_invalid_email", undefined, "Could you spell it for me, letter by letter?"],
   ["contact_needs_name", undefined, "could I get your first and last name?"],
   ["contact_needs_phone", undefined, "What's the best number to reach you?"],
+  ["contact_needs_phone", { unclear: true }, "What's the best number to reach you?"],
   ["email_on_file", undefined, "Would you like that?"],
   ["not_pending", undefined, "What's your first and last name?"],
   ["not_pending", { verified: true }, "could you spell that email for me one more time, letter by letter?"],
@@ -1374,6 +1469,7 @@ Deno.test("every question for a date of birth, a phone number or an email is one
     ["not_verified", { level: "none" }],
     ["rep_queued_no_number", undefined],
     ["contact_needs_phone", undefined],
+    ["contact_needs_phone", { unclear: true }],
     ["claim_needs_lookup", undefined],
     ["claim_needs_phone", undefined],
     ["contact_invalid_email", undefined],
@@ -1557,6 +1653,14 @@ Deno.test("every spoken sentence fits one turn: sixty words at most, seventy-fiv
       email: "maryann.featherstonehaugh@outlook.com",
       callback_phone: "+16025550177",
     }],
+    // the longest number E.164 allows, read back with the longest name and address
+    ["contact_readback", {
+      first_name: "Mary Ann",
+      last_name: "Featherstonehaugh-Whitley",
+      email: "maryann.featherstonehaugh@outlook.com",
+      callback_phone: "+861012345678901",
+    }],
+    ["callback_updated", { digits: "+861012345678901" }],
     ["contact_saved_new", { first_name: "Mary Ann", has_email: false }],
     ["contact_saved_existing", { first_name: "Mary Ann" }],
     ["contact_retry", { has_email: true, has_phone: true }],

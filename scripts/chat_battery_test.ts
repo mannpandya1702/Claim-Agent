@@ -27,6 +27,8 @@ import { VapiError } from "./lib/vapi.ts";
 import {
   advance,
   buildAssistant,
+  callbackKey,
+  callbacksIn,
   type ChatFn,
   ConfigError,
   conversationKey,
@@ -48,6 +50,7 @@ import {
   parseTurn,
   patternText,
   type Persona,
+  personaPhones,
   PERSONAS,
   phonesIn,
   type PlanCtx,
@@ -378,10 +381,82 @@ Deno.test("escalate mock: new row, callback merge, verified account target, chan
   const after = stateAfter([{ tool: "escalate", args: {}, code: "rep_queued_no_number" }]);
   const merged = await answer("escalate", after, { callback_phone: "602 555 0177" });
   assertEquals(merged.message, say("callback_updated", { digits: "6025550177" }));
-  assertEquals((await answer("escalate", after, {})).code, "rep_already_queued");
+  // no number anywhere: a repeat asks for one, as tools.ts does, never promises the call
+  assertEquals((await answer("escalate", after, {})).code, "rep_queued_no_number");
+  const withNumber = stateAfter([
+    { tool: "escalate", args: {}, code: "rep_queued_no_number" },
+    { tool: "escalate", args: { callback_phone: "6025550177" }, code: "callback_updated" },
+  ]);
+  assertEquals((await answer("escalate", withNumber, {})).code, "rep_already_queued");
   const verified = await answer("escalate", stateAfter([TOBIAS_LOOKUP, TOBIAS_VERIFY]), {});
   assertEquals([verified.code, verified.data], ["rep_queued", { target: "account" }]);
   assertEquals((await answer("escalate", s, {}, { persona: persona("ghost") })).code, "rep_recorded");
+});
+
+Deno.test("escalate mock: a number from abroad, one said without a country code, and a caller id, as the server", async () => {
+  const phones = ["+61491570156", "9601550123", "+442079460958"];
+  const s = initialState();
+  // read in full on a first request, country code first (speak.ts repQueued)
+  const abroad = await answer("escalate", s, { callback_phone: "+61 491 570 156" }, { phones });
+  assertEquals([abroad.code, abroad.data], ["rep_queued", { target: "given", number: "+61491570156" }]);
+  assertEquals(abroad.message, say("rep_queued", { target: "given", number: "+61491570156" }));
+  const after = stateAfter([{ tool: "escalate", args: {}, code: "rep_queued_no_number" }]);
+  for (
+    const [said, stored] of [["9601550123", "9601550123"], ["960 155 0123", "9601550123"], [
+      "0044 20 7946 0958",
+      "+442079460958",
+    ]]
+  ) {
+    const r = await answer("escalate", after, { callback_phone: said }, { phones });
+    assertEquals(r.message, say("callback_updated", { digits: stored }), said);
+  }
+  // the phone line's caller id the persona stands in for is the target when no number is given
+  const callerId = await answer("escalate", s, {}, { persona: { callerId: "+61491570156" } });
+  assertEquals([callerId.code, callerId.data], ["rep_queued", { target: "caller_id" }]);
+  assertEquals(
+    (await answer("escalate", after, {}, { persona: { callerId: "+61491570156" } })).code,
+    "rep_already_queued",
+  );
+  // and the mock's reading of the arguments is the server's own function
+  assertEquals(callbackKey("+1 602 555 0177"), "6025550177");
+  assertEquals(callbackKey("+44 20 7946 0958"), "+442079460958");
+  assertEquals(callbackKey("555-017"), "");
+});
+
+Deno.test("spoken numbers: double and triple, plus and a country code, read as the caller said them", () => {
+  assertEquals(digitRuns("nine six zero one double five zero one two three"), ["9601550123"]);
+  assertEquals(digitRuns("6 0 2 triple 5 0 1 0 1"), ["6025550101"]);
+  assertEquals(callbacksIn("It's nine six zero, one five five, zero one two three."), ["9601550123"]);
+  assertEquals(callbacksIn("call me on +44 20 7946 0958"), ["+442079460958"]);
+  assertEquals(callbacksIn("plus six one, four nine one, five seven zero, one five six"), ["+61491570156"]);
+  assertEquals(callbacksIn("six zero two, five five five, zero one seven seven"), ["6025550177"]);
+  assertEquals(callbacksIn("March fourteenth, nineteen eighty-six"), []);
+  const p = PERSONAS.find((x) => x.id === "callback-double-digits");
+  assert(p && personaPhones(p).includes("9601550123"));
+});
+
+Deno.test("callback personas: the turns a model should take get the codes and read-backs the personas expect", async () => {
+  const ideal: Record<string, Obj[]> = {
+    "callback-international": [{ reason: "representative_requested" }],
+    "callback-as-said": [{ reason: "representative_requested" }, { callback_phone: "9601550123" }],
+    "callback-double-digits": [{ reason: "representative_requested" }, { callback_phone: "9601550123" }],
+  };
+  for (const [id, calls] of Object.entries(ideal)) {
+    const p = persona(id);
+    assertEquals(p.turns.length, calls.length, id);
+    const done: { tool: string; args: Obj; code: string }[] = [];
+    for (const [i, args] of calls.entries()) {
+      const turn = p.turns[i];
+      const r = await answer("escalate", stateAfter(done), args, { persona: p, phones: personaPhones(p) });
+      assertEquals(r.code, turn.codes?.[0], `${id} t${i + 1}`);
+      assertEquals(turn.args?.escalate?.(args) ?? null, null, `${id} t${i + 1} args`);
+      for (const re of turn.heardSays ?? []) assertMatch(r.message, re, `${id} t${i + 1}`);
+      for (const re of [...(p.heardNever ?? []), ...(turn.heardNever ?? [])]) {
+        assertFalse(re.test(r.message), `${id} t${i + 1}: ${r.message}`);
+      }
+      done.push({ tool: "escalate", args, code: r.code });
+    }
+  }
 });
 
 Deno.test("info email mock: verification first, then sent once, Teague has no address, bad topic", async () => {
@@ -661,6 +736,52 @@ Deno.test("start_claim mock: who may report a loss comes from the call's state, 
     { tool: "confirm_contact", args: { correct: true }, code: "contact_saved_new" },
   ];
   assertEquals(await code(stateAfter(noNumber)), "claim_needs_phone");
+});
+
+Deno.test("mocks mirror the callback number rules: read back in full, asked once, never promised without one", async () => {
+  // a first escalate reads a number from abroad, or one noted as said, in full; a North American one by its last four
+  const phones = ["6025550177", "+442079460958", "9601550123"];
+  const queued = async (n: string) =>
+    (await answer("escalate", initialState(), { callback_phone: n }, { phones })).message;
+  assertStringIncludes(await queued("602 555 0177"), "the number you gave me, ending in zero one seven seven,");
+  assertStringIncludes(
+    await queued("+44 20 7946 0958"),
+    "the number you gave me, plus four four, two zero seven, nine four six, zero nine five eight,",
+  );
+  assertStringIncludes(
+    await queued("9601550123"),
+    "the number you gave me, nine six zero, one five five, zero one two three,",
+  );
+  // a capture whose number came out wrong (a chat has no caller id) asks once, as the server does
+  const persona = { contacts: [{ first: "Jordan", last: "Ellis", email: "jordan.ellis@gmail.com" }] };
+  const cut = { ...JORDAN, callback_phone: "96015" };
+  const ask = await answer("capture_contact", stateAfter(NOT_FOUND_TWICE), cut, { persona });
+  assertEquals([ask.code, ask.message], ["contact_needs_phone", say("contact_needs_phone", { unclear: true })]);
+  const asked = stateAfter([...NOT_FOUND_TWICE, { tool: "capture_contact", args: cut, code: "contact_needs_phone" }]);
+  assertEquals((await answer("capture_contact", asked, cut, { persona })).code, "contact_readback");
+  // with a caller id to fall back on, nothing is asked
+  const withCallerId = { persona: { ...persona, callerId: "+61491570156" } };
+  assertEquals(
+    (await answer("capture_contact", stateAfter(NOT_FOUND_TWICE), cut, withCallerId)).code,
+    "contact_readback",
+  );
+  // confirm_claim files a new caller's details only with a number to call; asked for, the yes resumes the claim
+  const filed = stateAfter([...NEW_CALLER_CONFIRMED, PIPE_READBACK]);
+  assertEquals((await answer("confirm_claim", filed, { correct: true })).code, "claim_intake_saved");
+  const lost = [
+    ...NEW_CALLER_CONFIRMED,
+    PIPE_READBACK,
+    { tool: "capture_contact", args: { ...JORDAN, callback_phone: "" }, code: "contact_readback" },
+    { tool: "confirm_contact", args: { correct: true }, code: "contact_saved_new" },
+  ];
+  assertEquals((await answer("confirm_claim", stateAfter(lost), { correct: true })).code, "claim_needs_phone");
+  const askedForNumber = stateAfter([
+    ...lost,
+    { tool: "confirm_claim", args: { correct: true }, code: "claim_needs_phone" },
+    { tool: "capture_contact", args: { ...JORDAN, callback_phone: "6025550177" }, code: "contact_readback" },
+  ]);
+  const saved = await answer("confirm_contact", askedForNumber, { correct: true });
+  assertEquals(saved.message, say("contact_saved_new", { first_name: "Jordan", resume_claim: true }));
 });
 
 Deno.test("mocks: a loss told before verification or the details is taken down on the next yes", async () => {
@@ -1786,6 +1907,12 @@ Deno.test("personas use 555 numbers only, unique ids, real tools, and fit the de
   }
   const bad: Persona = { id: "x", title: "x", turns: [{ user: "call me at 602 867 5309" }] };
   assertEquals(fictionProblems([bad]), ["x: 6028675309 is not a 555 number"]);
+  // the fictional numbers from abroad are allowed; any other is not, a caller id included (this one is in
+  // the UK's drama range too, but not on the list)
+  const abroad: Persona = { id: "y", title: "y", turns: [{ user: "+44 20 7946 0958 or 9601550123" }] };
+  assertEquals(fictionProblems([abroad]), []);
+  const unlisted: Persona = { id: "z", title: "z", callerId: "+447700900123", turns: [{ user: "hi" }] };
+  assertEquals(fictionProblems([unlisted]), ["z: 447700900123 is not a 555 number"]);
 });
 
 Deno.test("spoken and written digits are both read as numbers", () => {

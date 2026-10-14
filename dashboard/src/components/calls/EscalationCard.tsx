@@ -36,6 +36,8 @@ import {
   formatPhone,
   formatRelative,
   formatTime,
+  isAsSaid,
+  isDialable,
   maskPhone,
   minutesBetween,
 } from "@/lib/format";
@@ -148,6 +150,10 @@ export function EscalationCard({
     : fullCallback
       ? formatPhone(fullCallback)
       : (e.callback_phone_masked ?? null);
+  // A tel: link only for a number with its country code: one noted as said would be dialled as a local
+  // number wherever the phone is, so it shows as text with a note that the country is still to be found.
+  const dialable = !maskCallback && isDialable(fullCallback);
+  const asSaid = !maskCallback && isAsSaid(fullCallback);
 
   return (
     <article
@@ -196,7 +202,7 @@ export function EscalationCard({
           <dd className="mt-0.5">
             {callbackShown ? (
               <>
-                {maskCallback || !e.callback_phone ? (
+                {!dialable ? (
                   <span className="inline-flex items-center gap-1.5 whitespace-nowrap font-medium tabular text-ink-1">
                     <Phone className="size-3.5 shrink-0 text-ink-3" aria-hidden="true" />
                     {callbackShown}
@@ -210,7 +216,10 @@ export function EscalationCard({
                     {callbackShown}
                   </a>
                 )}
-                <span className="block text-xs text-ink-3">{CALLBACK_SOURCE_LABELS[e.callback_source ?? "none"]}</span>
+                <span className="block text-xs text-ink-3">
+                  {CALLBACK_SOURCE_LABELS[e.callback_source ?? "none"]}
+                  {asSaid && " · as said, no country code"}
+                </span>
               </>
             ) : (
               <span className="text-ink-2">No number{e.callback_source === "none" ? " given" : ""}</span>

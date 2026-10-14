@@ -820,6 +820,41 @@ Deno.test("function tools: the server tools, flat non-strict schemas, Bearer ser
   assert(start.includes("911") && start.includes("988"));
 });
 
+// A live call: a caller from abroad gave a callback number without a country code, it was refused, and the
+// model said it "didn't catch 1 digit" after "double 6". A callback number is taken as the caller gives it.
+Deno.test("callback numbers: the tools take any number as said; every prompt counts double digits and never refuses one", () => {
+  for (const name of ["escalate", "capture_contact"]) {
+    const d: string = withRep.tools[name].function.parameters.properties.callback_phone.description;
+    assertMatch(d, /exactly as (they|the caller) said it/, name);
+    assertMatch(d, /digits only, with a leading \+ and the country code if they gave one/, name);
+    assertMatch(
+      d,
+      /A number from any country and of any length is taken: never reject or question one for either\./,
+      name,
+    );
+    // live battery: "I'm calling from Australia ... call me back on this number" was passed as "+61"
+    assertMatch(d, /Never a country code on its own, or one worked out from a country they mention/, name);
+    assert(!/ten digits/.test(d), `${name}: still asks for ten digits`);
+  }
+  // "call me back on this number" is caller id on the phone line (a web call asks for the digits)
+  assertMatch(
+    withRep.tools.escalate.function.parameters.properties.callback_phone.description,
+    /when they ask to be called back on the number they are calling from, leave it out\./,
+  );
+  for (const key of ASSISTANT_KEYS) {
+    const prompt = Deno.readTextFileSync(promptPath(key));
+    // rule 3 keeps its number and its pinned read-back example, and gains the callback line
+    assertMatch(prompt, /^3\. Phone numbers: /m, key);
+    assertMatch(prompt, /Count "double five" as two digits and "triple five" as three\./, key);
+    assertMatch(
+      prompt,
+      /A number to call them back on is taken as they give it, from any country and of any length: pass it to the tool, with a \+ and the country code if they said one, and the tool reads it back for them to confirm; never tell a caller a number is not valid because it is international\./,
+      key,
+    );
+    assert(!/ten-digit callback|callback number must be|only (?:US|U\.S\.|American) numbers/i.test(prompt), key);
+  }
+});
+
 // Wording a warm person at a claims desk would never use on the phone.
 const OFFICE_WORDING = [
   /for security purposes/i,
@@ -1086,6 +1121,8 @@ Deno.test("reporting a loss: the contact assistants carry both claim tools and t
     // a loss told before verification or the details is taken down on a yes, from what was said
     assertMatch(prompt, /When a sentence asks whether to take down that claim now, a yes means call start_claim/, key);
     assertMatch(prompt, /If it asks for the best number to reach them, ask nothing else/, key);
+    // confirm_claim asks for the number too when the one start_claim saw is gone (claim_needs_phone)
+    assertMatch(prompt, /confirm_claim's sentence can ask for that number too: handle it the same way/, key);
   }
   // Concierge keeps a loss report itself rather than handing it to Knowledge
   assertMatch(withRep.assistants.concierge.prompt, /It is never for .*for reporting a loss/);
@@ -1374,6 +1411,7 @@ Deno.test("endpointing: every question that asks for a number waits for a partia
     ["not_found_final", sentenceFor("not_found_final")],
     ["rep_queued_no_number", sentenceFor("rep_queued_no_number")],
     ["contact_needs_phone", sentenceFor("contact_needs_phone")],
+    ["contact_needs_phone (a number that came out wrong)", sentenceFor("contact_needs_phone", { unclear: true })],
     ["claim_needs_lookup", sentenceFor("claim_needs_lookup")],
     ["claim_needs_phone", sentenceFor("claim_needs_phone")],
     [

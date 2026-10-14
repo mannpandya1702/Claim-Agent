@@ -102,25 +102,66 @@ export function formatCount(value: number | string | null | undefined): string {
 // Phone numbers
 // ---------------------------------------------------------------------------------------------
 
-/** "+16025550101" -> "+1 602 ... 0101". Lists mask; only the call detail page shows the full number. */
+// A callback number is stored as given (0011_intl_callbacks.sql): "+16025550101" (North American),
+// "+442079460958" (international, E.164) or "9601550123" (noted as the caller said it, no country code).
+// Only a "+1" number is North American: bare digits are a number noted as said, whatever their shape
+// ("6025550177" from a caller abroad), so they are never shown with "+1" or dialled as written (the same
+// rule as the generated *_masked columns).
+
+/** The ten digits of a North American number stored with its "+1", or null. */
+function northAmerican(phone: string): string | null {
+  const text = phone.trim();
+  const digits = text.replace(/\D/g, "");
+  return text.startsWith("+") && /^1[2-9]\d{2}[2-9]\d{6}$/.test(digits) ? digits.slice(1) : null;
+}
+
+/** A number written by hand with its punctuation ("(602) 555-0100", such as an env value): its ten digits
+ *  when they could be North American, else null. Bare digits are never one (noted as said). */
+function handWritten(phone: string): string | null {
+  const text = phone.trim();
+  if (text.startsWith("+") || /^\d+$/.test(text)) return null;
+  const digits = text.replace(/\D/g, "");
+  const ten = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits.length === 10 ? digits : null;
+  return ten && /^[2-9]\d{2}[2-9]\d{6}$/.test(ten) ? ten : null;
+}
+
+/** Whether a stored number can be dialled as written: E.164, "+" and 8 to 15 digits. A number noted as said
+ *  has no country code, so a tel: link would dial it as a local number wherever the phone happens to be. */
+export function isDialable(phone: string | null | undefined): boolean {
+  return typeof phone === "string" && /^\+[1-9]\d{7,14}$/.test(phone.trim());
+}
+
+/** Whether a stored number was noted as the caller said it, with no country code (7 to 15 bare digits). */
+export function isAsSaid(phone: string | null | undefined): boolean {
+  return typeof phone === "string" && /^\d{7,15}$/.test(phone.trim());
+}
+
+/** "+16025550101" -> "+1 602 ... 0101"; any other number -> "... 0958". Lists mask; only the call detail page
+ *  shows the full number. */
 export function maskPhone(phone: string | null | undefined): string {
   if (!phone) return DASH;
+  const nanp = northAmerican(phone);
+  if (nanp) return `+1 ${nanp.slice(0, 3)} ... ${nanp.slice(-4)}`;
   const digits = phone.replace(/\D/g, "");
-  if (digits.length === 11 && digits.startsWith("1")) return `+1 ${digits.slice(1, 4)} ... ${digits.slice(-4)}`;
-  if (digits.length === 10) return `+1 ${digits.slice(0, 3)} ... ${digits.slice(-4)}`;
   if (digits.length >= 4) return `... ${digits.slice(-4)}`;
   return "...";
 }
 
-/** "+16025550101" -> "+1 602 555 0101" (detail page only). Anything else is returned as given. */
+/** The full number (detail page only): "+16025550101" -> "+1 602 555 0101"; an international number as
+ *  stored ("+442079460958"); one noted as said in groups of three, the last group up to four ("960 155 0123"),
+ *  never with "+1". A number written by hand ("(602) 555-0100") reads as North American when it could be;
+ *  anything else is returned as given. */
 export function formatPhone(phone: string | null | undefined): string {
   if (!phone) return DASH;
-  const digits = phone.replace(/\D/g, "");
-  if (digits.length === 11 && digits.startsWith("1")) {
-    return `+1 ${digits.slice(1, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`;
-  }
-  if (digits.length === 10) return `+1 ${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6)}`;
-  return phone;
+  const nanp = northAmerican(phone) ?? handWritten(phone);
+  if (nanp) return `+1 ${nanp.slice(0, 3)} ${nanp.slice(3, 6)} ${nanp.slice(6)}`;
+  if (!isAsSaid(phone)) return phone;
+  const digits = phone.trim();
+  const groups: string[] = [];
+  let i = 0;
+  for (; digits.length - i > 4; i += 3) groups.push(digits.slice(i, i + 3));
+  groups.push(digits.slice(i));
+  return groups.join(" ");
 }
 
 // ---------------------------------------------------------------------------------------------

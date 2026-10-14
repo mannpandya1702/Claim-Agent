@@ -1058,7 +1058,7 @@ Deno.test("outbox: 429 keeps the row pending with a masked error; the next run d
   const h = harness({
     airtable: () =>
       limited
-        ? json({ error: { type: "RATE_LIMIT", message: "Too many requests for account 98765432101" } }, 429)
+        ? json({ error: { type: "RATE_LIMIT", message: "Too many requests for account 9876543210987654" } }, 429)
         : json({ records: [{ id: "recOK" }] }),
   });
   await queued(h.store, CALL_A);
@@ -1069,7 +1069,7 @@ Deno.test("outbox: 429 keeps the row pending with a masked error; the next run d
   assertEquals([row.attempts, row.delivered_at], [1, null]);
   assertStringIncludes(row.last_error, "airtable 429");
   assertStringIncludes(row.last_error, "[digits]");
-  assertFalse(row.last_error.includes("98765432101"));
+  assertFalse(row.last_error.includes("9876543210987654"));
 
   limited = false;
   h.advance(MINUTE);
@@ -1102,7 +1102,7 @@ Deno.test("outbox: 401/403/404 pause delivery: nothing is spent, the run stops, 
       airtable: () =>
         refused
           ? json(
-            { error: { type: "AUTHENTICATION_REQUIRED", message: "Invalid token for account 98765432101" } },
+            { error: { type: "AUTHENTICATION_REQUIRED", message: "Invalid token for account 9876543210987654" } },
             status,
           )
           : json({ records: [{ id: "recOK" }] }),
